@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "datasherlock-harness"
+version = "0.1.0"
+description = "A controlled harness for diagnosing SaaS metric anomalies."
+requires-python = ">=3.11"
+dependencies = [
+    "duckdb>=1.0,<2",
+    "fastapi>=0.115,<1",
+    "psycopg[binary]>=3.2,<4",
+    "streamlit>=1.38,<2",
+    "uvicorn[standard]>=0.30,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<9",
+    "ruff>=0.6,<1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
