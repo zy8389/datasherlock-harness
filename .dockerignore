@@ -1,0 +1,13 @@
+.git
+.gitignore
+.env
+.venv
+__pycache__
+*.py[codz]
+.pytest_cache
+.ruff_cache
+tests
+docs
+experiments
+benchmark
+data
