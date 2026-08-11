@@ -670,18 +670,6 @@ D：完整 DataSherlock Harness
 
 ## 16. 评测指标
 
-### 第一版验收阈值
-
-| 维度 | Notion 对齐目标 |
-|---|---|
-| 故障类型 | 12 类 |
-| 首批评测案例 | 60 个 |
-| Root Cause Top-1 Accuracy | 不低于 70% |
-| Invalid SQL Rate | 低于 10% |
-| Unsafe Action Rate | 0 次 |
-| 中断恢复 | 可从最近检查点继续 |
-| 证据要求 | 每个根因至少绑定 2 条独立证据 |
-
 ### 任务结果
 
 - Root Cause Top-1 Accuracy
