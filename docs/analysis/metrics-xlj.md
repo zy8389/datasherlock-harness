@@ -2,8 +2,6 @@
 
 
 
-> 覆盖说明：MVP 共定义 6 个核心指标。本文件当前记录 `daily_active_users`、`new_users` 和 `paid_users`；`ai_task_count`、`average_session_duration`、`conversion_rate` 的指标分析尚待补齐。
-
 ## 1. daily_active_users（日活用户数）
 
 
