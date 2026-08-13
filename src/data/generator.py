@@ -1,0 +1,201 @@
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import duckdb
+import numpy as np
+import pandas as pd
+
+
+EVENT_NAMES = [
+    "login",
+    "create_project",
+    "upload_file",
+    "run_ai_task",
+    "export_result",
+    "invite_member",
+]
+
+REGIONS = ["CN", "US", "EU", "SEA", "JP"]
+DEVICES = ["web", "ios", "android"]
+CHANNELS = ["organic", "ads", "referral", "partner"]
+USER_TYPES = ["free", "trial", "paid"]
+PLANS = ["free", "basic", "pro", "enterprise"]
+
+
+def generate_users(user_count: int, start_date: pd.Timestamp, days: int, rng: np.random.Generator) -> pd.DataFrame:
+    register_offsets = rng.integers(0, days, size=user_count)
+
+    return pd.DataFrame(
+        {
+            "user_id": np.arange(1, user_count + 1),
+            "register_time": start_date + pd.to_timedelta(register_offsets, unit="D"),
+            "region": rng.choice(REGIONS, size=user_count, p=[0.35, 0.25, 0.2, 0.15, 0.05]),
+            "device_type": rng.choice(DEVICES, size=user_count, p=[0.5, 0.25, 0.25]),
+            "acquisition_channel": rng.choice(CHANNELS, size=user_count),
+            "user_type": rng.choice(USER_TYPES, size=user_count, p=[0.65, 0.2, 0.15]),
+        }
+    )
+
+
+def generate_events(
+    users: pd.DataFrame,
+    event_count: int,
+    start_date: pd.Timestamp,
+    days: int,
+    rng: np.random.Generator,
+) -> pd.DataFrame:
+    user_ids = rng.choice(users["user_id"].to_numpy(), size=event_count)
+    event_offsets = rng.integers(0, days, size=event_count)
+    seconds = rng.integers(0, 24 * 60 * 60, size=event_count)
+
+    user_device_map = users.set_index("user_id")["device_type"]
+    device_type = pd.Series(user_ids).map(user_device_map).to_numpy()
+
+    return pd.DataFrame(
+        {
+            "event_id": np.arange(1, event_count + 1),
+            "user_id": user_ids,
+            "event_time": start_date
+            + pd.to_timedelta(event_offsets, unit="D")
+            + pd.to_timedelta(seconds, unit="s"),
+            "event_name": rng.choice(EVENT_NAMES, size=event_count, p=[0.35, 0.12, 0.16, 0.22, 0.1, 0.05]),
+            "session_id": [f"s_{sid}" for sid in rng.integers(1, event_count // 3 + 2, size=event_count)],
+            "device_type": device_type,
+            "duration_seconds": rng.gamma(shape=2.0, scale=120.0, size=event_count).round(2),
+            "batch_id": [f"batch_{d:03d}" for d in event_offsets],
+            "app_version": rng.choice(["1.0.0", "1.1.0", "1.2.0", "2.0.0"], size=event_count),
+        }
+    )
+
+
+def generate_subscriptions(users: pd.DataFrame, start_date: pd.Timestamp, days: int, rng: np.random.Generator) -> pd.DataFrame:
+    paid_users = users.loc[users["user_type"].isin(["trial", "paid"]), "user_id"].to_numpy()
+    sub_count = len(paid_users)
+
+    start_offsets = rng.integers(0, max(days - 30, 1), size=sub_count)
+    plan_type = rng.choice(PLANS[1:], size=sub_count, p=[0.55, 0.35, 0.10])
+    fee_map = {"basic": 19.0, "pro": 49.0, "enterprise": 199.0}
+
+    return pd.DataFrame(
+        {
+            "subscription_id": np.arange(1, sub_count + 1),
+            "user_id": paid_users,
+            "plan_type": plan_type,
+            "start_time": start_date + pd.to_timedelta(start_offsets, unit="D"),
+            "end_time": pd.NaT,
+            "subscription_status": rng.choice(["active", "cancelled"], size=sub_count, p=[0.85, 0.15]),
+            "monthly_fee": [fee_map[p] for p in plan_type],
+        }
+    )
+
+
+def generate_experiment_assignments(
+    users: pd.DataFrame,
+    start_date: pd.Timestamp,
+    rng: np.random.Generator,
+) -> pd.DataFrame:
+    sampled_users = rng.choice(users["user_id"].to_numpy(), size=int(len(users) * 0.4), replace=False)
+
+    return pd.DataFrame(
+        {
+            "experiment_id": "exp_onboarding_v1",
+            "user_id": sampled_users,
+            "variant": rng.choice(["control", "treatment"], size=len(sampled_users), p=[0.5, 0.5]),
+            "assigned_time": start_date + pd.to_timedelta(rng.integers(0, 30, size=len(sampled_users)), unit="D"),
+        }
+    )
+
+
+def generate_daily_metrics(
+    users: pd.DataFrame,
+    events: pd.DataFrame,
+    subscriptions: pd.DataFrame,
+    start_date: pd.Timestamp,
+    days: int,
+) -> pd.DataFrame:
+    events = events.copy()
+    events["metric_date"] = events["event_time"].dt.date
+
+    users = users.copy()
+    users["metric_date"] = users["register_time"].dt.date
+
+    subscriptions = subscriptions.copy()
+    subscriptions["metric_date"] = subscriptions["start_time"].dt.date
+
+    all_dates = pd.DataFrame({"metric_date": pd.date_range(start_date, periods=days).date})
+
+    dau = events.groupby("metric_date")["user_id"].nunique().rename("daily_active_users")
+    new_users = users.groupby("metric_date")["user_id"].nunique().rename("new_users")
+    paid_users = subscriptions.groupby("metric_date")["user_id"].nunique().rename("paid_users")
+    ai_task_count = events.loc[events["event_name"] == "run_ai_task"].groupby("metric_date")["event_id"].count().rename("ai_task_count")
+    avg_duration = events.groupby("metric_date")["duration_seconds"].mean().rename("average_session_duration")
+
+    metrics = all_dates.merge(dau, on="metric_date", how="left")
+    metrics = metrics.merge(new_users, on="metric_date", how="left")
+    metrics = metrics.merge(paid_users, on="metric_date", how="left")
+    metrics = metrics.merge(ai_task_count, on="metric_date", how="left")
+    metrics = metrics.merge(avg_duration, on="metric_date", how="left")
+
+    metrics = metrics.fillna(0)
+    metrics["conversion_rate"] = np.where(
+        metrics["daily_active_users"] > 0,
+        metrics["paid_users"] / metrics["daily_active_users"],
+        0,
+    )
+
+    return metrics
+
+
+def write_outputs(output_dir: Path, tables: dict[str, pd.DataFrame]) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for table_name, df in tables.items():
+        df.to_parquet(output_dir / f"{table_name}.parquet", index=False)
+
+    db_path = output_dir / "datasherlock.duckdb"
+    with duckdb.connect(str(db_path)) as conn:
+        for table_name, df in tables.items():
+            conn.register(table_name, df)
+            conn.execute(f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM {table_name}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--users", type=int, default=20_000)
+    parser.add_argument("--days", type=int, default=180)
+    parser.add_argument("--events", type=int, default=1_000_000)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--start-date", type=str, default="2026-01-01")
+    parser.add_argument("--output-dir", type=Path, default=Path("data/processed"))
+    args = parser.parse_args()
+
+    rng = np.random.default_rng(args.seed)
+    start_date = pd.Timestamp(args.start_date)
+
+    users = generate_users(args.users, start_date, args.days, rng)
+    events = generate_events(users, args.events, start_date, args.days, rng)
+    subscriptions = generate_subscriptions(users, start_date, args.days, rng)
+    experiment_assignments = generate_experiment_assignments(users, start_date, rng)
+    daily_metrics = generate_daily_metrics(users, events, subscriptions, start_date, args.days)
+
+    tables = {
+        "users": users,
+        "events": events,
+        "subscriptions": subscriptions,
+        "experiment_assignments": experiment_assignments,
+        "daily_metrics": daily_metrics,
+    }
+
+    write_outputs(args.output_dir, tables)
+
+    print("SaaS mock data generated successfully.")
+    print(f"Output directory: {args.output_dir}")
+    print(f"Users: {len(users)}")
+    print(f"Events: {len(events)}")
+    print(f"Daily metrics rows: {len(daily_metrics)}")
+
+
+if __name__ == "__main__":
+    main()
