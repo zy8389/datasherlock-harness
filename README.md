@@ -1,7 +1,7 @@
 # DataSherlock Harness
 
 > 面向数据仓库指标异常的自主诊断、验证与恢复执行框架  
-> 项目核心是 **Agent Harness**，不是通用问答，也不是以 RAG 为中心的聊天机器人。
+> 项目核心是 **Agent Harness**。
 
 ---
 

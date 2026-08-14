@@ -1,0 +1,79 @@
+version: 1
+timezone: UTC
+date_grain: day
+
+metrics:
+  - id: dau
+    name: Daily Active Users
+    description: Distinct users with at least one event on the metric date.
+    source_table: events
+    time_column: event_time
+    entity_column: user_id
+    aggregation: count_distinct
+    formula: COUNT(DISTINCT user_id)
+    unit: users
+
+  - id: new_users
+    name: New Users
+    description: Distinct users whose registration date is the metric date.
+    source_table: users
+    time_column: register_time
+    entity_column: user_id
+    aggregation: count_distinct
+    formula: COUNT(DISTINCT user_id)
+    unit: users
+
+  - id: paid_users
+    name: Paid Users
+    description: Distinct users with a valid subscription interval on the metric date.
+    source_table: subscriptions
+    time_column: start_time
+    entity_column: user_id
+    aggregation: count_distinct
+    validity:
+      start_column: start_time
+      end_column: end_time
+      end_operator: ">"
+      null_end_means_valid: true
+    formula: >-
+      COUNT(DISTINCT user_id) WHERE start_time <= metric_date
+      AND (end_time IS NULL OR end_time > metric_date)
+    unit: users
+
+  - id: task_count
+    name: AI Task Count
+    description: Number of AI task execution events on the metric date.
+    source_table: events
+    time_column: event_time
+    entity_column: event_id
+    aggregation: count
+    filters:
+      event_name: run_ai_task
+    formula: COUNT(event_id) WHERE event_name = 'run_ai_task'
+    unit: events
+
+  - id: average_session_duration
+    name: Average Session Duration
+    description: Average sum of event durations per user session on the metric date.
+    source_table: events
+    time_column: event_time
+    group_by:
+      - user_id
+      - session_id
+    aggregation: average_after_group_sum
+    formula: AVG(SUM(duration_seconds) GROUP BY user_id, session_id)
+    unit: seconds
+
+  - id: conversion_rate
+    name: Paid User Conversion Rate
+    description: Active paid users divided by daily active users.
+    source_table: daily_metrics
+    dependencies:
+      - paid_users
+      - dau
+    aggregation: ratio
+    numerator: paid_users
+    denominator: dau
+    zero_denominator: 0
+    formula: paid_users / dau
+    unit: ratio
