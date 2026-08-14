@@ -17,6 +17,8 @@ EVENT_NAMES = [
     "invite_member",
 ]
 
+SECONDS_PER_DAY = 24 * 60 * 60
+
 REGIONS = ["CN", "US", "EU", "SEA", "JP"]
 DEVICES = ["web", "ios", "android"]
 CHANNELS = ["organic", "ads", "referral", "partner"]
@@ -47,19 +49,22 @@ def generate_events(
     rng: np.random.Generator,
 ) -> pd.DataFrame:
     user_ids = rng.choice(users["user_id"].to_numpy(), size=event_count)
-    event_offsets = rng.integers(0, days, size=event_count)
-    seconds = rng.integers(0, 24 * 60 * 60, size=event_count)
 
     user_device_map = users.set_index("user_id")["device_type"]
+    user_register_map = users.set_index("user_id")["register_time"]
     device_type = pd.Series(user_ids).map(user_device_map).to_numpy()
+    register_times = pd.Series(user_ids).map(user_register_map)
+    register_offsets = ((register_times - start_date) / pd.Timedelta(seconds=1)).to_numpy(dtype=np.int64)
+    remaining_seconds = days * SECONDS_PER_DAY - register_offsets - 1
+    event_delays = np.array([rng.integers(0, remaining + 1) for remaining in remaining_seconds])
+    event_times = register_times + pd.to_timedelta(event_delays, unit="s")
+    event_offsets = ((event_times - start_date) / pd.Timedelta(days=1)).to_numpy(dtype=np.int64)
 
     return pd.DataFrame(
         {
             "event_id": np.arange(1, event_count + 1),
             "user_id": user_ids,
-            "event_time": start_date
-            + pd.to_timedelta(event_offsets, unit="D")
-            + pd.to_timedelta(seconds, unit="s"),
+            "event_time": event_times,
             "event_name": rng.choice(EVENT_NAMES, size=event_count, p=[0.35, 0.12, 0.16, 0.22, 0.1, 0.05]),
             "session_id": [f"s_{sid}" for sid in rng.integers(1, event_count // 3 + 2, size=event_count)],
             "device_type": device_type,
@@ -74,18 +79,31 @@ def generate_subscriptions(users: pd.DataFrame, start_date: pd.Timestamp, days: 
     paid_users = users.loc[users["user_type"].isin(["trial", "paid"]), "user_id"].to_numpy()
     sub_count = len(paid_users)
 
-    start_offsets = rng.integers(0, max(days - 30, 1), size=sub_count)
+    user_register_map = users.set_index("user_id")["register_time"]
+    register_times = pd.Series(paid_users).map(user_register_map)
+    register_offsets = ((register_times - start_date) / pd.Timedelta(days=1)).to_numpy(dtype=np.int64)
+    available_days = days - 1 - register_offsets
+    start_offsets = register_offsets + np.array(
+        [rng.integers(0, available + 1) for available in available_days]
+    )
     plan_type = rng.choice(PLANS[1:], size=sub_count, p=[0.55, 0.35, 0.10])
     fee_map = {"basic": 19.0, "pro": 49.0, "enterprise": 199.0}
+    subscription_status = rng.choice(["active", "cancelled"], size=sub_count, p=[0.85, 0.15])
+    start_times = start_date + pd.to_timedelta(start_offsets, unit="D")
+    cancellation_days = np.array(
+        [rng.integers(1, max(1, min(30, days - offset)) + 1) for offset in start_offsets]
+    )
+    end_times = start_times + pd.to_timedelta(cancellation_days, unit="D")
+    end_times = pd.Series(end_times).where(subscription_status == "cancelled", pd.NaT)
 
     return pd.DataFrame(
         {
             "subscription_id": np.arange(1, sub_count + 1),
             "user_id": paid_users,
             "plan_type": plan_type,
-            "start_time": start_date + pd.to_timedelta(start_offsets, unit="D"),
-            "end_time": pd.NaT,
-            "subscription_status": rng.choice(["active", "cancelled"], size=sub_count, p=[0.85, 0.15]),
+            "start_time": start_times,
+            "end_time": end_times,
+            "subscription_status": subscription_status,
             "monthly_fee": [fee_map[p] for p in plan_type],
         }
     )
@@ -94,16 +112,24 @@ def generate_subscriptions(users: pd.DataFrame, start_date: pd.Timestamp, days: 
 def generate_experiment_assignments(
     users: pd.DataFrame,
     start_date: pd.Timestamp,
+    days: int,
     rng: np.random.Generator,
 ) -> pd.DataFrame:
     sampled_users = rng.choice(users["user_id"].to_numpy(), size=int(len(users) * 0.4), replace=False)
+    user_register_map = users.set_index("user_id")["register_time"]
+    register_times = pd.Series(sampled_users).map(user_register_map)
+    register_offsets = ((register_times - start_date) / pd.Timedelta(days=1)).to_numpy(dtype=np.int64)
+    available_days = days - 1 - register_offsets
+    assignment_offsets = register_offsets + np.array(
+        [rng.integers(0, available + 1) for available in available_days]
+    )
 
     return pd.DataFrame(
         {
             "experiment_id": "exp_onboarding_v1",
             "user_id": sampled_users,
             "variant": rng.choice(["control", "treatment"], size=len(sampled_users), p=[0.5, 0.5]),
-            "assigned_time": start_date + pd.to_timedelta(rng.integers(0, 30, size=len(sampled_users)), unit="D"),
+            "assigned_time": start_date + pd.to_timedelta(assignment_offsets, unit="D"),
         }
     )
 
@@ -122,19 +148,31 @@ def generate_daily_metrics(
     users["metric_date"] = users["register_time"].dt.date
 
     subscriptions = subscriptions.copy()
-    subscriptions["metric_date"] = subscriptions["start_time"].dt.date
-
     all_dates = pd.DataFrame({"metric_date": pd.date_range(start_date, periods=days).date})
 
     dau = events.groupby("metric_date")["user_id"].nunique().rename("daily_active_users")
     new_users = users.groupby("metric_date")["user_id"].nunique().rename("new_users")
-    paid_users = subscriptions.groupby("metric_date")["user_id"].nunique().rename("paid_users")
+    metric_timestamps = pd.to_datetime(all_dates["metric_date"])
+    subscription_starts = subscriptions["start_time"].dt.normalize()
+    subscription_ends = subscriptions["end_time"].dt.normalize()
+    paid_users = pd.Series(
+        [
+            subscriptions.loc[
+                (subscription_starts <= metric_date)
+                & (subscription_ends.isna() | (subscription_ends > metric_date)),
+                "user_id",
+            ].nunique()
+            for metric_date in metric_timestamps
+        ],
+        index=all_dates.index,
+        name="paid_users",
+    )
     ai_task_count = events.loc[events["event_name"] == "run_ai_task"].groupby("metric_date")["event_id"].count().rename("ai_task_count")
     avg_duration = events.groupby("metric_date")["duration_seconds"].mean().rename("average_session_duration")
 
     metrics = all_dates.merge(dau, on="metric_date", how="left")
     metrics = metrics.merge(new_users, on="metric_date", how="left")
-    metrics = metrics.merge(paid_users, on="metric_date", how="left")
+    metrics = metrics.join(paid_users)
     metrics = metrics.merge(ai_task_count, on="metric_date", how="left")
     metrics = metrics.merge(avg_duration, on="metric_date", how="left")
 
@@ -177,7 +215,7 @@ def main() -> None:
     users = generate_users(args.users, start_date, args.days, rng)
     events = generate_events(users, args.events, start_date, args.days, rng)
     subscriptions = generate_subscriptions(users, start_date, args.days, rng)
-    experiment_assignments = generate_experiment_assignments(users, start_date, rng)
+    experiment_assignments = generate_experiment_assignments(users, start_date, args.days, rng)
     daily_metrics = generate_daily_metrics(users, events, subscriptions, start_date, args.days)
 
     tables = {
