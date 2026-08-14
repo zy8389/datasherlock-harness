@@ -26,6 +26,23 @@ USER_TYPES = ["free", "trial", "paid"]
 PLANS = ["free", "basic", "pro", "enterprise"]
 
 
+def positive_int(value: str) -> int:
+    parsed_value = int(value)
+    if parsed_value <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed_value
+
+
+def parse_start_date(value: str) -> pd.Timestamp:
+    try:
+        start_date = pd.Timestamp(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise argparse.ArgumentTypeError(f"invalid date: {value!r}") from exc
+    if pd.isna(start_date):
+        raise argparse.ArgumentTypeError(f"invalid date: {value!r}")
+    return start_date
+
+
 def generate_users(user_count: int, start_date: pd.Timestamp, days: int, rng: np.random.Generator) -> pd.DataFrame:
     register_offsets = rng.integers(0, days, size=user_count)
 
@@ -59,6 +76,7 @@ def generate_events(
     event_delays = np.array([rng.integers(0, remaining + 1) for remaining in remaining_seconds])
     event_times = register_times + pd.to_timedelta(event_delays, unit="s")
     event_offsets = ((event_times - start_date) / pd.Timedelta(days=1)).to_numpy(dtype=np.int64)
+    session_slots = rng.integers(1, 4, size=event_count)
 
     return pd.DataFrame(
         {
@@ -66,7 +84,10 @@ def generate_events(
             "user_id": user_ids,
             "event_time": event_times,
             "event_name": rng.choice(EVENT_NAMES, size=event_count, p=[0.35, 0.12, 0.16, 0.22, 0.1, 0.05]),
-            "session_id": [f"s_{sid}" for sid in rng.integers(1, event_count // 3 + 2, size=event_count)],
+            "session_id": [
+                f"s_{user_id}_{day_offset:03d}_{slot}"
+                for user_id, day_offset, slot in zip(user_ids, event_offsets, session_slots)
+            ],
             "device_type": device_type,
             "duration_seconds": rng.gamma(shape=2.0, scale=120.0, size=event_count).round(2),
             "batch_id": [f"batch_{d:03d}" for d in event_offsets],
@@ -168,6 +189,18 @@ def generate_daily_metrics(
         name="paid_users",
     )
     ai_task_count = events.loc[events["event_name"] == "run_ai_task"].groupby("metric_date")["event_id"].count().rename("ai_task_count")
+    subscription_start_dates = subscriptions["start_time"].dt.date
+    newly_paid_users = (
+        subscriptions.assign(metric_date=subscription_start_dates)[["metric_date", "user_id"]]
+        .drop_duplicates()
+    )
+    active_users = events[["metric_date", "user_id"]].drop_duplicates()
+    converted_users = (
+        active_users.merge(newly_paid_users, on=["metric_date", "user_id"], how="inner")
+        .groupby("metric_date")["user_id"]
+        .nunique()
+        .rename("_converted_users")
+    )
     session_durations = (
         events.groupby(["metric_date", "user_id", "session_id"], as_index=False)["duration_seconds"]
         .sum()
@@ -183,15 +216,16 @@ def generate_daily_metrics(
     metrics = metrics.join(paid_users)
     metrics = metrics.merge(ai_task_count, on="metric_date", how="left")
     metrics = metrics.merge(avg_duration, on="metric_date", how="left")
+    metrics = metrics.merge(converted_users, on="metric_date", how="left")
 
     metrics = metrics.fillna(0)
     metrics["conversion_rate"] = np.where(
         metrics["daily_active_users"] > 0,
-        metrics["paid_users"] / metrics["daily_active_users"],
+        metrics["_converted_users"] / metrics["daily_active_users"],
         0,
     )
 
-    return metrics
+    return metrics.drop(columns="_converted_users")
 
 
 def write_outputs(output_dir: Path, tables: dict[str, pd.DataFrame]) -> None:
@@ -209,16 +243,16 @@ def write_outputs(output_dir: Path, tables: dict[str, pd.DataFrame]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--users", type=int, default=20_000)
-    parser.add_argument("--days", type=int, default=180)
-    parser.add_argument("--events", type=int, default=1_000_000)
+    parser.add_argument("--users", type=positive_int, default=20_000)
+    parser.add_argument("--days", type=positive_int, default=180)
+    parser.add_argument("--events", type=positive_int, default=1_000_000)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--start-date", type=str, default="2026-01-01")
+    parser.add_argument("--start-date", type=parse_start_date, default=pd.Timestamp("2026-01-01"))
     parser.add_argument("--output-dir", type=Path, default=Path("data/processed"))
     args = parser.parse_args()
 
     rng = np.random.default_rng(args.seed)
-    start_date = pd.Timestamp(args.start_date)
+    start_date = args.start_date
 
     users = generate_users(args.users, start_date, args.days, rng)
     events = generate_events(users, args.events, start_date, args.days, rng)

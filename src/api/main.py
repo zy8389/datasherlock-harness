@@ -1,28 +1,15 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from typing import Any
 
-import duckdb
 import psycopg
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
+from api.health import _check_duckdb
+
 app = FastAPI(title="DataSherlock Harness API", version="0.1.0")
-
-
-def _check_duckdb() -> str:
-    database_path = Path(
-        os.getenv("DUCKDB_PATH", "/workspace/data/processed/datasherlock.duckdb")
-    )
-    database_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = duckdb.connect(str(database_path))
-    try:
-        connection.execute("SELECT 1").fetchone()
-    finally:
-        connection.close()
-    return "ok"
 
 
 def _check_postgres() -> str:

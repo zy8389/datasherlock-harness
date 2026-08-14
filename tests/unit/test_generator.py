@@ -5,6 +5,7 @@ import sys
 import duckdb
 import numpy as np
 import pandas as pd
+import pytest
 import yaml
 
 from src.data.generator import (
@@ -152,13 +153,104 @@ def test_metric_semantics_define_required_metrics() -> None:
         config = yaml.safe_load(file)
 
     definitions = {metric["id"]: metric for metric in config["metrics"]}
-    assert {
-        "dau",
+    expected_metric_fields = {
+        "daily_active_users",
         "new_users",
         "paid_users",
-        "task_count",
+        "ai_task_count",
         "average_session_duration",
         "conversion_rate",
-    } <= definitions.keys()
+    }
+    assert definitions.keys() == expected_metric_fields
     assert definitions["paid_users"]["validity"]["end_operator"] == ">"
+    assert definitions["conversion_rate"]["denominator"] == "daily_active_users"
     assert definitions["conversion_rate"]["zero_denominator"] == 0
+
+
+def test_metric_semantics_match_generated_columns() -> None:
+    start_date = pd.Timestamp("2026-01-01")
+    rng = np.random.default_rng(42)
+    users = generate_users(20, start_date, 3, rng)
+    events = generate_events(users, 100, start_date, 3, rng)
+    subscriptions = generate_subscriptions(users, start_date, 3, rng)
+    metrics = generate_daily_metrics(users, events, subscriptions, start_date, 3)
+
+    metrics_path = Path(__file__).parents[2] / "config" / "metrics.yaml"
+    with metrics_path.open(encoding="utf-8") as file:
+        definitions = yaml.safe_load(file)["metrics"]
+
+    assert {definition["id"] for definition in definitions} == set(metrics.columns) - {
+        "metric_date"
+    }
+
+
+def test_conversion_rate_counts_active_users_starting_paid_subscription() -> None:
+    start_date = pd.Timestamp("2026-01-01")
+    users = pd.DataFrame(
+        {
+            "user_id": [1, 2, 3],
+            "register_time": [start_date, start_date, start_date],
+        }
+    )
+    events = pd.DataFrame(
+        {
+            "event_id": [1, 2, 3],
+            "user_id": [1, 2, 3],
+            "event_time": [start_date, start_date, start_date + pd.Timedelta(days=1)],
+            "event_name": ["login", "login", "login"],
+            "session_id": ["s1", "s2", "s3"],
+            "duration_seconds": [10.0, 10.0, 10.0],
+        }
+    )
+    subscriptions = pd.DataFrame(
+        {
+            "user_id": [1, 3],
+            "start_time": [start_date, start_date + pd.Timedelta(days=1)],
+            "end_time": [pd.NaT, pd.NaT],
+        }
+    )
+
+    metrics = generate_daily_metrics(users, events, subscriptions, start_date, 2)
+
+    assert metrics["paid_users"].tolist() == [1, 2]
+    assert metrics["conversion_rate"].tolist() == [0.5, 1.0]
+    assert metrics["conversion_rate"].between(0, 1).all()
+
+
+def test_session_ids_do_not_span_users_or_metric_dates() -> None:
+    start_date = pd.Timestamp("2026-01-01")
+    rng = np.random.default_rng(42)
+    users = generate_users(100, start_date, 10, rng)
+    events = generate_events(users, 5_000, start_date, 10, rng)
+    events["metric_date"] = events["event_time"].dt.date
+
+    session_owners = events.groupby("session_id").agg(
+        user_count=("user_id", "nunique"),
+        date_count=("metric_date", "nunique"),
+    )
+
+    assert session_owners["user_count"].eq(1).all()
+    assert session_owners["date_count"].eq(1).all()
+
+
+@pytest.mark.parametrize(
+    ("argument", "value", "expected_error"),
+    [
+        ("--users", "0", "must be a positive integer"),
+        ("--days", "-1", "must be a positive integer"),
+        ("--events", "0", "must be a positive integer"),
+        ("--start-date", "not-a-date", "invalid date"),
+    ],
+)
+def test_cli_rejects_invalid_arguments(
+    argument: str, value: str, expected_error: str
+) -> None:
+    result = subprocess.run(
+        [sys.executable, "src/data/generator.py", argument, value],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert expected_error in result.stderr

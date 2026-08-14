@@ -3,7 +3,7 @@ timezone: UTC
 date_grain: day
 
 metrics:
-  - id: dau
+  - id: daily_active_users
     name: Daily Active Users
     description: Distinct users with at least one event on the metric date.
     source_table: events
@@ -40,7 +40,7 @@ metrics:
       AND (end_time IS NULL OR end_time > metric_date)
     unit: users
 
-  - id: task_count
+  - id: ai_task_count
     name: AI Task Count
     description: Number of AI task execution events on the metric date.
     source_table: events
@@ -66,14 +66,18 @@ metrics:
 
   - id: conversion_rate
     name: Paid User Conversion Rate
-    description: Active paid users divided by daily active users.
+    description: Distinct users active and starting a paid subscription on the metric date, divided by daily active users.
     source_table: daily_metrics
     dependencies:
-      - paid_users
-      - dau
+      - daily_active_users
     aggregation: ratio
-    numerator: paid_users
-    denominator: dau
+    numerator: distinct_active_users_starting_paid_subscription
+    denominator: daily_active_users
     zero_denominator: 0
-    formula: paid_users / dau
+    formula: >-
+      COUNT(DISTINCT subscriptions.user_id) FILTER (
+      WHERE DATE(subscriptions.start_time) = metric_date
+      AND subscriptions.user_id IN (
+      SELECT user_id FROM events WHERE DATE(event_time) = metric_date))
+      / COUNT(DISTINCT events.user_id)
     unit: ratio

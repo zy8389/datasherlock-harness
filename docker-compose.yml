@@ -1,4 +1,13 @@
 services:
+  data-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python src/data/generator.py --output-dir /workspace/data/processed
+    volumes:
+      - duckdb_data:/workspace/data
+    restart: "no"
+
   api:
     build:
       context: .
@@ -16,6 +25,8 @@ services:
     volumes:
       - duckdb_data:/workspace/data
     depends_on:
+      data-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
     healthcheck:
