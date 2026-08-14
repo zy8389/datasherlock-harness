@@ -168,7 +168,15 @@ def generate_daily_metrics(
         name="paid_users",
     )
     ai_task_count = events.loc[events["event_name"] == "run_ai_task"].groupby("metric_date")["event_id"].count().rename("ai_task_count")
-    avg_duration = events.groupby("metric_date")["duration_seconds"].mean().rename("average_session_duration")
+    session_durations = (
+        events.groupby(["metric_date", "user_id", "session_id"], as_index=False)["duration_seconds"]
+        .sum()
+    )
+    avg_duration = (
+        session_durations.groupby("metric_date")["duration_seconds"]
+        .mean()
+        .rename("average_session_duration")
+    )
 
     metrics = all_dates.merge(dau, on="metric_date", how="left")
     metrics = metrics.merge(new_users, on="metric_date", how="left")
