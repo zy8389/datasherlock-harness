@@ -7,7 +7,6 @@ import duckdb
 import numpy as np
 import pandas as pd
 
-
 EVENT_NAMES = [
     "login",
     "create_project",

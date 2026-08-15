@@ -7,7 +7,6 @@ import urllib.request
 
 import streamlit as st
 
-
 st.set_page_config(page_title="DataSherlock Harness")
 st.title("DataSherlock Harness")
 st.caption("Local diagnosis environment")

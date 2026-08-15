@@ -31,7 +31,7 @@ def _check_postgres() -> str:
 def _dependency_status(check) -> str:
     try:
         return check()
-    except Exception:
+    except Exception:  # noqa: BLE001 - dependency probes must not crash health.
         return "unavailable"
 
 

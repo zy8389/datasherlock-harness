@@ -5,7 +5,6 @@ from pathlib import Path
 
 import duckdb
 
-
 REQUIRED_DUCKDB_TABLES = {
     "users",
     "events",
