@@ -7,6 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /workspace
 
 COPY pyproject.toml README.md ./
+COPY config ./config
 COPY src ./src
 COPY app ./app
 

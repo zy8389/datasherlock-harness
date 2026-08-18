@@ -7,9 +7,11 @@ import numpy as np
 import pandas as pd
 import pytest
 import yaml
+from pandas.testing import assert_frame_equal
 
-from src.data.generator import (
+from data.generator import (
     generate_daily_metrics,
+    generate_dataset,
     generate_events,
     generate_experiment_assignments,
     generate_subscriptions,
@@ -23,7 +25,8 @@ def test_saas_generator_creates_expected_outputs(tmp_path: Path) -> None:
     result = subprocess.run(
         [
             sys.executable,
-            "src/data/generator.py",
+            "-m",
+            "data.generator",
             "--users",
             "100",
             "--days",
@@ -66,6 +69,11 @@ def test_saas_generator_creates_expected_outputs(tmp_path: Path) -> None:
             "subscriptions",
             "experiment_assignments",
             "daily_metrics",
+            "pipeline_runs",
+            "partition_metadata",
+            "schema_snapshots",
+            "metric_versions",
+            "experiment_configs",
         }
         assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 500
 
@@ -317,7 +325,7 @@ def test_cli_rejects_invalid_arguments(
     argument: str, value: str, expected_error: str
 ) -> None:
     result = subprocess.run(
-        [sys.executable, "src/data/generator.py", argument, value],
+        [sys.executable, "-m", "data.generator", argument, value],
         check=False,
         capture_output=True,
         text=True,
@@ -325,3 +333,75 @@ def test_cli_rejects_invalid_arguments(
 
     assert result.returncode == 2
     assert expected_error in result.stderr
+
+
+def test_generate_dataset_is_reproducible_for_same_seed() -> None:
+    arguments = {
+        "user_count": 200,
+        "days": 30,
+        "event_count": 2_000,
+        "seed": 42,
+        "start_date": pd.Timestamp("2026-01-01"),
+    }
+    first = generate_dataset(**arguments)
+    second = generate_dataset(**arguments)
+
+    assert first.keys() == second.keys()
+    for table_name in first:
+        assert_frame_equal(first[table_name], second[table_name], check_dtype=True)
+
+
+def test_generate_dataset_changes_for_different_seed() -> None:
+    common = {
+        "user_count": 200,
+        "days": 30,
+        "event_count": 2_000,
+        "start_date": pd.Timestamp("2026-01-01"),
+    }
+    first = generate_dataset(seed=42, **common)
+    second = generate_dataset(seed=43, **common)
+
+    for table_name in ("events", "subscriptions", "experiment_assignments"):
+        assert not first[table_name].equals(second[table_name])
+
+
+def test_normal_event_distribution_does_not_explode_at_dataset_end() -> None:
+    dataset = generate_dataset(
+        user_count=2_000,
+        days=180,
+        event_count=100_000,
+        seed=42,
+        start_date=pd.Timestamp("2026-01-01"),
+    )
+    daily_counts = (
+        dataset["events"].assign(metric_date=lambda frame: frame["event_time"].dt.date)
+        .groupby("metric_date")
+        .size()
+    )
+
+    first_30_mean = daily_counts.iloc[:30].mean()
+    last_30_mean = daily_counts.iloc[-30:].mean()
+    assert last_30_mean / first_30_mean < 2.0
+    assert len(dataset["events"]) == 100_000
+
+
+def test_normal_daily_metrics_have_sane_ranges() -> None:
+    dataset = generate_dataset(
+        user_count=2_000,
+        days=60,
+        event_count=30_000,
+        seed=42,
+        start_date=pd.Timestamp("2026-01-01"),
+    )
+    metrics = dataset["daily_metrics"]
+
+    assert metrics["daily_active_users"].gt(0).all()
+    assert metrics["ai_task_count"].ge(0).all()
+    assert metrics["average_session_duration"].gt(0).all()
+    assert metrics["conversion_rate"].between(0, 1).all()
+    rolling_mean = metrics["daily_active_users"].rolling(7, min_periods=1).mean()
+    steady_state = metrics.index >= 14
+    assert (
+        metrics.loc[steady_state, "daily_active_users"]
+        / rolling_mean.loc[steady_state]
+    ).between(0.5, 1.5).mean() > 0.95

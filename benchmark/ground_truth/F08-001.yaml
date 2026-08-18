@@ -1,0 +1,9 @@
+case_id: F08-001
+fault_id: F08
+root_cause_type: join_explosion
+affected_metric: ai_task_count
+affected_assets: [events, experiment_assignments, metric_versions]
+injection: {strategy: duplicate_assignments_and_join_events, metric_date: "2026-01-30"}
+expected_evidence: [assignment cardinality exceeds one, joined event rows inflate]
+expected_direction: increase
+minimum_effect_size: 0.20

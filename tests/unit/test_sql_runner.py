@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import duckdb
@@ -7,6 +8,7 @@ from tools.sql_runner import (
     SqlExecutionError,
     SqlTimeoutError,
     SqlValidationError,
+    execute_readonly_sql,
     run_readonly_sql,
     validate_readonly_sql,
 )
@@ -116,3 +118,54 @@ def test_rejected_write_does_not_change_database(database_path: Path) -> None:
 
     with duckdb.connect(str(database_path), read_only=True) as connection:
         assert connection.execute("SELECT COUNT(*) FROM numbers").fetchone() == (5,)
+
+
+def test_structured_execution_response_and_audit(database_path: Path, tmp_path: Path) -> None:
+    audit_path = tmp_path / "audit" / "query_audit.jsonl"
+    response = execute_readonly_sql(
+        database_path,
+        "SELECT value FROM numbers ORDER BY value",
+        incident_id="INC-001",
+        trace_id="TRACE-001",
+        audit_path=audit_path,
+        max_rows=2,
+    )
+
+    assert response.status == "success"
+    assert response.query_id
+    assert response.row_count == 2
+    assert response.truncated is True
+    record = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert record["incident_id"] == "INC-001"
+    assert record["trace_id"] == "TRACE-001"
+    assert record["query_id"] == response.query_id
+    assert record["status"] == "success"
+
+
+def test_structured_execution_response_contains_typed_error(
+    database_path: Path, tmp_path: Path
+) -> None:
+    response = execute_readonly_sql(
+        database_path,
+        "DELETE FROM numbers",
+        audit_path=tmp_path / "query_audit.jsonl",
+    )
+
+    assert response.status == "error"
+    assert response.statement_type is None
+    assert response.error is not None
+    assert response.error["type"] == "validation"
+    assert response.query_id
+
+
+def test_structured_execution_response_validates_resource_limits(
+    database_path: Path,
+) -> None:
+    response = execute_readonly_sql(database_path, "SELECT 1", max_rows=0)
+
+    assert response.status == "error"
+    assert response.error == {
+        "type": "validation",
+        "message": "max_rows must be greater than zero",
+    }
+    assert response.query_id

@@ -1,0 +1,9 @@
+case_id: F05-001
+fault_id: F05
+root_cause_type: timezone_error
+affected_metric: daily_active_users
+affected_assets: [events, metric_versions, pipeline_runs]
+injection: {strategy: shift_cn_boundary_events_eight_hours, metric_date: "2026-01-30"}
+expected_evidence: [CN hourly distribution shifts, target-day CN DAU changes]
+expected_direction: decrease
+minimum_effect_size: 0.01

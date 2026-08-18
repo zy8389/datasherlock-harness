@@ -1,0 +1,9 @@
+case_id: F11-001
+fault_id: F11
+root_cause_type: metric_definition_change
+affected_metric: daily_active_users
+affected_assets: [metric_versions, daily_metrics, events]
+injection: {strategy: filter_dau_to_core_task_events, metric_date: "2026-01-30"}
+expected_evidence: [metric definition hash changes, raw event count remains stable]
+expected_direction: decrease
+minimum_effect_size: 0.10

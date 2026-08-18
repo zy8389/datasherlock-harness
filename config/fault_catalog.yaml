@@ -1,0 +1,134 @@
+version: 1
+faults:
+  - id: F01
+    root_cause_type: missing_partition
+    affected_metrics: [daily_active_users]
+    affected_assets: [events, partition_metadata, pipeline_runs]
+    injection_strategy: remove_android_partition
+    expected_evidence:
+      - target Android partition row_count is zero
+      - adjacent Android partitions remain populated
+      - partition metadata or pipeline run is missing/failed
+    expected_direction: decrease
+    minimum_effect_size: 0.20
+  - id: F02
+    root_cause_type: duplicate_batch
+    affected_metrics: [ai_task_count]
+    affected_assets: [events, pipeline_runs]
+    injection_strategy: duplicate_ai_task_batch_rows
+    expected_evidence:
+      - duplicate event_id or batch_id rate increases
+      - raw event count increases
+      - ai_task_count increases while DAU may remain stable
+    expected_direction: increase
+    minimum_effect_size: 0.20
+  - id: F03
+    root_cause_type: null_value_anomaly
+    affected_metrics: [daily_active_users]
+    affected_assets: [events, pipeline_runs]
+    injection_strategy: null_mobile_user_ids
+    expected_evidence:
+      - event row count remains approximately stable
+      - user_id null rate increases on the target partition
+      - valid distinct user count and DAU decrease
+    expected_direction: decrease
+    minimum_effect_size: 0.01
+  - id: F04
+    root_cause_type: data_delay
+    affected_metrics: [daily_active_users]
+    affected_assets: [events, partition_metadata, pipeline_runs]
+    injection_strategy: delay_android_events_one_day
+    expected_evidence:
+      - target-day Android events decrease
+      - following-day Android events rebound
+      - pipeline freshness metadata reports delayed data
+    expected_direction: decrease
+    minimum_effect_size: 0.10
+  - id: F05
+    root_cause_type: timezone_error
+    affected_metrics: [daily_active_users]
+    affected_assets: [events, metric_versions, pipeline_runs]
+    injection_strategy: shift_cn_boundary_events_eight_hours
+    expected_evidence:
+      - hourly event distribution shifts by a fixed offset
+      - target-day CN DAU changes near the date boundary
+      - timezone configuration and data timestamps disagree
+    expected_direction: decrease
+    minimum_effect_size: 0.01
+  - id: F06
+    root_cause_type: unit_error
+    affected_metrics: [average_session_duration]
+    affected_assets: [events, schema_snapshots]
+    injection_strategy: multiply_duration_seconds_by_1000
+    expected_evidence:
+      - duration_seconds contains approximately thousand-fold outliers
+      - duration distribution shifts materially
+      - average session duration increases
+    expected_direction: increase
+    minimum_effect_size: 0.20
+  - id: F07
+    root_cause_type: join_filter
+    affected_metrics: [daily_active_users]
+    affected_assets: [events, subscriptions, metric_versions]
+    injection_strategy: add_subscription_inner_join_to_dau
+    expected_evidence:
+      - distinct users decrease after the erroneous join
+      - free users are disproportionately removed
+      - the metric SQL differs by an unexpected inner join
+    expected_direction: decrease
+    minimum_effect_size: 0.01
+  - id: F08
+    root_cause_type: join_explosion
+    affected_metrics: [ai_task_count]
+    affected_assets: [events, experiment_assignments, metric_versions]
+    injection_strategy: duplicate_assignments_and_join_events
+    expected_evidence:
+      - assignment cardinality exceeds one per user
+      - joined event row count is inflated
+      - duplicate event_id values appear after the join
+    expected_direction: increase
+    minimum_effect_size: 0.20
+  - id: F09
+    root_cause_type: field_drift
+    affected_metrics: [ai_task_count]
+    affected_assets: [events, schema_snapshots]
+    injection_strategy: rename_run_ai_task_to_execute_ai_task
+    expected_evidence:
+      - run_ai_task frequency decreases
+      - execute_ai_task appears in newer app versions
+      - total event count remains approximately stable
+    expected_direction: decrease
+    minimum_effect_size: 0.10
+  - id: F10
+    root_cause_type: schema_change
+    affected_metrics: [daily_active_users]
+    affected_assets: [events, schema_snapshots, partition_metadata, pipeline_runs]
+    injection_strategy: change_app_build_number_integer_to_varchar
+    expected_evidence:
+      - schema snapshot reports INTEGER to VARCHAR drift
+      - pipeline compatibility status is failed
+      - target partition is not fresh and DAU decreases
+    expected_direction: decrease
+    minimum_effect_size: 0.10
+  - id: F11
+    root_cause_type: metric_definition_change
+    affected_metrics: [daily_active_users]
+    affected_assets: [metric_versions, daily_metrics, events]
+    injection_strategy: filter_dau_to_core_task_events
+    expected_evidence:
+      - metric definition hash changes
+      - old and new SQL differ by an event filter
+      - raw event count does not fall with the new DAU
+    expected_direction: decrease
+    minimum_effect_size: 0.10
+  - id: F12
+    root_cause_type: ab_split_anomaly
+    affected_metrics: [conversion_rate]
+    affected_assets: [experiment_assignments, experiment_configs, subscriptions]
+    injection_strategy: change_experiment_split_to_20_80
+    expected_evidence:
+      - allocation changes from the configured 50/50 baseline
+      - experiment configuration version is anomalous
+      - conversion rate shifts because variants have different propensity
+    expected_direction: increase
+    minimum_effect_size: 0.05

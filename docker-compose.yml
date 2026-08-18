@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: python src/data/generator.py --output-dir /workspace/data/processed
+    command: python -m data.generator --output-dir /workspace/data/processed
     volumes:
       - duckdb_data:/workspace/data
     restart: "no"

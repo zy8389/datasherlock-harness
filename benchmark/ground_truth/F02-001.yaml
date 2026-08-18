@@ -1,0 +1,9 @@
+case_id: F02-001
+fault_id: F02
+root_cause_type: duplicate_batch
+affected_metric: ai_task_count
+affected_assets: [events, pipeline_runs]
+injection: {strategy: duplicate_ai_task_batch_rows, metric_date: "2026-01-30"}
+expected_evidence: [event_id duplicate rate increases, ai_task_count increases]
+expected_direction: increase
+minimum_effect_size: 0.20

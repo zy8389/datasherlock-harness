@@ -32,6 +32,45 @@ DataSherlock Harness 的目标是：
 
 > 接收指标异常告警后，自主制定调查计划，调用受控 SQL 和数据质量工具，验证不同根因假设，输出有证据支撑的结论，并在人工审批后进行沙箱修复和回归验证。
 
+## Current Implementation
+
+当前分支已经实现或部分实现：
+
+- Docker development skeleton、`data-init`、FastAPI `/health` 和 Streamlit shell；
+- 可复现的 SaaS 正常数据生成器，包含用户、事件、订阅、实验分流、六个日指标和 Operational Metadata；
+- DuckDB 本地数据库与 Parquet 输出；
+- `config/metrics.yaml` 的强类型校验和可执行指标 SQL；
+- `config/fault_catalog.yaml`、F01-F12 canonical taxonomy 和 machine-readable Ground Truth；
+- F01-F12 最小故障注入器及目标 observable 测试；
+- `IncidentState` 和严格只读 SQL Runner，包括 AST 校验、超时、行数限制、结构化响应和独立 JSONL audit；
+- GitHub Actions CI 配置和完整单元测试。
+
+仍未实现或仅有接口/文档准备：
+
+- Data Quality Tools、Planner、Hypothesis Manager、Harness Graph、Checkpoint Runtime；
+- Guardrail Runtime、Validators、完整 Fault Injector/Benchmark Runner、Approval Flow 和 Sandbox Repair；
+- 完整 Streamlit 诊断界面、Benchmark 评测报告和生产数据接入。
+
+## Quick Start
+
+```bash
+git clone https://github.com/zy8389/datasherlock-harness.git
+cd datasherlock-harness
+cp .env.example .env
+docker compose up --build
+```
+
+服务地址：
+
+- API：`http://localhost:8000`
+- Frontend：`http://localhost:8501`
+
+健康检查：
+
+```bash
+curl http://localhost:8000/health
+```
+
 ---
 
 ## 2. 项目目标
@@ -193,6 +232,7 @@ device_type
 duration_seconds
 batch_id
 app_version
+app_build_number
 ```
 
 事件类型示例：
@@ -239,6 +279,18 @@ average_session_duration
 conversion_rate
 ```
 
+### 6.6 Operational Metadata
+
+```text
+pipeline_runs
+partition_metadata
+schema_snapshots
+metric_versions
+experiment_configs
+```
+
+这些表与五张业务/指标表一起写入 Parquet 和 DuckDB，用于提供独立的管道、分区、Schema、指标版本和实验配置证据。
+
 建议首批数据规模：
 
 - 用户：20,000
@@ -273,7 +325,7 @@ conversion_rate
 ```json
 {
   "incident_id": "INC-001",
-  "ground_truth_type": "missing_partition",
+  "root_cause_type": "missing_partition",
   "affected_asset": "events_mobile_20260812",
   "affected_metric": "daily_active_users",
   "expected_root_cause": "移动端事件分区未完成写入",
@@ -475,7 +527,9 @@ Benchmark Layer
 
 ---
 
-## 11. 推荐仓库结构
+## 11. 目标项目结构 / Planned Repository Structure
+
+以下结构包含后续规划中的模块，不代表它们当前都已实现。
 
 ```text
 datasherlock-harness/
@@ -483,6 +537,7 @@ datasherlock-harness/
 │   └── streamlit_app.py
 ├── config/
 │   ├── metrics.yaml
+│   ├── fault_catalog.yaml
 │   ├── tools.yaml
 │   └── settings.yaml
 ├── data/

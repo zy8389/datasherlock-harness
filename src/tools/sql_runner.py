@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from datetime import UTC, datetime
 from pathlib import Path
+from threading import Lock
 from time import perf_counter
 from typing import Any, Literal
 from uuid import uuid4
@@ -15,6 +18,8 @@ from sqlglot.errors import SqlglotError
 from sqlglot.tokens import Tokenizer, TokenType
 
 StatementType = Literal["SELECT", "DESCRIBE", "EXPLAIN"]
+QueryStatus = Literal["success", "error"]
+QueryErrorType = Literal["validation", "timeout", "execution"]
 
 
 class SqlRunnerError(RuntimeError):
@@ -47,6 +52,39 @@ class SqlQueryResult(BaseModel):
     row_count: int = Field(ge=0)
     truncated: bool
     duration_ms: float = Field(ge=0)
+
+
+class QueryAuditRecord(BaseModel):
+    """Independent audit record for a SQL call."""
+
+    incident_id: str | None = None
+    trace_id: str | None = None
+    query_id: str
+    sql: str
+    started_at: datetime
+    duration_ms: float = Field(ge=0)
+    status: QueryStatus
+    error_type: QueryErrorType | None = None
+    error_message: str | None = None
+    row_count: int = Field(ge=0)
+    truncated: bool = False
+
+
+class SqlExecutionResponse(BaseModel):
+    """Stable tool-facing success/error envelope."""
+
+    query_id: str
+    status: QueryStatus
+    statement_type: StatementType | None = None
+    columns: list[str] = Field(default_factory=list)
+    rows: list[list[Any]] = Field(default_factory=list)
+    row_count: int = Field(default=0, ge=0)
+    truncated: bool = False
+    duration_ms: float = Field(default=0, ge=0)
+    error: dict[str, str] | None = None
+
+
+_AUDIT_LOCK = Lock()
 
 
 _FORBIDDEN_QUERY_NODES = (
@@ -203,9 +241,10 @@ def run_readonly_sql(
     *,
     timeout_seconds: float = 10.0,
     max_rows: int = 1000,
+    query_id: str | None = None,
 ) -> SqlQueryResult:
     """Execute one AST-validated query on a restricted DuckDB connection."""
-    query_id = str(uuid4())
+    query_id = query_id or str(uuid4())
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be greater than zero")
     if max_rows <= 0:
@@ -269,3 +308,100 @@ def run_readonly_sql(
         truncated=truncated,
         duration_ms=(perf_counter() - started_at) * 1000,
     )
+
+
+def append_query_audit(record: QueryAuditRecord, audit_path: str | Path) -> None:
+    """Append one audit record to an independent JSONL sink."""
+    path = Path(audit_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(record.model_dump(mode="json"), ensure_ascii=False)
+    with _AUDIT_LOCK, path.open("a", encoding="utf-8") as file:
+        file.write(line + "\n")
+
+
+def execute_readonly_sql(
+    database_path: str | Path,
+    sql: str,
+    *,
+    incident_id: str | None = None,
+    trace_id: str | None = None,
+    audit_path: str | Path | None = None,
+    timeout_seconds: float = 10.0,
+    max_rows: int = 1000,
+) -> SqlExecutionResponse:
+    """Return a structured result without leaking runner exceptions to callers."""
+    query_id = str(uuid4())
+    started_at = datetime.now(UTC)
+    started_clock = perf_counter()
+    try:
+        if timeout_seconds <= 0:
+            raise SqlValidationError(
+                "timeout_seconds must be greater than zero", query_id
+            )
+        if max_rows <= 0:
+            raise SqlValidationError("max_rows must be greater than zero", query_id)
+        result = run_readonly_sql(
+            database_path,
+            sql,
+            timeout_seconds=timeout_seconds,
+            max_rows=max_rows,
+            query_id=query_id,
+        )
+        response = SqlExecutionResponse(
+            query_id=result.query_id,
+            status="success",
+            statement_type=result.statement_type,
+            columns=result.columns,
+            rows=result.rows,
+            row_count=result.row_count,
+            truncated=result.truncated,
+            duration_ms=result.duration_ms,
+        )
+        error_type = None
+        error_message = None
+    except SqlValidationError as exc:
+        response = SqlExecutionResponse(
+            query_id=exc.query_id,
+            status="error",
+            duration_ms=(perf_counter() - started_clock) * 1000,
+            error={"type": "validation", "message": str(exc)},
+        )
+        error_type = "validation"
+        error_message = str(exc)
+    except SqlTimeoutError as exc:
+        response = SqlExecutionResponse(
+            query_id=exc.query_id,
+            status="error",
+            duration_ms=(perf_counter() - started_clock) * 1000,
+            error={"type": "timeout", "message": str(exc)},
+        )
+        error_type = "timeout"
+        error_message = str(exc)
+    except SqlExecutionError as exc:
+        response = SqlExecutionResponse(
+            query_id=exc.query_id,
+            status="error",
+            duration_ms=(perf_counter() - started_clock) * 1000,
+            error={"type": "execution", "message": str(exc)},
+        )
+        error_type = "execution"
+        error_message = str(exc)
+
+    if audit_path is not None:
+        append_query_audit(
+            QueryAuditRecord(
+                incident_id=incident_id,
+                trace_id=trace_id,
+                query_id=response.query_id,
+                sql=sql,
+                started_at=started_at,
+                duration_ms=response.duration_ms,
+                status=response.status,
+                error_type=error_type,
+                error_message=error_message,
+                row_count=response.row_count,
+                truncated=response.truncated,
+            ),
+            audit_path,
+        )
+    return response

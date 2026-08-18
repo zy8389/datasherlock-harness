@@ -11,6 +11,11 @@ REQUIRED_DUCKDB_TABLES = {
     "subscriptions",
     "experiment_assignments",
     "daily_metrics",
+    "pipeline_runs",
+    "partition_metadata",
+    "schema_snapshots",
+    "metric_versions",
+    "experiment_configs",
 }
 
 
