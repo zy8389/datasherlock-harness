@@ -6,4 +6,5 @@ affected_assets: [events, subscriptions, metric_versions]
 injection: {strategy: add_subscription_inner_join_to_dau, metric_date: "2026-01-30"}
 expected_evidence: [joined distinct users decrease, free users are disproportionately removed]
 expected_direction: decrease
+effect_size_type: relative
 minimum_effect_size: 0.10

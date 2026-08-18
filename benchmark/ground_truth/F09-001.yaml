@@ -3,7 +3,8 @@ fault_id: F09
 root_cause_type: field_drift
 affected_metric: ai_task_count
 affected_assets: [events, schema_snapshots]
-injection: {strategy: rename_run_ai_task_to_execute_ai_task, metric_date: "2026-01-30"}
+injection: {strategy: rename_event_value, metric_date: "2026-01-30", ratio: 0.70, from_value: run_ai_task, to_value: execute_ai_task}
 expected_evidence: [run_ai_task frequency decreases, execute_ai_task appears]
 expected_direction: decrease
+effect_size_type: relative
 minimum_effect_size: 0.10

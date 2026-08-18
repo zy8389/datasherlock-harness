@@ -3,7 +3,8 @@ fault_id: F06
 root_cause_type: unit_error
 affected_metric: average_session_duration
 affected_assets: [events, schema_snapshots]
-injection: {strategy: multiply_duration_seconds_by_1000, metric_date: "2026-01-30"}
+injection: {strategy: multiply_duration_seconds, metric_date: "2026-01-30", ratio: 0.20, multiplier: 1000}
 expected_evidence: [duration_seconds has thousand-fold outliers, average duration increases]
 expected_direction: increase
+effect_size_type: relative
 minimum_effect_size: 0.20

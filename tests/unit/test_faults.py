@@ -1,14 +1,21 @@
 from datetime import date
 from pathlib import Path
 
-import duckdb
 import numpy as np
 import pandas as pd
 import pytest
+from pandas.testing import assert_frame_equal
 
-from benchmark.fault_injector import FaultInjectionResult, inject_fault
+from benchmark.evaluation import validate_effect
+from benchmark.fault_injector import (
+    FaultInjectionResult,
+    inject_case,
+    inject_fault,
+    validate_dataset_consistency,
+    validate_expected_evidence,
+)
 from config.faults import load_fault_catalog, load_ground_truth_cases
-from data.generator import generate_daily_metrics, generate_dataset
+from data.generator import generate_dataset
 
 TARGET_DATE = date(2026, 1, 16)
 START_DATE = pd.Timestamp("2026-01-01")
@@ -20,21 +27,7 @@ def baseline() -> dict[str, pd.DataFrame]:
 
 
 def _metrics(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    return generate_daily_metrics(
-        tables["users"],
-        tables["events"],
-        tables["subscriptions"],
-        START_DATE,
-        30,
-    ).set_index("metric_date")
-
-
-def _run_query(tables: dict[str, pd.DataFrame], query: str) -> pd.DataFrame:
-    with duckdb.connect(":memory:") as connection:
-        for table_name in ("events", "subscriptions", "experiment_assignments"):
-            if table_name in tables:
-                connection.register(table_name, tables[table_name])
-        return connection.execute(query).df()
+    return tables["daily_metrics"].set_index("metric_date")
 
 
 def _inject(baseline: dict[str, pd.DataFrame], fault_id: str) -> FaultInjectionResult:
@@ -143,10 +136,7 @@ def test_f07_join_filter_changes_dau_query_result(
     baseline: dict[str, pd.DataFrame],
 ) -> None:
     result = _inject(baseline, "F07")
-    faulty = _run_query(result.tables, result.faulty_queries["daily_active_users"])
-    observed = faulty.loc[
-        faulty["metric_date"].dt.date.eq(TARGET_DATE), "daily_active_users"
-    ].iloc[0]
+    observed = _metrics(result.tables).loc[TARGET_DATE, "daily_active_users"]
     assert observed < _metrics(baseline).loc[TARGET_DATE, "daily_active_users"]
 
 
@@ -154,15 +144,8 @@ def test_f08_join_explosion_increases_joined_task_count(
     baseline: dict[str, pd.DataFrame],
 ) -> None:
     result = _inject(baseline, "F08")
-    query = result.faulty_queries["ai_task_count"]
-    base_result = _run_query(baseline, query)
-    fault_result = _run_query(result.tables, query)
-    base_value = base_result.loc[
-        base_result["metric_date"].dt.date.eq(TARGET_DATE), "ai_task_count"
-    ].iloc[0]
-    fault_value = fault_result.loc[
-        fault_result["metric_date"].dt.date.eq(TARGET_DATE), "ai_task_count"
-    ].iloc[0]
+    base_value = _metrics(baseline).loc[TARGET_DATE, "ai_task_count"]
+    fault_value = _metrics(result.tables).loc[TARGET_DATE, "ai_task_count"]
     assert fault_value > base_value
 
 
@@ -197,19 +180,160 @@ def test_f11_metric_definition_change_reduces_dau_query_result(
     baseline: dict[str, pd.DataFrame],
 ) -> None:
     result = _inject(baseline, "F11")
-    faulty = _run_query(result.tables, result.faulty_queries["daily_active_users"])
-    observed = faulty.loc[
-        faulty["metric_date"].dt.date.eq(TARGET_DATE), "daily_active_users"
-    ].iloc[0]
+    observed = _metrics(result.tables).loc[TARGET_DATE, "daily_active_users"]
     assert observed < _metrics(baseline).loc[TARGET_DATE, "daily_active_users"]
 
 
 def test_f12_ab_split_rebuild_changes_conversion_rate(
     baseline: dict[str, pd.DataFrame],
 ) -> None:
-    result = _inject(baseline, "F12")
-    assert result.tables["experiment_configs"].iloc[0]["control_ratio"] == 0.2
-    assert (
-        _metrics(result.tables).loc[TARGET_DATE, "conversion_rate"]
-        != _metrics(baseline).loc[TARGET_DATE, "conversion_rate"]
+    case = next(
+        case for case in load_ground_truth_cases(Path("benchmark/ground_truth"))
+        if case.fault_id == "F12"
     )
+    result = inject_case(
+        baseline,
+        case,
+        rng=np.random.default_rng(99),
+        start_date=START_DATE,
+        days=30,
+    )
+    assert result.tables["experiment_configs"].iloc[-1]["control_ratio"] == 0.2
+    assert result.tables["experiment_configs"].iloc[0]["control_ratio"] == 0.5
+    assert (
+        _metrics(result.tables).loc[case.injection.metric_date, "conversion_rate"]
+        > _metrics(baseline).loc[case.injection.metric_date, "conversion_rate"]
+    )
+
+
+@pytest.mark.parametrize(
+    "case", load_ground_truth_cases(Path("benchmark/ground_truth"))
+)
+def test_fault_case_effect_contract(
+    case, baseline: dict[str, pd.DataFrame]
+) -> None:
+    result = inject_case(
+        baseline,
+        case,
+        rng=np.random.default_rng(99),
+        start_date=START_DATE,
+        days=30,
+    )
+    baseline_value = baseline["daily_metrics"].set_index("metric_date").loc[
+        case.injection.metric_date, case.affected_metric
+    ]
+    fault_value = result.tables["daily_metrics"].set_index("metric_date").loc[
+        case.injection.metric_date, case.affected_metric
+    ]
+    assert result.fault_id == case.fault_id
+    assert validate_effect(
+        baseline_value,
+        fault_value,
+        expected_direction=case.expected_direction,
+        effect_size_type=case.effect_size_type,
+        minimum_effect_size=case.minimum_effect_size,
+    )
+    validate_dataset_consistency(result.tables, expected_days=30)
+    validate_expected_evidence(result, baseline)
+
+
+def test_f04_and_f09_use_requested_ratios(
+    baseline: dict[str, pd.DataFrame],
+) -> None:
+    f04 = _inject(baseline, "F04")
+    base_android = baseline["events"].loc[
+        (baseline["events"]["event_time"].dt.date == TARGET_DATE)
+        & baseline["events"]["device_type"].eq("android")
+    ]
+    moved_android = len(base_android) - len(
+        f04.tables["events"].loc[
+            (f04.tables["events"]["event_time"].dt.date == TARGET_DATE)
+            & f04.tables["events"]["device_type"].eq("android")
+        ]
+    )
+    assert moved_android == round(len(base_android) * 0.60)
+
+    f09 = _inject(baseline, "F09")
+    base_tasks = baseline["events"].loc[
+        (baseline["events"]["event_time"].dt.date == TARGET_DATE)
+        & baseline["events"]["event_name"].eq("run_ai_task")
+    ]
+    renamed = f09.tables["events"]["event_name"].eq("execute_ai_task").sum()
+    assert renamed == round(len(base_tasks) * 0.70)
+    assert len(f09.tables["events"]) == len(baseline["events"])
+
+
+def test_append_only_history_and_definition_hashes(
+    baseline: dict[str, pd.DataFrame],
+) -> None:
+    f10 = _inject(baseline, "F10")
+    event_versions = f10.tables["schema_snapshots"].query("table_name == 'events'")
+    assert set(event_versions["version"]) == {1, 2}
+    assert '"app_build_number": "BIGINT"' in event_versions.iloc[0]["schema_json"]
+    assert '"app_build_number": "VARCHAR"' in event_versions.iloc[-1]["schema_json"]
+
+    f11 = _inject(baseline, "F11")
+    metric_versions = f11.tables["metric_versions"].query(
+        "metric_id == 'daily_active_users'"
+    )
+    assert set(metric_versions["version"]) == {1, 2}
+    assert metric_versions.iloc[0]["query"] != metric_versions.iloc[-1]["query"]
+
+    f12 = _inject(baseline, "F12")
+    configs = f12.tables["experiment_configs"]
+    assert set(configs["version"]) == {1, 2}
+    assert configs.iloc[-1]["effective_at"] == pd.Timestamp(TARGET_DATE)
+
+    for value in f11.tables["metric_versions"]["definition_hash"]:
+        assert len(value) == 64
+        int(value, 16)
+
+
+def test_f03_preserves_nullable_integer_schema_and_row_count(
+    baseline: dict[str, pd.DataFrame],
+) -> None:
+    result = _inject(baseline, "F03")
+    assert baseline["events"]["user_id"].dtype == result.tables["events"]["user_id"].dtype
+    assert len(baseline["events"]) == len(result.tables["events"])
+    assert result.tables["events"]["user_id"].isna().sum() > baseline["events"]["user_id"].isna().sum()
+
+
+def test_f12_is_paired_deterministic_and_causally_ordered(
+    baseline: dict[str, pd.DataFrame],
+) -> None:
+    before_users = baseline["users"][
+        ["user_id", "conversion_score", "subscription_timing_score"]
+    ].copy(deep=True)
+    first = _inject(baseline, "F12")
+    second = _inject(baseline, "F12")
+    assert_frame_equal(first.tables["experiment_assignments"], second.tables["experiment_assignments"])
+    assert_frame_equal(first.tables["subscriptions"], second.tables["subscriptions"])
+    assert_frame_equal(
+        before_users,
+        baseline["users"][
+            ["user_id", "conversion_score", "subscription_timing_score"]
+        ],
+    )
+    assert (
+        baseline["experiment_assignments"]["assigned_time"]
+        == baseline["experiment_assignments"]["user_id"].map(
+            baseline["users"].set_index("user_id")["register_time"]
+        )
+    ).all()
+
+
+def test_fault_injection_does_not_mutate_healthy_baseline(
+    baseline: dict[str, pd.DataFrame],
+) -> None:
+    before = {name: frame.copy(deep=True) for name, frame in baseline.items()}
+    for fault_id in [f"F{i:02d}" for i in range(1, 13)]:
+        inject_fault(
+            baseline,
+            fault_id,
+            TARGET_DATE,
+            rng=np.random.default_rng(99),
+            start_date=START_DATE,
+            days=30,
+        )
+    for table_name, frame in baseline.items():
+        assert_frame_equal(frame, before[table_name])

@@ -3,7 +3,8 @@ fault_id: F10
 root_cause_type: schema_change
 affected_metric: daily_active_users
 affected_assets: [events, schema_snapshots, partition_metadata, pipeline_runs]
-injection: {strategy: change_app_build_number_integer_to_varchar, metric_date: "2026-01-30"}
+injection: {strategy: change_app_build_number_integer_to_varchar, metric_date: "2026-01-30", from_value: BIGINT, to_value: VARCHAR}
 expected_evidence: [schema diff reports INTEGER to VARCHAR, pipeline status is failed]
 expected_direction: decrease
+effect_size_type: relative
 minimum_effect_size: 0.10

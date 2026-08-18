@@ -3,7 +3,8 @@ fault_id: F04
 root_cause_type: data_delay
 affected_metric: daily_active_users
 affected_assets: [events, partition_metadata, pipeline_runs]
-injection: {strategy: delay_android_events_one_day, metric_date: "2026-01-30"}
+injection: {strategy: delay_android_events_one_day, metric_date: "2026-01-30", device_type: android, ratio: 0.60, shift_days: 1}
 expected_evidence: [target Android events decrease, following day events rebound]
 expected_direction: decrease
+effect_size_type: relative
 minimum_effect_size: 0.10

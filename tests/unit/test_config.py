@@ -6,6 +6,8 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+from benchmark.evaluation import calculate_effect, validate_effect
+from config.faults import InjectionSpec
 from config.metrics import MetricsConfig, load_metrics_config
 from data.generator import (
     generate_daily_metrics,
@@ -78,3 +80,26 @@ def test_metric_query_rejects_duplicate_metric_dates(tmp_path: Path) -> None:
     subscriptions = generate_subscriptions(users, start_date, 3, rng)
     with pytest.raises(ValueError, match="duplicate metric dates"):
         generate_daily_metrics(users, events, subscriptions, start_date, 3, broken_path)
+
+
+def test_metric_and_injection_specs_reject_unknown_fields() -> None:
+    payload = load_metrics_config().model_dump()
+    payload["metrics"][0]["time_colum"] = "event_time"
+    with pytest.raises(ValidationError):
+        MetricsConfig.model_validate(payload)
+
+    with pytest.raises(ValidationError):
+        InjectionSpec.model_validate({"strategy": "x", "ratto": 0.5})
+
+
+def test_effect_evaluator_handles_relative_absolute_and_zero_baselines() -> None:
+    assert calculate_effect(100, 75, effect_size_type="relative") == -0.25
+    assert calculate_effect(0.08, 0.13, effect_size_type="absolute") == 0.05
+    assert calculate_effect(0, 0, effect_size_type="relative") == 0
+    assert validate_effect(
+        0,
+        1,
+        expected_direction="increase",
+        effect_size_type="relative",
+        minimum_effect_size=0.2,
+    )

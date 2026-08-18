@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -32,8 +34,9 @@ class FaultDefinition(BaseModel):
     affected_assets: list[str] = Field(min_length=1)
     injection_strategy: str = Field(min_length=1)
     expected_evidence: list[str] = Field(min_length=2)
-    expected_direction: str = Field(min_length=1)
-    minimum_effect_size: float = Field(gt=0, lt=1)
+    expected_direction: Literal["increase", "decrease"]
+    effect_size_type: Literal["relative", "absolute"] = "relative"
+    minimum_effect_size: float = Field(gt=0)
     aliases: list[str] = Field(default_factory=list)
 
 
@@ -79,10 +82,40 @@ class GroundTruthCase(BaseModel):
     root_cause_type: str = Field(min_length=1)
     affected_metric: str = Field(min_length=1)
     affected_assets: list[str] = Field(min_length=1)
-    injection: dict[str, str] = Field(min_length=1)
+    injection: InjectionSpec
     expected_evidence: list[str] = Field(min_length=2)
-    expected_direction: str = Field(min_length=1)
-    minimum_effect_size: float = Field(gt=0, lt=1)
+    expected_direction: Literal["increase", "decrease"]
+    effect_size_type: Literal["relative", "absolute"] = "relative"
+    minimum_effect_size: float = Field(gt=0)
+
+
+class InjectionSpec(BaseModel):
+    """Strongly typed parameters for one concrete fault case."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    strategy: str = Field(min_length=1)
+    metric_date: date | None = None
+    ratio: float | None = Field(default=None, ge=0, le=1)
+    device_type: str | None = None
+    region: str | None = None
+    shift_hours: int | None = None
+    shift_days: int | None = None
+    multiplier: float | None = Field(default=None, gt=0)
+    from_value: str | None = None
+    to_value: str | None = None
+    control_ratio: float | None = Field(default=None, ge=0, le=1)
+    treatment_ratio: float | None = Field(default=None, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_split(self) -> InjectionSpec:
+        if (
+            self.control_ratio is not None
+            and self.treatment_ratio is not None
+            and abs(self.control_ratio + self.treatment_ratio - 1.0) > 1e-9
+        ):
+            raise ValueError("control_ratio and treatment_ratio must sum to 1")
+        return self
 
 
 def load_ground_truth_cases(
@@ -107,4 +140,10 @@ def load_ground_truth_cases(
             )
         if case.affected_metric not in fault.affected_metrics:
             raise ValueError(f"{case.case_id} metric is not valid for {case.fault_id}")
+        if case.injection.strategy != fault.injection_strategy:
+            raise ValueError(f"{case.case_id} strategy does not match {case.fault_id}")
+        if case.expected_direction != fault.expected_direction:
+            raise ValueError(f"{case.case_id} direction does not match {case.fault_id}")
+        if case.effect_size_type != fault.effect_size_type:
+            raise ValueError(f"{case.case_id} effect type does not match {case.fault_id}")
     return cases

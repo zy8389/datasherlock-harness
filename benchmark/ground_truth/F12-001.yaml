@@ -3,7 +3,8 @@ fault_id: F12
 root_cause_type: ab_split_anomaly
 affected_metric: conversion_rate
 affected_assets: [experiment_assignments, experiment_configs, subscriptions]
-injection: {strategy: change_experiment_split_to_20_80, metric_date: "2026-01-30"}
+injection: {strategy: change_experiment_split_to_20_80, metric_date: "2026-01-30", control_ratio: 0.20, treatment_ratio: 0.80}
 expected_evidence: [allocation changes from 50/50, conversion rate shifts with variant propensity]
 expected_direction: increase
-minimum_effect_size: 0.05
+effect_size_type: relative
+minimum_effect_size: 0.04

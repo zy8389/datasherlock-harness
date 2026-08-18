@@ -27,7 +27,7 @@ DEFAULT_METRICS_PATH = _resolve_config_path("metrics.yaml")
 class MetricDefinition(BaseModel):
     """Validated executable definition for one metric."""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     id: str = Field(min_length=1)
     name: str = Field(min_length=1)
@@ -35,6 +35,9 @@ class MetricDefinition(BaseModel):
     aggregation: str = Field(min_length=1)
     query: str = Field(min_length=1)
     unit: str = Field(min_length=1)
+    formula: str | None = None
+    validity: dict[str, Any] = Field(default_factory=dict)
+    zero_denominator: float | int | None = None
     source_table: str | None = None
     source_tables: list[str] = Field(default_factory=list)
     time_column: str | None = None

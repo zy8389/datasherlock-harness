@@ -45,6 +45,10 @@ DataSherlock Harness 的目标是：
 - `IncidentState` 和严格只读 SQL Runner，包括 AST 校验、超时、行数限制、结构化响应和独立 JSONL audit；
 - GitHub Actions CI 配置和完整单元测试。
 
+指标配置中的 `timezone` 当前用于 IANA 时区校验；指标 SQL 仍以显式的
+`CAST(event_time AS DATE)` 执行，统一的 timezone normalization 尚未接入。
+F05 因此只验证明确的事件时间偏移和可观察的日边界变化。
+
 仍未实现或仅有接口/文档准备：
 
 - Data Quality Tools、Planner、Hypothesis Manager、Harness Graph、Checkpoint Runtime；

@@ -10,6 +10,7 @@ faults:
       - adjacent Android partitions remain populated
       - partition metadata or pipeline run is missing/failed
     expected_direction: decrease
+    effect_size_type: relative
     minimum_effect_size: 0.20
   - id: F02
     root_cause_type: duplicate_batch
@@ -21,6 +22,7 @@ faults:
       - raw event count increases
       - ai_task_count increases while DAU may remain stable
     expected_direction: increase
+    effect_size_type: relative
     minimum_effect_size: 0.20
   - id: F03
     root_cause_type: null_value_anomaly
@@ -32,6 +34,7 @@ faults:
       - user_id null rate increases on the target partition
       - valid distinct user count and DAU decrease
     expected_direction: decrease
+    effect_size_type: relative
     minimum_effect_size: 0.01
   - id: F04
     root_cause_type: data_delay
@@ -43,28 +46,31 @@ faults:
       - following-day Android events rebound
       - pipeline freshness metadata reports delayed data
     expected_direction: decrease
+    effect_size_type: relative
     minimum_effect_size: 0.10
   - id: F05
     root_cause_type: timezone_error
     affected_metrics: [daily_active_users]
     affected_assets: [events, metric_versions, pipeline_runs]
-    injection_strategy: shift_cn_boundary_events_eight_hours
+    injection_strategy: shift_region_boundary_events
     expected_evidence:
       - hourly event distribution shifts by a fixed offset
       - target-day CN DAU changes near the date boundary
       - timezone configuration and data timestamps disagree
     expected_direction: decrease
+    effect_size_type: relative
     minimum_effect_size: 0.01
   - id: F06
     root_cause_type: unit_error
     affected_metrics: [average_session_duration]
     affected_assets: [events, schema_snapshots]
-    injection_strategy: multiply_duration_seconds_by_1000
+    injection_strategy: multiply_duration_seconds
     expected_evidence:
       - duration_seconds contains approximately thousand-fold outliers
       - duration distribution shifts materially
       - average session duration increases
     expected_direction: increase
+    effect_size_type: relative
     minimum_effect_size: 0.20
   - id: F07
     root_cause_type: join_filter
@@ -76,6 +82,7 @@ faults:
       - free users are disproportionately removed
       - the metric SQL differs by an unexpected inner join
     expected_direction: decrease
+    effect_size_type: relative
     minimum_effect_size: 0.01
   - id: F08
     root_cause_type: join_explosion
@@ -87,17 +94,19 @@ faults:
       - joined event row count is inflated
       - duplicate event_id values appear after the join
     expected_direction: increase
+    effect_size_type: relative
     minimum_effect_size: 0.20
   - id: F09
     root_cause_type: field_drift
     affected_metrics: [ai_task_count]
     affected_assets: [events, schema_snapshots]
-    injection_strategy: rename_run_ai_task_to_execute_ai_task
+    injection_strategy: rename_event_value
     expected_evidence:
       - run_ai_task frequency decreases
       - execute_ai_task appears in newer app versions
       - total event count remains approximately stable
     expected_direction: decrease
+    effect_size_type: relative
     minimum_effect_size: 0.10
   - id: F10
     root_cause_type: schema_change
@@ -109,6 +118,7 @@ faults:
       - pipeline compatibility status is failed
       - target partition is not fresh and DAU decreases
     expected_direction: decrease
+    effect_size_type: relative
     minimum_effect_size: 0.10
   - id: F11
     root_cause_type: metric_definition_change
@@ -120,6 +130,7 @@ faults:
       - old and new SQL differ by an event filter
       - raw event count does not fall with the new DAU
     expected_direction: decrease
+    effect_size_type: relative
     minimum_effect_size: 0.10
   - id: F12
     root_cause_type: ab_split_anomaly
@@ -131,4 +142,5 @@ faults:
       - experiment configuration version is anomalous
       - conversion rate shifts because variants have different propensity
     expected_direction: increase
+    effect_size_type: relative
     minimum_effect_size: 0.05

@@ -3,7 +3,8 @@ fault_id: F03
 root_cause_type: null_value_anomaly
 affected_metric: daily_active_users
 affected_assets: [events, pipeline_runs]
-injection: {strategy: null_mobile_user_ids, metric_date: "2026-01-30"}
+injection: {strategy: null_mobile_user_ids, metric_date: "2026-01-30", ratio: 0.25, device_type: mobile}
 expected_evidence: [event user_id null rate increases, event row count stays stable]
 expected_direction: decrease
+effect_size_type: relative
 minimum_effect_size: 0.01
