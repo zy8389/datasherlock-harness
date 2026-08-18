@@ -6,6 +6,7 @@ from pathlib import Path
 import duckdb
 import numpy as np
 import pandas as pd
+import yaml
 
 EVENT_NAMES = [
     "login",
@@ -23,6 +24,8 @@ DEVICES = ["web", "ios", "android"]
 CHANNELS = ["organic", "ads", "referral", "partner"]
 USER_TYPES = ["free", "trial", "paid"]
 PLANS = ["free", "basic", "pro", "enterprise"]
+
+DEFAULT_METRICS_PATH = Path(__file__).parents[2] / "config" / "metrics.yaml"
 
 
 def positive_int(value: str) -> int:
@@ -75,7 +78,7 @@ def generate_events(
     event_delays = np.array([rng.integers(0, remaining + 1) for remaining in remaining_seconds])
     event_times = register_times + pd.to_timedelta(event_delays, unit="s")
     event_offsets = ((event_times - start_date) / pd.Timedelta(days=1)).to_numpy(dtype=np.int64)
-    session_slots = rng.integers(1, 4, size=event_count)
+    session_slots = (event_times.dt.hour * 2 + event_times.dt.minute // 30).to_numpy()
 
     return pd.DataFrame(
         {
@@ -84,7 +87,7 @@ def generate_events(
             "event_time": event_times,
             "event_name": rng.choice(EVENT_NAMES, size=event_count, p=[0.35, 0.12, 0.16, 0.22, 0.1, 0.05]),
             "session_id": [
-                f"s_{user_id}_{day_offset:03d}_{slot}"
+                f"s_{user_id}_{day_offset:03d}_{slot:02d}"
                 for user_id, day_offset, slot in zip(user_ids, event_offsets, session_slots)
             ],
             "device_type": device_type,
@@ -160,71 +163,60 @@ def generate_daily_metrics(
     subscriptions: pd.DataFrame,
     start_date: pd.Timestamp,
     days: int,
+    metrics_path: Path = DEFAULT_METRICS_PATH,
 ) -> pd.DataFrame:
-    events = events.copy()
-    events["metric_date"] = events["event_time"].dt.date
+    """Calculate every daily metric from the canonical SQL in metrics.yaml."""
+    with metrics_path.open(encoding="utf-8") as file:
+        config = yaml.safe_load(file)
 
-    users = users.copy()
-    users["metric_date"] = users["register_time"].dt.date
+    definitions = config.get("metrics") if isinstance(config, dict) else None
+    if not isinstance(definitions, list) or not definitions:
+        raise ValueError("metrics config must contain a non-empty 'metrics' list")
 
-    subscriptions = subscriptions.copy()
-    all_dates = pd.DataFrame({"metric_date": pd.date_range(start_date, periods=days).date})
+    metric_ids: list[str] = []
+    queries: list[str] = []
+    for definition in definitions:
+        if not isinstance(definition, dict):
+            raise TypeError("each metric definition must be a mapping")
+        metric_id = definition.get("id")
+        query = definition.get("query")
+        if not isinstance(metric_id, str) or not metric_id:
+            raise ValueError("each metric definition must have a non-empty string id")
+        if metric_id in metric_ids:
+            raise ValueError(f"duplicate metric id: {metric_id}")
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError(f"metric {metric_id!r} must have a non-empty query")
+        metric_ids.append(metric_id)
+        queries.append(query)
 
-    dau = events.groupby("metric_date")["user_id"].nunique().rename("daily_active_users")
-    new_users = users.groupby("metric_date")["user_id"].nunique().rename("new_users")
-    metric_timestamps = pd.to_datetime(all_dates["metric_date"])
-    subscription_starts = subscriptions["start_time"].dt.normalize()
-    subscription_ends = subscriptions["end_time"].dt.normalize()
-    paid_users = pd.Series(
-        [
-            subscriptions.loc[
-                (subscription_starts <= metric_date)
-                & (subscription_ends.isna() | (subscription_ends > metric_date)),
-                "user_id",
-            ].nunique()
-            for metric_date in metric_timestamps
-        ],
-        index=all_dates.index,
-        name="paid_users",
+    metric_dates = pd.DataFrame(
+        {"metric_date": pd.date_range(start_date, periods=days).date}
     )
-    ai_task_count = events.loc[events["event_name"] == "run_ai_task"].groupby("metric_date")["event_id"].count().rename("ai_task_count")
-    subscription_start_dates = subscriptions["start_time"].dt.date
-    newly_paid_users = (
-        subscriptions.assign(metric_date=subscription_start_dates)[["metric_date", "user_id"]]
-        .drop_duplicates()
-    )
-    active_users = events[["metric_date", "user_id"]].drop_duplicates()
-    converted_users = (
-        active_users.merge(newly_paid_users, on=["metric_date", "user_id"], how="inner")
-        .groupby("metric_date")["user_id"]
-        .nunique()
-        .rename("_converted_users")
-    )
-    session_durations = (
-        events.groupby(["metric_date", "user_id", "session_id"], as_index=False)["duration_seconds"]
-        .sum()
-    )
-    avg_duration = (
-        session_durations.groupby("metric_date")["duration_seconds"]
-        .mean()
-        .rename("average_session_duration")
-    )
+    metrics = metric_dates.copy()
 
-    metrics = all_dates.merge(dau, on="metric_date", how="left")
-    metrics = metrics.merge(new_users, on="metric_date", how="left")
-    metrics = metrics.join(paid_users)
-    metrics = metrics.merge(ai_task_count, on="metric_date", how="left")
-    metrics = metrics.merge(avg_duration, on="metric_date", how="left")
-    metrics = metrics.merge(converted_users, on="metric_date", how="left")
+    with duckdb.connect(":memory:") as conn:
+        conn.register("metric_dates", metric_dates)
+        conn.register("users", users)
+        conn.register("events", events)
+        conn.register("subscriptions", subscriptions)
 
-    metrics = metrics.fillna(0)
-    metrics["conversion_rate"] = np.where(
-        metrics["daily_active_users"] > 0,
-        metrics["_converted_users"] / metrics["daily_active_users"],
-        0,
-    )
+        for metric_id, query in zip(metric_ids, queries):
+            result = conn.execute(query).df()
+            expected_columns = {"metric_date", metric_id}
+            if set(result.columns) != expected_columns:
+                raise ValueError(
+                    f"metric {metric_id!r} query must return exactly "
+                    f"{sorted(expected_columns)!r}"
+                )
+            result["metric_date"] = pd.to_datetime(result["metric_date"]).dt.date
+            if result["metric_date"].duplicated().any():
+                raise ValueError(
+                    f"metric {metric_id!r} query returned duplicate metric dates"
+                )
+            metrics = metrics.merge(result, on="metric_date", how="left")
 
-    return metrics.drop(columns="_converted_users")
+    metrics[metric_ids] = metrics[metric_ids].fillna(0)
+    return metrics
 
 
 def write_outputs(output_dir: Path, tables: dict[str, pd.DataFrame]) -> None:

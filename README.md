@@ -352,7 +352,7 @@ generate_incident_report()
 
 ### 9.1 SQL 权限
 
-默认只允许：
+`src/tools/sql_runner.py` 默认只允许单条：
 
 ```sql
 SELECT
@@ -372,7 +372,14 @@ TRUNCATE
 INSERT
 ```
 
-写操作只能在沙箱数据库中执行，并且必须经过人工审批。
+安全边界不依赖 SQL 前缀或关键词正则。执行器先使用 SQL AST 校验完整语句，
+再使用 DuckDB 原生 parser 复核 statement type；`WITH` 的最终语句及
+`EXPLAIN` / `EXPLAIN ANALYZE` 的内部语句都必须是只读查询。执行阶段使用
+`read_only=True` 连接并关闭 DuckDB external access，阻止数据库写入以及
+`read_csv`、`ATTACH` 等外部文件或网络访问。每次执行生成唯一 `query_id`。
+
+写操作只能由独立的沙箱修复工具执行，并且必须经过人工审批，不能通过 SQL
+Runner 绕过。
 
 ### 9.2 默认资源限制
 
@@ -384,6 +391,9 @@ INSERT
 最大 Python 执行时间：30 秒
 最大修复重试：2 次
 ```
+
+SQL Runner 会在超时后调用 DuckDB interrupt，并在返回第 1000 行后截断结果；
+超时、校验失败和执行失败都携带同一次调用的 `query_id`。
 
 ### 9.3 根因输出要求
 

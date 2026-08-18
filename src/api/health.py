@@ -21,7 +21,11 @@ def _check_duckdb() -> str:
     if not database_path.is_file():
         raise FileNotFoundError(f"DuckDB database does not exist: {database_path}")
 
-    connection = duckdb.connect(str(database_path), read_only=True)
+    connection = duckdb.connect(
+        str(database_path),
+        read_only=True,
+        config={"enable_external_access": "false"},
+    )
     try:
         table_names = {row[0] for row in connection.execute("SHOW TABLES").fetchall()}
         missing_tables = REQUIRED_DUCKDB_TABLES - table_names

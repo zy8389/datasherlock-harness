@@ -11,6 +11,11 @@ metrics:
     entity_column: user_id
     aggregation: count_distinct
     formula: COUNT(DISTINCT user_id)
+    query: >-
+      SELECT CAST(event_time AS DATE) AS metric_date,
+      COUNT(DISTINCT user_id) AS daily_active_users
+      FROM events
+      GROUP BY metric_date
     unit: users
 
   - id: new_users
@@ -21,11 +26,16 @@ metrics:
     entity_column: user_id
     aggregation: count_distinct
     formula: COUNT(DISTINCT user_id)
+    query: >-
+      SELECT CAST(register_time AS DATE) AS metric_date,
+      COUNT(DISTINCT user_id) AS new_users
+      FROM users
+      GROUP BY metric_date
     unit: users
 
   - id: paid_users
     name: Paid Users
-    description: Distinct users with a valid subscription interval on the metric date.
+    description: Distinct users with a valid subscription lifecycle on the metric date.
     source_table: subscriptions
     time_column: start_time
     entity_column: user_id
@@ -35,9 +45,29 @@ metrics:
       end_column: end_time
       end_operator: ">"
       null_end_means_valid: true
+      status_column: subscription_status
+      active_statuses:
+        - active
+        - cancelled
+      end_required_statuses:
+        - cancelled
     formula: >-
       COUNT(DISTINCT user_id) WHERE start_time <= metric_date
+      AND subscription_status IN ('active', 'cancelled')
+      AND (subscription_status != 'cancelled' OR end_time IS NOT NULL)
       AND (end_time IS NULL OR end_time > metric_date)
+    query: >-
+      SELECT dates.metric_date,
+      COUNT(DISTINCT subscriptions.user_id) AS paid_users
+      FROM metric_dates AS dates
+      LEFT JOIN subscriptions
+      ON CAST(subscriptions.start_time AS DATE) <= dates.metric_date
+      AND subscriptions.subscription_status IN ('active', 'cancelled')
+      AND (subscriptions.subscription_status != 'cancelled'
+      OR subscriptions.end_time IS NOT NULL)
+      AND (subscriptions.end_time IS NULL
+      OR CAST(subscriptions.end_time AS DATE) > dates.metric_date)
+      GROUP BY dates.metric_date
     unit: users
 
   - id: ai_task_count
@@ -50,6 +80,12 @@ metrics:
     filters:
       event_name: run_ai_task
     formula: COUNT(event_id) WHERE event_name = 'run_ai_task'
+    query: >-
+      SELECT CAST(event_time AS DATE) AS metric_date,
+      COUNT(event_id) AS ai_task_count
+      FROM events
+      WHERE event_name = 'run_ai_task'
+      GROUP BY metric_date
     unit: events
 
   - id: average_session_duration
@@ -62,12 +98,24 @@ metrics:
       - session_id
     aggregation: average_after_group_sum
     formula: AVG(SUM(duration_seconds) GROUP BY user_id, session_id)
+    query: >-
+      SELECT metric_date,
+      AVG(session_duration) AS average_session_duration
+      FROM (
+      SELECT CAST(event_time AS DATE) AS metric_date,
+      user_id, session_id, SUM(duration_seconds) AS session_duration
+      FROM events
+      GROUP BY metric_date, user_id, session_id
+      ) AS sessions
+      GROUP BY metric_date
     unit: seconds
 
   - id: conversion_rate
     name: Paid User Conversion Rate
     description: Distinct users active and starting a paid subscription on the metric date, divided by daily active users.
-    source_table: daily_metrics
+    source_tables:
+      - events
+      - subscriptions
     dependencies:
       - daily_active_users
     aggregation: ratio
@@ -80,4 +128,20 @@ metrics:
       AND subscriptions.user_id IN (
       SELECT user_id FROM events WHERE DATE(event_time) = metric_date))
       / COUNT(DISTINCT events.user_id)
+    query: >-
+      WITH active_users AS (
+      SELECT DISTINCT CAST(event_time AS DATE) AS metric_date, user_id
+      FROM events
+      ), newly_paid_users AS (
+      SELECT DISTINCT CAST(start_time AS DATE) AS metric_date, user_id
+      FROM subscriptions
+      )
+      SELECT active_users.metric_date,
+      COUNT(DISTINCT newly_paid_users.user_id)::DOUBLE
+      / NULLIF(COUNT(DISTINCT active_users.user_id), 0) AS conversion_rate
+      FROM active_users
+      LEFT JOIN newly_paid_users
+      ON newly_paid_users.metric_date = active_users.metric_date
+      AND newly_paid_users.user_id = active_users.user_id
+      GROUP BY active_users.metric_date
     unit: ratio

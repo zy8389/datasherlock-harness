@@ -40,3 +40,20 @@ def test_duckdb_health_check_accepts_complete_database(
     monkeypatch.setenv("DUCKDB_PATH", str(database_path))
 
     assert _check_duckdb() == "ok"
+
+
+def test_duckdb_health_check_uses_runner_compatible_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "complete.duckdb"
+    with duckdb.connect(str(database_path)) as connection:
+        for table_name in REQUIRED_DUCKDB_TABLES:
+            connection.execute(f"CREATE TABLE {table_name} (id INTEGER)")
+    monkeypatch.setenv("DUCKDB_PATH", str(database_path))
+
+    with duckdb.connect(
+        str(database_path),
+        read_only=True,
+        config={"enable_external_access": "false"},
+    ):
+        assert _check_duckdb() == "ok"

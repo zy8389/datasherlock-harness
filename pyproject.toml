@@ -16,6 +16,7 @@ dependencies = [
     "pyarrow>=16.0",
     "pyyaml>=6.0",
     "psycopg[binary]>=3.2,<4",
+    "sqlglot>=30.17,<31",
     "streamlit>=1.38,<2",
     "uvicorn[standard]>=0.30,<1",
 ]

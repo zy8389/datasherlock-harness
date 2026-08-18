@@ -108,6 +108,7 @@ def test_paid_users_is_active_on_each_metric_date() -> None:
             "user_id": [1, 2],
             "start_time": [start_date, start_date + pd.Timedelta(days=1)],
             "end_time": [start_date + pd.Timedelta(days=2), pd.NaT],
+            "subscription_status": ["cancelled", "active"],
         }
     )
 
@@ -139,6 +140,7 @@ def test_average_session_duration_aggregates_events_in_one_session() -> None:
             "user_id": [],
             "start_time": pd.Series([], dtype="datetime64[ns]"),
             "end_time": pd.Series([], dtype="datetime64[ns]"),
+            "subscription_status": pd.Series([], dtype="object"),
         }
     )
 
@@ -163,8 +165,12 @@ def test_metric_semantics_define_required_metrics() -> None:
     }
     assert definitions.keys() == expected_metric_fields
     assert definitions["paid_users"]["validity"]["end_operator"] == ">"
+    assert definitions["paid_users"]["validity"]["end_required_statuses"] == [
+        "cancelled"
+    ]
     assert definitions["conversion_rate"]["denominator"] == "daily_active_users"
     assert definitions["conversion_rate"]["zero_denominator"] == 0
+    assert all(definition["query"].strip() for definition in definitions.values())
 
 
 def test_metric_semantics_match_generated_columns() -> None:
@@ -182,6 +188,37 @@ def test_metric_semantics_match_generated_columns() -> None:
     assert {definition["id"] for definition in definitions} == set(metrics.columns) - {
         "metric_date"
     }
+
+
+def test_daily_metrics_are_calculated_from_metrics_config(tmp_path: Path) -> None:
+    start_date = pd.Timestamp("2026-01-01")
+    rng = np.random.default_rng(42)
+    users = generate_users(20, start_date, 3, rng)
+    events = generate_events(users, 100, start_date, 3, rng)
+    subscriptions = generate_subscriptions(users, start_date, 3, rng)
+
+    source_path = Path(__file__).parents[2] / "config" / "metrics.yaml"
+    with source_path.open(encoding="utf-8") as file:
+        config = yaml.safe_load(file)
+    daily_active_users = next(
+        metric for metric in config["metrics"] if metric["id"] == "daily_active_users"
+    )
+    daily_active_users["query"] = (
+        "SELECT metric_date, 123 AS daily_active_users FROM metric_dates"
+    )
+    metrics_path = tmp_path / "metrics.yaml"
+    metrics_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    metrics = generate_daily_metrics(
+        users,
+        events,
+        subscriptions,
+        start_date,
+        3,
+        metrics_path=metrics_path,
+    )
+
+    assert metrics["daily_active_users"].tolist() == [123, 123, 123]
 
 
 def test_conversion_rate_counts_active_users_starting_paid_subscription() -> None:
@@ -207,6 +244,7 @@ def test_conversion_rate_counts_active_users_starting_paid_subscription() -> Non
             "user_id": [1, 3],
             "start_time": [start_date, start_date + pd.Timedelta(days=1)],
             "end_time": [pd.NaT, pd.NaT],
+            "subscription_status": ["active", "active"],
         }
     )
 
@@ -227,10 +265,43 @@ def test_session_ids_do_not_span_users_or_metric_dates() -> None:
     session_owners = events.groupby("session_id").agg(
         user_count=("user_id", "nunique"),
         date_count=("metric_date", "nunique"),
+        first_event=("event_time", "min"),
+        last_event=("event_time", "max"),
     )
 
     assert session_owners["user_count"].eq(1).all()
     assert session_owners["date_count"].eq(1).all()
+    assert (
+        session_owners["last_event"] - session_owners["first_event"]
+        < pd.Timedelta(minutes=30)
+    ).all()
+
+
+def test_paid_users_excludes_inconsistent_subscription_states() -> None:
+    start_date = pd.Timestamp("2026-01-01")
+    users = pd.DataFrame({"user_id": [1], "register_time": [start_date]})
+    events = pd.DataFrame(
+        {
+            "event_id": [1],
+            "user_id": [1],
+            "event_time": [start_date],
+            "event_name": ["login"],
+            "session_id": ["s1"],
+            "duration_seconds": [10.0],
+        }
+    )
+    subscriptions = pd.DataFrame(
+        {
+            "user_id": [1, 2, 3],
+            "start_time": [start_date, start_date, start_date],
+            "end_time": [pd.NaT, pd.NaT, pd.NaT],
+            "subscription_status": ["active", "cancelled", "unknown"],
+        }
+    )
+
+    metrics = generate_daily_metrics(users, events, subscriptions, start_date, 1)
+
+    assert metrics.loc[0, "paid_users"] == 1
 
 
 @pytest.mark.parametrize(
