@@ -1,3 +1,4 @@
+import json
 from datetime import timedelta
 from pathlib import Path
 
@@ -26,6 +27,12 @@ FOCUSED_CASE_IDS = (
     "F10-001",
     "F11-001",
     "F12-001",
+)
+POSITIVE_RUNTIME_EVIDENCE_CASE_IDS = (
+    "F01-001",
+    "F04-001",
+    "F10-001",
+    "F11-001",
 )
 
 
@@ -65,7 +72,7 @@ def test_focused_case_has_independent_evidence_contract(
     assert {path.asset for path in case.evidence_paths}.issubset(case.affected_assets)
 
 
-@pytest.mark.parametrize("case_id", FOCUSED_CASE_IDS)
+@pytest.mark.parametrize("case_id", POSITIVE_RUNTIME_EVIDENCE_CASE_IDS)
 def test_evidence_validator_uses_the_bound_case_contract(
     case_id: str,
     baseline: dict[str, pd.DataFrame],
@@ -76,7 +83,7 @@ def test_evidence_validator_uses_the_bound_case_contract(
     validate_expected_evidence(result, baseline)
 
 
-@pytest.mark.parametrize("case_id", FOCUSED_CASE_IDS)
+@pytest.mark.parametrize("case_id", POSITIVE_RUNTIME_EVIDENCE_CASE_IDS)
 def test_missing_case_specific_metadata_fails_validation(
     case_id: str,
     baseline: dict[str, pd.DataFrame],
@@ -97,13 +104,68 @@ def test_missing_case_specific_metadata_fails_validation(
         validate_expected_evidence(result, baseline)
 
 
+def test_f05_current_injector_exposes_independent_metadata_blocker(
+    baseline: dict[str, pd.DataFrame],
+    focused_cases: dict[str, GroundTruthCase],
+) -> None:
+    case = focused_cases["F05-001"]
+    result = _inject(baseline, case)
+    target_date = case.injection.metric_date
+    assert target_date is not None
+
+    region_users = set(
+        baseline["users"].loc[
+            baseline["users"]["region"].eq(case.injection.region), "user_id"
+        ]
+    )
+    baseline_hours = (
+        baseline["events"]
+        .loc[
+            baseline["events"]["event_time"].dt.date.eq(target_date)
+            & baseline["events"]["user_id"].isin(region_users),
+            "event_time",
+        ]
+        .dt.hour.value_counts()
+        .sort_index()
+    )
+    fault_hours = (
+        result.tables["events"]
+        .loc[
+            result.tables["events"]["event_time"].dt.date.eq(target_date)
+            & result.tables["events"]["user_id"].isin(region_users),
+            "event_time",
+        ]
+        .dt.hour.value_counts()
+        .sort_index()
+    )
+    assert not baseline_hours.equals(fault_hours)
+
+    baseline_versions = baseline["metric_versions"].loc[
+        baseline["metric_versions"]["metric_id"].eq(case.affected_metric)
+    ].sort_values(["version", "effective_at"])
+    assert baseline_versions.iloc[-1]["timezone"] == "UTC"
+    fault_versions = result.tables["metric_versions"].loc[
+        result.tables["metric_versions"]["metric_id"].eq(case.affected_metric)
+    ]
+    fault_specific_versions = fault_versions.loc[
+        fault_versions["version"].astype(int).gt(int(baseline_versions.iloc[-1]["version"]))
+        & fault_versions["effective_at"].map(
+            lambda value: pd.Timestamp(value).date() == target_date
+        )
+    ]
+    assert fault_specific_versions.empty
+
+    with pytest.raises(ValueError, match="fault metric version"):
+        validate_expected_evidence(result, baseline)
+
+
 def test_single_evidence_path_fails_complete_ground_truth_validation(
     focused_cases: dict[str, GroundTruthCase],
 ) -> None:
     case = focused_cases["F01-001"]
     invalid_case = case.model_copy(update={"evidence_paths": case.evidence_paths[:1]})
 
-    with pytest.raises(ValueError, match="at least two"):
+    with pytest.raises(ValueError, match="missing required evidence sources"):
         validate_ground_truth_case(invalid_case)
 
 
@@ -121,7 +183,7 @@ def test_two_business_evidence_paths_fail_independence_validation(
         update={"evidence_paths": business_paths + [second_business_path]}
     )
 
-    with pytest.raises(ValueError, match="non-business"):
+    with pytest.raises(ValueError, match="missing required evidence sources"):
         validate_ground_truth_case(invalid_case)
 
 
@@ -156,6 +218,50 @@ def test_duplicate_evidence_path_fails_model_validation(
         GroundTruthCase.model_validate(payload)
 
 
+def test_ground_truth_missing_catalog_affected_asset_fails_validation(
+    focused_cases: dict[str, GroundTruthCase],
+) -> None:
+    case = focused_cases["F01-001"]
+    invalid_case = case.model_copy(
+        update={"affected_assets": ["events", "partition_metadata"]}
+    )
+
+    with pytest.raises(ValueError, match="affected_assets do not match"):
+        validate_ground_truth_case(invalid_case)
+
+
+def test_ground_truth_extra_catalog_affected_asset_fails_validation(
+    focused_cases: dict[str, GroundTruthCase],
+) -> None:
+    case = focused_cases["F01-001"]
+    invalid_case = case.model_copy(
+        update={"affected_assets": [*case.affected_assets, "unexpected_asset"]}
+    )
+
+    with pytest.raises(ValueError, match="affected_assets do not match"):
+        validate_ground_truth_case(invalid_case)
+
+
+def test_ground_truth_effect_threshold_mismatch_fails_validation(
+    focused_cases: dict[str, GroundTruthCase],
+) -> None:
+    case = focused_cases["F12-001"]
+    invalid_case = case.model_copy(update={"minimum_effect_size": 0.04})
+
+    with pytest.raises(ValueError, match="minimum_effect_size does not match"):
+        validate_ground_truth_case(invalid_case)
+
+
+def test_ground_truth_missing_catalog_required_source_fails_validation(
+    focused_cases: dict[str, GroundTruthCase],
+) -> None:
+    case = focused_cases["F01-001"]
+    invalid_case = case.model_copy(update={"evidence_paths": case.evidence_paths[:1]})
+
+    with pytest.raises(ValueError, match="missing required evidence sources"):
+        validate_ground_truth_case(invalid_case)
+
+
 def test_loader_is_the_catalog_aware_ground_truth_entry_point(
     tmp_path: Path, focused_cases: dict[str, GroundTruthCase]
 ) -> None:
@@ -163,7 +269,7 @@ def test_loader_is_the_catalog_aware_ground_truth_entry_point(
     payload["evidence_paths"] = payload["evidence_paths"][:1]
     (tmp_path / "F01-001.yaml").write_text(yaml.safe_dump(payload), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="at least two"):
+    with pytest.raises(ValueError, match="missing required evidence sources"):
         load_ground_truth_cases(tmp_path, load_fault_catalog())
 
 
@@ -277,7 +383,36 @@ def test_each_focused_fault_has_business_and_independent_sql_evidence(
     write_outputs(output_dir, result.tables)
     database_path = output_dir / "datasherlock.duckdb"
 
-    for sql in _evidence_sql(case):
-        query_result = run_readonly_sql(database_path, sql)
-        assert query_result.row_count >= 1
-        assert query_result.columns
+    business_sql, metadata_sql = _evidence_sql(case)
+    business_result = run_readonly_sql(database_path, business_sql)
+    metadata_result = run_readonly_sql(database_path, metadata_sql)
+    assert business_result.row_count >= 1
+    assert business_result.columns
+    assert metadata_result.row_count >= 1
+    assert metadata_result.columns
+
+    metadata_rows = [
+        dict(zip(metadata_result.columns, row, strict=True))
+        for row in metadata_result.rows
+    ]
+    if case.fault_id == "F01":
+        target = metadata_rows[0]
+        assert int(target["row_count"]) == 0
+        assert target["status"] == "missing"
+    elif case.fault_id == "F04":
+        target = metadata_rows[0]
+        assert target["status"] == "delayed" or target["error_type"] == "data_delay"
+    elif case.fault_id == "F05":
+        assert metadata_rows[-1]["timezone"] == "UTC"
+    elif case.fault_id == "F10":
+        schema = json.loads(str(metadata_rows[-1]["schema_json"]))
+        assert schema["app_build_number"] == "VARCHAR"
+    elif case.fault_id == "F11":
+        baseline_version, fault_version = metadata_rows[0], metadata_rows[-1]
+        assert int(fault_version["version"]) > int(baseline_version["version"])
+        assert fault_version["definition_hash"] != baseline_version["definition_hash"]
+        assert fault_version["query"] != baseline_version["query"]
+    elif case.fault_id == "F12":
+        target = metadata_rows[-1]
+        assert float(target["control_ratio"]) == pytest.approx(0.20)
+        assert float(target["treatment_ratio"]) == pytest.approx(0.80)

@@ -414,17 +414,6 @@ def _apply_strategy(
         )
         selected = boundary if boundary.any() else target
         tables["events"].loc[selected, "event_time"] += pd.Timedelta(hours=shift_hours)
-        baseline_query = tables["metric_versions"].loc[
-            tables["metric_versions"]["metric_id"].eq("daily_active_users")
-        ].iloc[-1]["query"]
-        _append_metric_version(
-            tables,
-            "daily_active_users",
-            str(baseline_query),
-            metric_date,
-            timezone="Asia/Shanghai",
-            date_grain="day",
-        )
         _mark_pipeline(
             tables,
             metric_date=metric_date,

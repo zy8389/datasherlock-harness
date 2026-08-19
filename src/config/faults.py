@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import date
 from enum import StrEnum
 from pathlib import Path
@@ -219,26 +220,44 @@ def validate_ground_truth_case(
         raise ValueError(f"{case.case_id} root cause does not match {case.fault_id}")
     if case.affected_metric not in fault.affected_metrics:
         raise ValueError(f"{case.case_id} metric is not valid for {case.fault_id}")
+    if set(case.affected_assets) != set(fault.affected_assets):
+        raise ValueError(
+            f"{case.case_id} affected_assets do not match {case.fault_id}"
+        )
     if case.injection.strategy != fault.injection_strategy:
         raise ValueError(f"{case.case_id} strategy does not match {case.fault_id}")
     if case.expected_direction != fault.expected_direction:
         raise ValueError(f"{case.case_id} direction does not match {case.fault_id}")
     if case.effect_size_type != fault.effect_size_type:
         raise ValueError(f"{case.case_id} effect type does not match {case.fault_id}")
+    if not math.isclose(
+        case.minimum_effect_size,
+        fault.minimum_effect_size,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        raise ValueError(
+            f"{case.case_id} minimum_effect_size does not match {case.fault_id}"
+        )
 
     declared_sources = set(fault.evidence_source_types)
-    undeclared_sources = {
-        path.source_type for path in case.evidence_paths
-    }.difference(declared_sources)
+    case_sources = {path.source_type for path in case.evidence_paths}
+    undeclared_sources = case_sources.difference(declared_sources)
     if undeclared_sources:
         values = ", ".join(sorted(source.value for source in undeclared_sources))
         raise ValueError(
             f"{case.case_id} evidence source types are not declared by "
             f"{case.fault_id}: {values}"
         )
+    missing_sources = declared_sources.difference(case_sources)
+    if missing_sources:
+        values = ", ".join(sorted(source.value for source in missing_sources))
+        raise ValueError(
+            f"{case.case_id} is missing required evidence sources: {values}"
+        )
 
     if case.fault_id in INDEPENDENT_METADATA_EVIDENCE_FAULT_IDS:
-        source_types = {path.source_type for path in case.evidence_paths}
+        source_types = case_sources
         if len(case.evidence_paths) < 2:
             raise ValueError(f"{case.case_id} requires at least two evidence paths")
         if EvidenceSourceType.BUSINESS_DATA not in source_types:

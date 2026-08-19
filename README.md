@@ -49,8 +49,10 @@ DataSherlock Harness 的目标是：
 
 指标配置中的 `timezone` 当前用于 IANA 时区校验；指标 SQL 仍以显式的
 `CAST(event_time AS DATE)` 执行，统一的 timezone normalization 尚未接入。
-F05 因此验证明确的事件时间偏移、可观察的日边界变化，以及
-`metric_versions` 中可查询的时间语义版本差异；这不是完整的运行时 timezone engine。
+F05 的 Evidence Contract 保留事件时间偏移和 `metric_versions` 独立证据的要求。
+当前 Fault Injector 只产生边界事件偏移和 `pipeline_runs` warning，不产生 fault-specific
+`metric_versions` record；因此 F05 的运行期独立 metadata evidence 是明确 blocker，归属
+Fault Injector task / YE。这不是完整的运行时 timezone engine。
 
 仍未实现或仅有接口/文档准备：
 
@@ -354,10 +356,17 @@ evidence_paths:
     signal: target Android partition row_count is zero
 ```
 
-`expected_evidence` 是面向人类阅读和报告展示的预期信号；`evidence_paths` 是
-Benchmark 使用的 machine-readable contract。Evidence path 的 `asset` 必须属于
-该 case 的 `affected_assets`，`source_type` 必须来自合法的证据来源类别，且同一条
-path 的 source、asset、signal 不能完全重复。
+三种字段有明确且不同的职责：
+
+```text
+Catalog expected_evidence = fault-family-level readable guidance
+Ground Truth expected_evidence = concrete case-level readable guidance
+evidence_source_types + evidence_paths = machine-readable contract
+```
+
+因此 validator 不会对两层 `expected_evidence` 做 exact string equality，也不会通过自然语言
+关键词判断证据类型。Evidence path 的 `asset` 必须属于该 case 的 `affected_assets`，
+`source_type` 必须来自合法的证据来源类别，且同一条 path 的 source、asset、signal 不能完全重复。
 
 对 metadata-dependent faults，独立证据必须至少包含：
 
@@ -373,8 +382,19 @@ metric version 或 experiment configuration 证据。
 
 Ground Truth 的完整入口是 `load_ground_truth_cases()`，它调用
 `validate_ground_truth_case()` 完成 catalog-aware 校验。`GroundTruthCase` 本身负责字段
-格式和 case 内部一致性；完整校验负责 fault catalog 对齐、独立 evidence source 要求和
-case-level contract。注入结果绑定具体 Ground Truth case 后，
+格式和 case 内部一致性；完整校验要求 Ground Truth 与 Catalog 对齐以下字段：
+
+- `root_cause_type`
+- `affected_metric`
+- `affected_assets`
+- `injection_strategy`
+- `expected_direction`
+- `effect_size_type`
+- `minimum_effect_size`
+- required `evidence_source_types` coverage
+
+这确保 Catalog 是 canonical fault-family source，同时要求每个具体 case 覆盖 Catalog 声明的
+所有证据类别。注入结果绑定具体 Ground Truth case 后，
 `validate_expected_evidence()` 按 `evidence_paths` 验证目标日期、目标资产、版本和配置，
 而不是通过自然语言关键词推断证据类型。
 

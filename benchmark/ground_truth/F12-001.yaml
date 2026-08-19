@@ -16,4 +16,4 @@ evidence_paths:
     signal: experiment configuration version changes to control 20/80 treatment allocation
 expected_direction: increase
 effect_size_type: relative
-minimum_effect_size: 0.04
+minimum_effect_size: 0.05
