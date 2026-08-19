@@ -44,6 +44,7 @@ class ModelSettings(BaseSettings):
     openai_base_url: str | None = None
     llm_timeout_seconds: float = Field(default=60.0, gt=0)
     llm_max_retries: int = Field(default=2, ge=0)
+    llm_retry_base_delay_seconds: float = Field(default=0.5, ge=0)
 
     @field_validator("openai_api_key", "openai_model", "openai_base_url", mode="before")
     @classmethod

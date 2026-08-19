@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from time import perf_counter
 from typing import Any, TypeVar
 
@@ -38,6 +39,7 @@ from .base import (
 from .models import ModelCallResult, ModelUsage
 
 T = TypeVar("T", bound=BaseModel)
+SleepFunc = Callable[[float], Awaitable[None]]
 
 
 class OpenAIModelClient:
@@ -50,8 +52,10 @@ class OpenAIModelClient:
         settings: ModelSettings | None = None,
         *,
         client: AsyncOpenAI | Any | None = None,
+        sleep_func: SleepFunc | None = None,
     ) -> None:
         self.settings = settings or ModelSettings()
+        self._sleep_func = sleep_func or asyncio.sleep
         if self.settings.model_provider != self.provider:
             raise ModelConfigurationError(
                 f"OpenAIModelClient cannot handle provider {self.settings.model_provider!r}"
@@ -111,8 +115,9 @@ class OpenAIModelClient:
             except Exception as exc:
                 normalized = self._normalize_error(exc)
                 if self._is_retryable(exc) and attempt < self.settings.llm_max_retries:
+                    delay = self.settings.llm_retry_base_delay_seconds * (2**transport_retries)
                     transport_retries += 1
-                    await asyncio.sleep(0)
+                    await self._sleep_func(delay)
                     continue
                 raise normalized from exc
 

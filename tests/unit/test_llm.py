@@ -8,6 +8,7 @@ from agents.planner import (
     Alert,
     InvestigationPlan,
     Planner,
+    PlannerFallbackReason,
     PlannerInput,
     build_fallback_plan,
     load_metric_context,
@@ -22,7 +23,7 @@ from llm.base import (
 )
 from llm.factory import create_model_client
 from llm.mock_client import MockModelClient
-from llm.models import ModelUsage
+from llm.models import ModelCallResult, ModelUsage
 from llm.openai_client import OpenAIModelClient
 
 
@@ -60,14 +61,27 @@ def _fake_response(parsed: object) -> SimpleNamespace:
     )
 
 
-def _client(responses: _FakeResponses, *, retries: int = 0) -> OpenAIModelClient:
+def _client(
+    responses: _FakeResponses,
+    *,
+    retries: int = 0,
+    sleep_func=None,
+    base_delay: float = 0.5,
+) -> OpenAIModelClient:
+    if sleep_func is None:
+        async def no_sleep(_: float) -> None:
+            return None
+
+        sleep_func = no_sleep
     return OpenAIModelClient(
         ModelSettings(
             openai_api_key="test-key",
             openai_model="test-model",
             llm_max_retries=retries,
+            llm_retry_base_delay_seconds=base_delay,
         ),
         client=_FakeClient(responses),
+        sleep_func=sleep_func,
     )
 
 
@@ -90,6 +104,43 @@ def test_mock_model_client_and_planner_use_structured_result_without_network() -
     assert model_client.calls[0]["system_prompt"]
     assert model_client.calls[0]["user_prompt"]
     assert planner.last_model_result is not None
+
+
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (ModelTimeoutError("timed out"), PlannerFallbackReason.MODEL_TIMEOUT),
+        (ModelRateLimitError("rate limited"), PlannerFallbackReason.MODEL_RATE_LIMIT),
+        (ModelTransportError("transport failed"), PlannerFallbackReason.MODEL_TRANSPORT_ERROR),
+    ],
+)
+def test_planner_run_records_provider_failure_fallback(
+    error: Exception, reason: PlannerFallbackReason
+) -> None:
+    class FailingClient:
+        async def generate_structured(self, **_: object):
+            raise error
+
+    alert = Alert.model_validate(PLANNER_ALERT_EXAMPLES[0])
+    context = load_metric_context(alert.metric)
+    result = Planner(FailingClient()).run(alert, context)
+
+    assert result.fallback_used is True
+    assert result.fallback_reason == reason
+    assert result.model_result is None
+
+
+def test_planner_run_records_success_without_fallback() -> None:
+    model_client = MockModelClient(_plan())
+    alert = Alert.model_validate(PLANNER_ALERT_EXAMPLES[0])
+    context = load_metric_context(alert.metric)
+
+    result = Planner(model_client).run(alert, context)
+
+    assert result.fallback_used is False
+    assert result.fallback_reason is None
+    assert result.model_result is not None
+    assert result.plan.incident_id == alert.incident_id
 
 
 def test_model_call_result_preserves_provider_usage_latency_and_retry_metadata() -> None:
@@ -157,6 +208,25 @@ def test_openai_client_converts_timeout_and_provider_errors() -> None:
     assert len(provider_responses.calls) == 1
 
 
+def test_openai_client_transport_retry_uses_injected_exponential_backoff() -> None:
+    responses = _FakeResponses(error=TimeoutError())
+    delays: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    with pytest.raises(ModelTimeoutError):
+        asyncio.run(
+            _client(responses, retries=2, sleep_func=fake_sleep).generate_structured(
+                system_prompt="system",
+                user_prompt="user",
+                response_model=InvestigationPlan,
+            )
+        )
+
+    assert delays == [0.5, 1.0]
+
+
 def test_openai_client_rejects_malformed_structured_result() -> None:
     responses = _FakeResponses(response=_fake_response({"incident_id": "INC-DAU-001"}))
 
@@ -195,6 +265,37 @@ def test_planner_repair_retry_is_separate_from_transport_retry() -> None:
     assert planner.last_model_result.transport_retry_count == 0
     assert planner.last_model_result.planner_repair_count == 1
     assert planner.last_model_result.retry_count == 1
+
+
+def test_transport_retry_and_planner_repair_counts_are_both_audited() -> None:
+    valid = _plan()
+    invalid = valid.model_copy(deep=True)
+    invalid.steps[0].tool = "magic_tool"
+    calls = 0
+
+    class MixedRetryClient:
+        async def generate_structured(self, **_: object) -> ModelCallResult:
+            nonlocal calls
+            calls += 1
+            return ModelCallResult(
+                provider="mock",
+                model="mixed-retry",
+                parsed=invalid if calls == 1 else valid,
+                latency_ms=0,
+                retry_count=1 if calls == 1 else 0,
+                transport_retry_count=1 if calls == 1 else 0,
+            )
+
+    alert = Alert.model_validate(PLANNER_ALERT_EXAMPLES[0])
+    context = load_metric_context(alert.metric)
+    result = Planner(MixedRetryClient(), max_retries=1).run(alert, context)
+
+    assert result.fallback_used is False
+    assert result.planner_repair_count == 1
+    assert result.model_result is not None
+    assert result.model_result.transport_retry_count == 1
+    assert result.model_result.planner_repair_count == 1
+    assert result.model_result.retry_count == 2
 
 
 def test_model_settings_does_not_require_secrets_and_normalizes_blank_url() -> None:

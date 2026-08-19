@@ -6,11 +6,15 @@ from agents.planner import (
     Alert,
     InvestigationPlan,
     Planner,
+    PlannerFallbackReason,
     PlannerInput,
     build_fallback_plan,
     build_planner_prompt,
     load_metric_context,
 )
+from llm.mock_client import MockModelClient
+from tools.registry import build_default_tool_registry
+from tools.sql_runner import validate_readonly_sql
 
 
 def _request_for(alert_payload: dict[str, object]):
@@ -129,3 +133,79 @@ def test_prompt_input_mapping_accepts_metric_id_alias_from_metrics_config() -> N
 
     assert "INC-DAU-001" in prompt
     assert "daily_active_users" in prompt
+
+
+def test_planner_prompt_only_advertises_registry_tools_and_omits_formal_schema() -> None:
+    alert, metric_context = _request_for(dict(PLANNER_ALERT_EXAMPLES[0]))
+    prompt = build_planner_prompt(alert, metric_context)
+
+    assert "Available tools:" in prompt
+    assert "Tool: sql_query" in prompt
+    assert "Legacy JSON Schema" not in prompt
+    for unavailable in (
+        "check_freshness",
+        "get_partition_status",
+        "check_null_rate",
+        "detect_schema_drift",
+    ):
+        assert f"Tool: {unavailable}" not in prompt
+
+
+def test_fallback_plan_uses_registered_readonly_sql_tool_only() -> None:
+    registry = build_default_tool_registry()
+    for alert_payload in PLANNER_ALERT_EXAMPLES:
+        alert, metric_context = _request_for(dict(alert_payload))
+        plan = build_fallback_plan(
+            PlannerInput(alert=alert, metric_context=metric_context),
+            tool_registry=registry,
+        )
+
+        assert all(registry.contains(step.tool) for step in plan.steps)
+        assert all(step.tool == "sql_query" for step in plan.steps)
+        for step in plan.steps:
+            assert validate_readonly_sql(step.arguments["sql"]) in {
+                "SELECT",
+                "DESCRIBE",
+                "EXPLAIN",
+            }
+
+
+def test_semantic_unknown_tool_is_repaired_then_accepted() -> None:
+    alert, metric_context = _request_for(dict(PLANNER_ALERT_EXAMPLES[0]))
+    fallback = build_fallback_plan(PlannerInput(alert=alert, metric_context=metric_context))
+    invalid = fallback.model_dump(mode="json")
+    invalid["steps"][0]["tool"] = "magic_tool"
+    calls = 0
+
+    def response_factory(response_model: type[InvestigationPlan], _: str, __: str):
+        nonlocal calls
+        calls += 1
+        return response_model.model_validate(invalid if calls == 1 else fallback)
+
+    result = Planner(MockModelClient(response_factory), max_retries=1).run(
+        alert, metric_context
+    )
+
+    assert result.fallback_used is False
+    assert result.fallback_reason is None
+    assert result.planner_repair_count == 1
+    assert result.model_result is not None
+
+
+def test_semantic_tool_argument_error_exhausts_repair_and_falls_back() -> None:
+    alert, metric_context = _request_for(dict(PLANNER_ALERT_EXAMPLES[0]))
+    fallback = build_fallback_plan(PlannerInput(alert=alert, metric_context=metric_context))
+    invalid = fallback.model_dump(mode="json")
+    invalid["steps"][0]["arguments"] = {"query": "SELECT 1"}
+
+    def response_factory(response_model: type[InvestigationPlan], _: str, __: str):
+        return response_model.model_validate(invalid)
+
+    result = Planner(MockModelClient(response_factory), max_retries=1).run(
+        alert, metric_context
+    )
+
+    assert result.fallback_used is True
+    assert result.fallback_reason == PlannerFallbackReason.PLANNER_VALIDATION_FAILED
+    assert result.model_result is None
+    assert result.planner_repair_count == 2

@@ -43,7 +43,7 @@ DataSherlock Harness 的目标是：
 - `config/fault_catalog.yaml`、F01-F12 canonical taxonomy 和 machine-readable Ground Truth；
 - F01-F12 最小故障注入器及目标 observable 测试；
 - `IncidentState`、结构化 Planner 和严格只读 SQL Runner，包括 AST 校验、超时、行数限制、结构化响应和独立 JSONL audit；
-- Planner 的 Pydantic 输入/输出契约、JSON 重试与确定性兜底计划，以及三条告警样例测试；
+- Planner 的 Pydantic 输入/输出契约、Tool Registry、工具名/参数/只读 SQL 语义校验、可审计 `PlannerRunResult`、分层重试与确定性 SQL 兜底计划；
 - Provider-neutral `ModelClient`、异步 `OpenAIModelClient`、`MockModelClient`、调用元数据和可选真实 API smoke test；
 - GitHub Actions CI 配置和完整单元测试。
 
@@ -79,16 +79,40 @@ curl http://localhost:8000/health
 
 ## LLM Configuration
 
-模型调用通过 `Planner → ModelClient → OpenAIModelClient` 完成。Planner 不读取 API Key，也不创建 OpenAI SDK 客户端；Provider、模型和连接参数由环境配置及 Model Client factory 管理。
+模型调用通过以下链路完成。Planner 不读取 API Key，也不创建 OpenAI SDK 客户端；Provider、模型和连接参数由环境配置及 Model Client factory 管理。
+
+```text
+Alert
+  ↓
+Planner
+  ↓
+ToolRegistry（当前只有 sql_query）
+  ↓
+ModelClient
+  ↓
+OpenAIModelClient
+  ↓
+OpenAI Responses API Structured Outputs
+  ↓
+InvestigationPlan
+  ↓
+Schema + Tool Semantic Validation
+  ↓
+PlannerRunResult
+```
 
 1. 复制 `.env.example` 为 `.env`；
 2. 填写 `OPENAI_API_KEY` 和 `OPENAI_MODEL`；
 3. `OPENAI_BASE_URL` 留空时使用 OpenAI SDK 默认 endpoint；需要兼容 endpoint 时再填写；
-4. 使用 `LLM_TIMEOUT_SECONDS` 和 `LLM_MAX_RETRIES` 控制 Model Client 的传输层行为；
+4. 使用 `LLM_TIMEOUT_SECONDS`、`LLM_MAX_RETRIES` 和 `LLM_RETRY_BASE_DELAY_SECONDS` 控制 Model Client 的传输层行为；
 5. 普通 `pytest` 使用 `MockModelClient`，不会访问真实 API；
 6. 只有同时设置 `RUN_LLM_INTEGRATION_TESTS=1`、`OPENAI_API_KEY` 和 `OPENAI_MODEL` 时，才运行 `tests/integration/test_openai_smoke.py`。
 
-`LLM_MAX_RETRIES` 是 API/传输层重试次数；Planner 自身的 Schema 修复重试由 `Planner(max_retries=...)` 单独控制，二者不会共用计数。
+`LLM_MAX_RETRIES` 是 API/传输层重试次数，backoff 默认依次为 0.5s、1.0s、2.0s；Planner 自身的 Schema/语义修复重试由 `Planner(max_retries=...)` 单独控制，二者不会共用计数。正式调用建议使用 `Planner.arun()` / `Planner.run()`，从 `PlannerRunResult` 读取 `fallback_used`、`fallback_reason`、`model_result` 和 `planner_repair_count`。
+
+当前依赖范围为 `openai>=1.66,<3`；本地适配器测试使用 OpenAI Python SDK `2.54.0`。`responses.parse(..., text_format=...)` 与 `output_parsed` 是该依赖范围所要求的 Structured Outputs API 能力。
+
+默认 Registry 只注册真实存在的 `sql_query`。当前尚未实现的数据质量、管道元数据、工具执行器和修复工具不会作为 Planner 的 Available Tool；fallback 也只生成交给 SQL Runner 执行的只读 SQL。默认 `pytest` 不访问真实模型，真实 smoke test 必须显式 opt-in。
 
 ---
 
@@ -360,62 +384,46 @@ experiment_configs
 
 ## 8. Agent 可调用工具
 
-### 8.1 数据结构工具
+### 8.1 当前已注册工具
+
+```python
+sql_query(sql)
+```
+
+`ToolRegistry` 当前只登记 `sql_query`，参数为一个 `sql` 字符串。Planner 生成计划时会动态注入该 Registry，并在接受模型结果前校验工具名、参数对象和 SQL 只读性。实际执行仍必须经过 `src/tools/sql_runner.py`，Planner 不直接操作 DuckDB。
+
+### 8.2 后续规划中的工具（当前未注册）
 
 ```python
 list_tables()
 inspect_schema(table_name)
 get_table_statistics(table_name)
 get_partition_status(table_name, date)
-```
-
-### 8.2 SQL 分析工具
-
-```python
-run_readonly_sql(sql)
 compare_time_windows(metric, current_period, baseline_period)
 drill_down_by_dimension(metric, dimension)
 calculate_contribution(metric, dimension)
-```
-
-### 8.3 数据质量工具
-
-```python
 check_null_rate(table, column)
 check_duplicate_rate(table, keys)
 check_freshness(table)
 detect_schema_drift(table)
 detect_distribution_drift(table, column)
 validate_join_cardinality(left_table, right_table, keys)
-```
-
-### 8.4 管道调查工具
-
-```python
 get_pipeline_status(job_id)
 inspect_pipeline_logs(job_id)
 get_data_lineage(metric)
 list_upstream_tables(metric)
 run_data_tests(model_name)
-```
-
-### 8.5 修复工具
-
-```python
 generate_sql_patch()
 apply_patch_in_sandbox()
 rerun_pipeline_in_sandbox()
 validate_repaired_metric()
-```
-
-### 8.6 审计工具
-
-```python
 record_hypothesis()
 record_evidence()
 record_tool_result()
 generate_incident_report()
 ```
+
+以上名称来自后续架构规划，不代表当前可以被 Planner 使用；在对应实现和 Registry 注册完成前，模型不得生成这些名称。
 
 ---
 

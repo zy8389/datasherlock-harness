@@ -36,8 +36,10 @@ def test_openai_planner_returns_investigation_plan() -> None:
     context = load_metric_context(alert.metric)
     planner = Planner(create_model_client(ModelSettings()), max_retries=1)
 
-    plan = asyncio.run(planner.aplan(alert, context))
+    result = asyncio.run(planner.arun(alert, context))
 
-    assert plan.incident_id == alert.incident_id
-    assert 3 <= len(plan.hypotheses) <= 5
-    assert plan.steps
+    assert result.fallback_used is False
+    assert result.model_result is not None
+    assert result.plan.incident_id == alert.incident_id
+    assert 3 <= len(result.plan.hypotheses) <= 5
+    assert result.plan.steps

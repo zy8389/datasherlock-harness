@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable, Mapping
+from datetime import date, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final, TypeAlias, cast
 
@@ -32,9 +34,19 @@ from llm.base import (
     ModelCallResult,
     ModelClient,
     ModelClientError,
+    ModelConfigurationError,
+    ModelRateLimitError,
     ModelResponseError,
+    ModelTimeoutError,
+    ModelTransportError,
     is_model_client,
 )
+from tools.registry import (
+    ToolArgumentsError,
+    ToolRegistry,
+    build_default_tool_registry,
+)
+from tools.sql_runner import SqlRunnerError, validate_readonly_sql
 
 JsonObject: TypeAlias = dict[str, JsonValue]
 PlanGenerator: TypeAlias = Callable[[str], str]
@@ -54,6 +66,22 @@ UNSAFE_INVESTIGATION_TOOLS: Final[frozenset[str]] = frozenset(
         "validate_repaired_metric",
     }
 )
+
+
+class PlannerValidationError(ValueError):
+    """Planner output is structurally valid but violates runtime constraints."""
+
+
+class PlannerFallbackReason(StrEnum):
+    """Stable reason codes recorded when the deterministic plan is used."""
+
+    MODEL_TIMEOUT = "MODEL_TIMEOUT"
+    MODEL_RATE_LIMIT = "MODEL_RATE_LIMIT"
+    MODEL_TRANSPORT_ERROR = "MODEL_TRANSPORT_ERROR"
+    MODEL_CONFIGURATION_ERROR = "MODEL_CONFIGURATION_ERROR"
+    MODEL_RESPONSE_INVALID = "MODEL_RESPONSE_INVALID"
+    PLANNER_VALIDATION_FAILED = "PLANNER_VALIDATION_FAILED"
+    RETRY_EXHAUSTED = "RETRY_EXHAUSTED"
 
 
 class Alert(BaseModel):
@@ -250,25 +278,84 @@ class InvestigationPlan(BaseModel):
         return self
 
 
+class PlannerRunResult(BaseModel):
+    """Auditable outcome of one Planner run, including fallback metadata."""
+
+    model_config = ConfigDict(extra="forbid", protected_namespaces=())
+
+    plan: InvestigationPlan
+    model_result: ModelCallResult[InvestigationPlan] | None = None
+    fallback_used: bool = False
+    fallback_reason: PlannerFallbackReason | None = None
+    planner_repair_count: int = Field(default=0, ge=0)
+
+
+def validate_plan_tools(plan: InvestigationPlan, tool_registry: ToolRegistry) -> None:
+    """Validate tool names, arguments, and read-only SQL semantics at runtime."""
+
+    for step in plan.steps:
+        if not tool_registry.contains(step.tool):
+            raise PlannerValidationError(f"unknown tool in investigation plan: {step.tool}")
+        try:
+            tool_registry.validate_arguments(step.tool, step.arguments)
+        except ToolArgumentsError as exc:
+            raise PlannerValidationError(str(exc)) from exc
+
+        definition = tool_registry.get(step.tool)
+        if not definition.read_only:
+            raise PlannerValidationError(
+                f"non-read-only tool is not allowed in an investigation plan: {step.tool}"
+            )
+        if step.tool == "sql_query":
+            sql = step.arguments.get("sql")
+            try:
+                validate_readonly_sql(cast(str, sql))
+            except (SqlRunnerError, TypeError, ValueError) as exc:
+                raise PlannerValidationError(
+                    f"sql_query arguments contain unsafe SQL: {exc}"
+                ) from exc
+
+
+def validate_plan_semantics(
+    plan: InvestigationPlan,
+    request: PlannerInput,
+    tool_registry: ToolRegistry,
+) -> None:
+    """Apply runtime constraints that cannot be expressed by Pydantic alone."""
+
+    if plan.incident_id != request.alert.incident_id:
+        raise PlannerValidationError(
+            "plan.incident_id does not match alert.incident_id "
+            f"({plan.incident_id!r} != {request.alert.incident_id!r})"
+        )
+    validate_plan_tools(plan, tool_registry)
+
+
 PLANNER_SYSTEM_PROMPT: Final[str] = """You are the DataSherlock investigation Planner.
 Turn one structured anomaly alert and its canonical metric context into a bounded
 investigation plan. You propose candidate explanations and evidence-producing
 checks; you do not declare a root cause, write data, generate a repair, or
 invent metric semantics that are absent from the supplied context.
 
-Output only one valid JSON object. Do not wrap it in Markdown fences. The object
-must match the supplied InvestigationPlan schema exactly: unknown fields are not
-allowed. Produce 3 to 5 distinct hypotheses. Produce no more than 10 steps.
-Every step must contain purpose, hypothesis_id, tool, arguments,
-expected_evidence, and stop_condition. Use read-only SQL, metadata, data
-quality, or pipeline inspection tools only. Each step must say what observation
-would stop that branch or move the investigation to the next branch.
+Output only one valid JSON object as the InvestigationPlan structured response.
+Produce 3 to 5 distinct
+hypotheses and no more than 10 steps. Every step must contain purpose,
+hypothesis_id, tool, arguments, expected_evidence, and stop_condition. Use only
+the tools listed under Available tools. Never invent a tool name. Investigation
+must remain read-only: do not declare a final root cause, write data, or produce
+repair actions. The JSON object must contain the fields "incident_id",
+"hypotheses", and "steps". Each step must contain "purpose", "hypothesis_id",
+"tool", "arguments", "expected_evidence", and "stop_condition". Each step
+must say what observation would stop that branch or move the investigation to
+the next branch.
 """
 
 
 def build_planner_prompt(
     alert_or_request: Alert | PlannerInput | Mapping[str, Any],
     metric_context: MetricContext | Mapping[str, Any] | None = None,
+    *,
+    tool_registry: ToolRegistry | None = None,
 ) -> str:
     """Build the complete, model-independent Prompt for one planning request.
 
@@ -278,26 +365,68 @@ def build_planner_prompt(
     """
 
     request = _coerce_request(alert_or_request, metric_context)
-    return f"{PLANNER_SYSTEM_PROMPT}\n\n{_build_planner_user_prompt(request)}"
+    registry = tool_registry if tool_registry is not None else build_default_tool_registry()
+    return f"{PLANNER_SYSTEM_PROMPT}\n\n{_build_planner_user_prompt(request, registry)}"
 
 
-def _build_planner_user_prompt(request: PlannerInput) -> str:
-    """Build the user message separately from the system instructions."""
+def _build_planner_user_prompt(
+    request: PlannerInput,
+    tool_registry: ToolRegistry,
+    *,
+    include_schema: bool = False,
+) -> str:
+    """Build the user message, including only tools in the injected registry."""
 
     applicable_faults = _fault_context(request.metric_context.metric_id)
     fault_text = json.dumps(applicable_faults, ensure_ascii=False, indent=2)
     input_text = json.dumps(request.model_dump(mode="json"), ensure_ascii=False, indent=2)
-    schema_text = json.dumps(InvestigationPlan.model_json_schema(), ensure_ascii=False, indent=2)
-    return (
-        "Canonical input:\n"
-        f"{input_text}\n\n"
-        "Relevant canonical fault vocabulary (candidate context only; do not "
-        "treat any item as confirmed):\n"
-        f"{fault_text}\n\n"
-        "Required JSON Schema:\n"
-        f"{schema_text}\n\n"
-        "Return the InvestigationPlan JSON object now."
-    )
+    parts = [
+        (
+            "Canonical input:\n"
+            f"{input_text}\n\n"
+            "Relevant canonical fault vocabulary (candidate context only; do not "
+            "treat any item as confirmed):\n"
+            f"{fault_text}\n\n"
+        ),
+        _available_tools_text(tool_registry),
+        (
+            "\nRules:\n"
+            "- Only use tools listed above.\n"
+            "- Every investigation step must reference one available tool.\n"
+            "- Every SQL query must be read-only and will be checked by SQL Runner.\n"
+            "- Do not declare a final root cause or generate repair actions.\n"
+        ),
+    ]
+    if include_schema:
+        schema_text = json.dumps(
+            InvestigationPlan.model_json_schema(), ensure_ascii=False, indent=2
+        )
+        parts.append(f"\nLegacy JSON Schema:\n{schema_text}\n")
+    parts.append("\nReturn the InvestigationPlan JSON object now.")
+    return "".join(parts)
+
+
+def _available_tools_text(tool_registry: ToolRegistry) -> str:
+    """Render registry metadata for the Planner without maintaining a second list."""
+
+    sections = ["Available tools:\n"]
+    for definition in tool_registry.definitions():
+        argument_schema = json.dumps(
+            definition.argument_schema, ensure_ascii=False, indent=2
+        )
+        sections.append(
+            f"Tool: {definition.name}\n"
+            f"Description: {definition.description}\n"
+            f"Arguments:\n{argument_schema}\n"
+            f"Read-only: {str(definition.read_only).lower()}\n"
+        )
+    return "\n".join(sections)
+
+
+def _build_legacy_prompt(request: PlannerInput, tool_registry: ToolRegistry) -> str:
+    """Keep the full schema only for the old raw-string callable adapter."""
+
+    return f"{PLANNER_SYSTEM_PROMPT}\n\n{_build_planner_user_prompt(request, tool_registry, include_schema=True)}"
 
 
 # A few stable fixtures are kept close to the Planner contract so downstream
@@ -346,6 +475,7 @@ class Planner:
         self,
         model_client: ModelClient | PlanGenerator,
         *,
+        tool_registry: ToolRegistry | None = None,
         max_retries: int = 2,
     ) -> None:
         if max_retries < 0:
@@ -354,6 +484,9 @@ class Planner:
             raise TypeError("model_client must implement ModelClient or be callable")
         self.model_client = model_client if is_model_client(model_client) else None
         self._legacy_generator = model_client if callable(model_client) else None
+        self.tool_registry = (
+            tool_registry if tool_registry is not None else build_default_tool_registry()
+        )
         self.max_retries = max_retries
         self.last_model_result: ModelCallResult[InvestigationPlan] | None = None
         self.last_planner_repair_count = 0
@@ -365,25 +498,45 @@ class Planner:
     ) -> InvestigationPlan:
         """Synchronously run the canonical async Planner for compatibility."""
 
+        return self.run(alert_or_request, metric_context).plan
+
+    def run(
+        self,
+        alert_or_request: Alert | PlannerInput | Mapping[str, Any],
+        metric_context: MetricContext | Mapping[str, Any] | None = None,
+    ) -> PlannerRunResult:
+        """Synchronously return a complete, auditable Planner run result."""
+
         if self._legacy_generator is not None:
-            return self._plan_legacy(alert_or_request, metric_context)
-        return asyncio.run(self.aplan(alert_or_request, metric_context))
+            return self._run_legacy(alert_or_request, metric_context)
+        return asyncio.run(self.arun(alert_or_request, metric_context))
 
     async def aplan(
         self,
         alert_or_request: Alert | PlannerInput | Mapping[str, Any],
         metric_context: MetricContext | Mapping[str, Any] | None = None,
     ) -> InvestigationPlan:
-        """Asynchronously call ModelClient and perform Planner repair retries."""
+        """Compatibility wrapper returning only the generated investigation plan."""
+
+        return (await self.arun(alert_or_request, metric_context)).plan
+
+    async def arun(
+        self,
+        alert_or_request: Alert | PlannerInput | Mapping[str, Any],
+        metric_context: MetricContext | Mapping[str, Any] | None = None,
+    ) -> PlannerRunResult:
+        """Call ModelClient and return plan plus fallback and retry audit data."""
 
         if self.model_client is None:
-            raise TypeError("aplan requires a ModelClient, not the legacy callable adapter")
+            raise TypeError("arun requires a ModelClient, not the legacy callable adapter")
 
         request = _coerce_request(alert_or_request, metric_context)
         self.last_model_result = None
         self.last_planner_repair_count = 0
-        user_prompt = _build_planner_user_prompt(request)
+        user_prompt = _build_planner_user_prompt(request, self.tool_registry)
         repair_count = 0
+        transport_retry_count = 0
+        last_repair_reason: PlannerFallbackReason | None = None
 
         for attempt in range(self.max_retries + 1):
             attempt_prompt = user_prompt
@@ -398,34 +551,81 @@ class Planner:
                     user_prompt=attempt_prompt,
                     response_model=InvestigationPlan,
                 )
+                transport_retry_count += result.transport_retry_count
                 plan = InvestigationPlan.model_validate(result.parsed)
-                if plan.incident_id != request.alert.incident_id:
-                    raise ValueError(
-                        "plan.incident_id does not match alert.incident_id "
-                        f"({plan.incident_id!r} != {request.alert.incident_id!r})"
-                    )
+                validate_plan_semantics(plan, request, self.tool_registry)
                 self.last_planner_repair_count = repair_count
-                self.last_model_result = result.model_copy(
+                annotated_result = ModelCallResult[InvestigationPlan].model_validate(
+                    result.model_dump(mode="python")
+                ).model_copy(
                     update={
+                        "parsed": plan,
+                        "transport_retry_count": transport_retry_count,
                         "planner_repair_count": repair_count,
-                        "retry_count": result.retry_count + repair_count,
+                        "retry_count": transport_retry_count + repair_count,
                     }
                 )
-                return plan
+                self.last_model_result = annotated_result
+                return PlannerRunResult(
+                    plan=plan,
+                    model_result=annotated_result,
+                    planner_repair_count=repair_count,
+                )
             except ModelResponseError:
+                last_repair_reason = PlannerFallbackReason.MODEL_RESPONSE_INVALID
+                repair_count += 1
+                continue
+            except PlannerValidationError:
+                last_repair_reason = PlannerFallbackReason.PLANNER_VALIDATION_FAILED
                 repair_count += 1
                 continue
             except ValueError:
+                last_repair_reason = PlannerFallbackReason.MODEL_RESPONSE_INVALID
                 repair_count += 1
                 continue
+            except ModelTimeoutError:
+                return self._fallback_result(
+                    request, PlannerFallbackReason.MODEL_TIMEOUT, repair_count
+                )
+            except ModelRateLimitError:
+                return self._fallback_result(
+                    request, PlannerFallbackReason.MODEL_RATE_LIMIT, repair_count
+                )
+            except ModelConfigurationError:
+                return self._fallback_result(
+                    request, PlannerFallbackReason.MODEL_CONFIGURATION_ERROR, repair_count
+                )
+            except ModelTransportError:
+                return self._fallback_result(
+                    request, PlannerFallbackReason.MODEL_TRANSPORT_ERROR, repair_count
+                )
             except ModelClientError:
-                # Transport/API failures have already been retried and
-                # normalized by ModelClient; they are not Planner repairs.
-                self.last_planner_repair_count = repair_count
-                return build_fallback_plan(request)
+                return self._fallback_result(
+                    request, PlannerFallbackReason.MODEL_TRANSPORT_ERROR, repair_count
+                )
 
+        reason = last_repair_reason or PlannerFallbackReason.MODEL_RESPONSE_INVALID
+        if repair_count > 1 and reason == PlannerFallbackReason.MODEL_RESPONSE_INVALID:
+            reason = PlannerFallbackReason.RETRY_EXHAUSTED
+        return self._fallback_result(request, reason, repair_count)
+
+    def _fallback_result(
+        self,
+        request: PlannerInput,
+        reason: PlannerFallbackReason,
+        repair_count: int,
+    ) -> PlannerRunResult:
+        """Build and record one explicitly audited deterministic fallback."""
+
+        plan = build_fallback_plan(request, tool_registry=self.tool_registry)
         self.last_planner_repair_count = repair_count
-        return build_fallback_plan(request)
+        self.last_model_result = None
+        return PlannerRunResult(
+            plan=plan,
+            fallback_used=True,
+            fallback_reason=reason,
+            planner_repair_count=repair_count,
+        )
 
     def _plan_legacy(
         self,
@@ -434,8 +634,18 @@ class Planner:
     ) -> InvestigationPlan:
         """Preserve the first version's sync callable behavior for old tests."""
 
+        return self._run_legacy(alert_or_request, metric_context).plan
+
+    def _run_legacy(
+        self,
+        alert_or_request: Alert | PlannerInput | Mapping[str, Any],
+        metric_context: MetricContext | Mapping[str, Any] | None,
+    ) -> PlannerRunResult:
+        """Run the raw callable adapter while applying current tool semantics."""
+
         request = _coerce_request(alert_or_request, metric_context)
-        prompt = build_planner_prompt(request)
+        prompt = _build_legacy_prompt(request, self.tool_registry)
+        repair_count = 0
         for attempt in range(self.max_retries + 1):
             attempt_prompt = prompt
             if attempt:
@@ -451,10 +661,24 @@ class Planner:
                         "plan.incident_id does not match alert.incident_id "
                         f"({plan.incident_id!r} != {request.alert.incident_id!r})"
                     )
-                return plan
+                validate_plan_semantics(plan, request, self.tool_registry)
+                self.last_model_result = None
+                self.last_planner_repair_count = repair_count
+                return PlannerRunResult(
+                    plan=plan,
+                    planner_repair_count=repair_count,
+                )
             except Exception as exc:  # noqa: BLE001 - compatibility path mirrors v1 behavior
                 _ = exc
-        return build_fallback_plan(request)
+                repair_count += 1
+        self.last_model_result = None
+        self.last_planner_repair_count = repair_count
+        return PlannerRunResult(
+            plan=build_fallback_plan(request, tool_registry=self.tool_registry),
+            fallback_used=True,
+            fallback_reason=PlannerFallbackReason.RETRY_EXHAUSTED,
+            planner_repair_count=repair_count,
+        )
 
     # Explicit aliases for callers that prefer a verb matching the output.
     generate_plan = plan
@@ -512,9 +736,14 @@ def load_metric_context(
     )
 
 
-def build_fallback_plan(request: PlannerInput) -> InvestigationPlan:
-    """Build a bounded read-only plan without relying on model availability."""
+def build_fallback_plan(
+    request: PlannerInput,
+    *,
+    tool_registry: ToolRegistry | None = None,
+) -> InvestigationPlan:
+    """Build a bounded deterministic plan using only registered read-only tools."""
 
+    registry = tool_registry if tool_registry is not None else build_default_tool_registry()
     faults = _select_fallback_faults(request)
     hypotheses = [
         Hypothesis(
@@ -533,11 +762,13 @@ def build_fallback_plan(request: PlannerInput) -> InvestigationPlan:
         _step_for_fault(request, hypothesis, fault, index)
         for index, (hypothesis, fault) in enumerate(zip(hypotheses, faults), start=1)
     ]
-    return InvestigationPlan(
+    plan = InvestigationPlan(
         incident_id=request.alert.incident_id,
         hypotheses=hypotheses,
         steps=steps,
     )
+    validate_plan_tools(plan, registry)
+    return plan
 
 
 def _coerce_request(
@@ -576,8 +807,6 @@ def _fault_context(metric_id: str) -> list[JsonObject]:
             "fault_id": fault.id,
             "root_cause_type": fault.root_cause_type,
             "affected_assets": fault.affected_assets,
-            "expected_evidence": fault.expected_evidence,
-            "expected_direction": fault.expected_direction,
         }
         for fault in catalog.faults
         if metric_id in fault.affected_metrics
@@ -658,22 +887,18 @@ def _step_for_fault(
     fault: FaultDefinition,
     index: int,
 ) -> InvestigationStep:
-    metric = request.metric_context.metric_id
-    source_table = request.metric_context.source_tables[0] if request.metric_context.source_tables else "source_table"
-    observed_at = request.alert.observed_at
-    tool, arguments = _tool_for_root_cause(
+    sql = _sql_for_root_cause(
         fault.root_cause_type,
-        metric=metric,
-        source_table=source_table,
+        metric=request.metric_context.metric_id,
         entity_column=request.metric_context.entity_column,
-        observed_at=observed_at,
+        observed_at=request.alert.observed_at,
     )
     return InvestigationStep(
         step_id=f"S{index:02d}",
         purpose=f"为 {hypothesis.hypothesis_id} 检查 {fault.root_cause_type} 的可观察信号。",
         hypothesis_id=hypothesis.hypothesis_id,
-        tool=tool,
-        arguments=cast(JsonObject, arguments),
+        tool="sql_query",
+        arguments={"sql": sql},
         expected_evidence=list(fault.expected_evidence),
         stop_condition=(
             f"若 {fault.root_cause_type} 的关键证据未出现，则降低 {hypothesis.hypothesis_id} "
@@ -682,62 +907,131 @@ def _step_for_fault(
     )
 
 
-def _tool_for_root_cause(
+def _sql_for_root_cause(
     root_cause_type: str,
     *,
     metric: str,
-    source_table: str,
     entity_column: str | None,
     observed_at: str,
-) -> tuple[str, JsonObject]:
-    date_args: JsonObject = {"metric": metric, "observed_at": observed_at}
+) -> str:
+    """Build deterministic read-only SQL for the canonical operational tables."""
+
+    date_expression = _date_expression(observed_at)
+    metric_literal = _sql_literal(metric)
     if root_cause_type == "missing_partition":
-        return "get_partition_status", {"table": source_table, "date": observed_at}
+        date_prefix = _sql_literal(_date_text(observed_at) + "/")
+        return (
+            "SELECT table_name, partition_value, row_count, updated_at, status, source_job_id "
+            "FROM partition_metadata "
+            f"WHERE table_name = 'events' AND partition_value LIKE {date_prefix} || '%' "
+            "ORDER BY partition_value, updated_at DESC"
+        )
     if root_cause_type == "data_delay":
-        return "check_freshness", {"table": source_table, "expected_date": observed_at}
+        date_literal = _sql_literal(_date_text(observed_at))
+        return (
+            "SELECT target_table, target_partition, status, started_at, finished_at, "
+            "error_type, error_message FROM pipeline_runs "
+            f"WHERE target_table = 'events' AND target_partition = {date_literal} "
+            "ORDER BY started_at DESC"
+        )
     if root_cause_type == "null_value_anomaly":
-        return "check_null_rate", {
-            "table": source_table,
-            "column": entity_column or "user_id",
-            "date": observed_at,
-        }
+        column = entity_column if entity_column in {"user_id", "event_id"} else "user_id"
+        return (
+            "SELECT COUNT(*) AS total_rows, "
+            f"SUM(CASE WHEN {column} IS NULL THEN 1 ELSE 0 END) AS null_rows "
+            "FROM events "
+            f"WHERE CAST(event_time AS DATE) = {date_expression}"
+        )
     if root_cause_type == "duplicate_batch":
-        return "check_duplicate_rate", {
-            "table": source_table,
-            "keys": ["event_id"],
-            "date": observed_at,
-        }
+        return (
+            "SELECT COUNT(*) AS total_rows, COUNT(DISTINCT event_id) AS distinct_event_ids, "
+            "COUNT(DISTINCT batch_id) AS distinct_batch_ids "
+            "FROM events "
+            f"WHERE CAST(event_time AS DATE) = {date_expression}"
+        )
     if root_cause_type == "join_explosion":
-        return "validate_join_cardinality", {
-            "left_table": source_table,
-            "right_table": "experiment_assignments",
-            "keys": [entity_column or "user_id"],
-        }
-    if root_cause_type in {"field_drift", "schema_change"}:
-        return "detect_schema_drift", {"table": source_table, "observed_at": observed_at}
+        return (
+            "SELECT COUNT(*) AS joined_rows, COUNT(DISTINCT e.event_id) AS distinct_event_ids "
+            "FROM events AS e INNER JOIN experiment_assignments AS a "
+            "ON e.user_id = a.user_id "
+            f"WHERE CAST(e.event_time AS DATE) = {date_expression}"
+        )
+    if root_cause_type == "field_drift":
+        return (
+            "SELECT event_name, COUNT(*) AS event_count FROM events "
+            f"WHERE CAST(event_time AS DATE) = {date_expression} "
+            "GROUP BY event_name ORDER BY event_count DESC"
+        )
+    if root_cause_type == "schema_change":
+        return (
+            "SELECT table_name, version, schema_json, effective_at FROM schema_snapshots "
+            "WHERE table_name = 'events' ORDER BY effective_at DESC, version DESC"
+        )
     if root_cause_type == "unit_error":
-        return "detect_distribution_drift", {
-            "table": source_table,
-            "column": "duration_seconds",
-            "observed_at": observed_at,
-        }
+        return (
+            "SELECT COUNT(*) AS total_rows, AVG(duration_seconds) AS average_duration, "
+            "MIN(duration_seconds) AS minimum_duration, MAX(duration_seconds) AS maximum_duration "
+            "FROM events "
+            f"WHERE CAST(event_time AS DATE) = {date_expression}"
+        )
     if root_cause_type == "ab_split_anomaly":
-        return "drill_down_by_dimension", {"metric": metric, "dimension": "variant"}
+        return (
+            "SELECT variant, COUNT(*) AS users FROM experiment_assignments "
+            "GROUP BY variant ORDER BY variant"
+        )
     if root_cause_type == "timezone_error":
-        return "compare_time_windows", {
-            **date_args,
-            "dimension": "region",
-            "baseline_period": "previous_7_days",
-        }
+        return (
+            "SELECT device_type, EXTRACT(HOUR FROM event_time) AS event_hour, "
+            "COUNT(*) AS event_count FROM events "
+            f"WHERE CAST(event_time AS DATE) = {date_expression} "
+            "GROUP BY device_type, event_hour ORDER BY device_type, event_hour"
+        )
     if root_cause_type == "join_filter":
-        return "validate_join_cardinality", {
-            "left_table": source_table,
-            "right_table": "subscriptions",
-            "keys": [entity_column or "user_id"],
-        }
+        return (
+            "SELECT COUNT(DISTINCT e.user_id) AS event_users, "
+            "COUNT(DISTINCT s.user_id) AS subscribed_users FROM events AS e "
+            "LEFT JOIN subscriptions AS s ON e.user_id = s.user_id "
+            f"WHERE CAST(e.event_time AS DATE) = {date_expression}"
+        )
     if root_cause_type == "metric_definition_change":
-        return "get_data_lineage", {"metric": metric}
-    return "compare_time_windows", {**date_args, "baseline_period": "previous_7_days"}
+        return (
+            "SELECT metric_id, version, definition_hash, query, effective_at "
+            "FROM metric_versions "
+            f"WHERE metric_id = {metric_literal} ORDER BY effective_at DESC, version DESC"
+        )
+    return (
+        "SELECT metric_date, daily_active_users, new_users, paid_users, ai_task_count, "
+        "average_session_duration, conversion_rate FROM daily_metrics "
+        f"WHERE metric_date = {date_expression}"
+    )
+
+
+def _date_text(value: str) -> str:
+    """Normalize date-like alert timestamps for deterministic SQL literals."""
+
+    candidate = value.strip().replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(candidate).date().isoformat()
+    except ValueError:
+        try:
+            return date.fromisoformat(candidate).isoformat()
+        except ValueError:
+            return value.strip()
+
+
+def _date_expression(value: str) -> str:
+    normalized = _date_text(value)
+    try:
+        date.fromisoformat(normalized)
+    except ValueError:
+        return f"TRY_CAST({_sql_literal(normalized)} AS DATE)"
+    return f"DATE '{normalized}'"
+
+
+def _sql_literal(value: str) -> str:
+    """Quote deterministic string values before embedding them in fallback SQL."""
+
+    return "'" + value.replace("'", "''") + "'"
 
 
 __all__ = [
@@ -749,9 +1043,14 @@ __all__ = [
     "InvestigationStep",
     "MetricContext",
     "Planner",
+    "PlannerFallbackReason",
     "PlannerInput",
+    "PlannerRunResult",
+    "PlannerValidationError",
     "build_fallback_plan",
     "build_planner_prompt",
     "load_metric_context",
     "parse_investigation_plan",
+    "validate_plan_semantics",
+    "validate_plan_tools",
 ]
