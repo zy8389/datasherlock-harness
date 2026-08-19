@@ -71,6 +71,8 @@ class FaultDefinition(BaseModel):
     effect_size_type: Literal["relative", "absolute"] = "relative"
     minimum_effect_size: float = Field(gt=0)
     aliases: list[str] = Field(default_factory=list)
+    verification_fields: list[str] = Field(min_length=1)
+    diagnostic_tools: list[str] = Field(min_length=1)
 
 
 class FaultCatalog(BaseModel):
@@ -90,6 +92,12 @@ class FaultCatalog(BaseModel):
         if len(root_causes) != len(set(root_causes)):
             raise ValueError("root_cause_type values must be unique")
         for fault in self.faults:
+            for field_name in ("verification_fields", "diagnostic_tools"):
+                values = getattr(fault, field_name)
+                if any(not value.strip() for value in values):
+                    raise ValueError(f"{fault.id} {field_name} must not contain blanks")
+                if len(values) != len(set(values)):
+                    raise ValueError(f"{fault.id} {field_name} must be unique")
             source_types = set(fault.evidence_source_types)
             if len(source_types) != len(fault.evidence_source_types):
                 raise ValueError(

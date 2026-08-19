@@ -47,6 +47,9 @@ class MetricDefinition(BaseModel):
     dependencies: list[str] = Field(default_factory=list)
     numerator: str | None = None
     denominator: str | None = None
+    common_anomalies: list[str] = Field(min_length=1)
+    verification_fields: list[str] = Field(min_length=1)
+    diagnostic_tools: list[str] = Field(min_length=1)
 
     @field_validator("id", "name", "description", "aggregation", "query", "unit")
     @classmethod
@@ -54,6 +57,15 @@ class MetricDefinition(BaseModel):
         if not value.strip():
             raise ValueError("value must not be blank")
         return value
+
+    @field_validator("common_anomalies", "verification_fields", "diagnostic_tools")
+    @classmethod
+    def reject_blank_list_values(cls, values: list[str]) -> list[str]:
+        if any(not value.strip() for value in values):
+            raise ValueError("metric list values must not be blank")
+        if len(values) != len(set(values)):
+            raise ValueError("metric list values must be unique")
+        return values
 
 
 class MetricsConfig(BaseModel):

@@ -6,8 +6,9 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+from agents.planner import load_metric_context
 from benchmark.evaluation import calculate_effect, validate_effect
-from config.faults import InjectionSpec
+from config.faults import FaultCatalog, InjectionSpec, load_fault_catalog
 from config.metrics import MetricsConfig, load_metrics_config
 from data.generator import (
     generate_daily_metrics,
@@ -15,6 +16,7 @@ from data.generator import (
     generate_subscriptions,
     generate_users,
 )
+from tools.registry import build_default_tool_registry
 
 
 def test_metrics_config_has_six_unique_executable_metrics() -> None:
@@ -23,6 +25,39 @@ def test_metrics_config_has_six_unique_executable_metrics() -> None:
     assert len({metric.id for metric in config.metrics}) == 6
     assert config.timezone == "UTC"
     assert config.date_grain == "day"
+
+
+def test_metric_diagnostics_are_complete_and_available_to_planner() -> None:
+    config = load_metrics_config()
+    available_tools = set(build_default_tool_registry().names())
+
+    for metric in config.metrics:
+        assert metric.common_anomalies
+        assert metric.verification_fields
+        assert set(metric.diagnostic_tools).issubset(available_tools)
+        assert all("." in field for field in metric.verification_fields)
+
+        context = load_metric_context(metric.id)
+        assert context.common_anomalies == metric.common_anomalies
+        assert context.verification_fields == metric.verification_fields
+        assert context.diagnostic_tools == metric.diagnostic_tools
+
+
+def test_fault_catalog_has_queryable_verification_mappings() -> None:
+    catalog = load_fault_catalog()
+    metric_ids = {metric.id for metric in load_metrics_config().metrics}
+    available_tools = set(build_default_tool_registry().names())
+
+    for fault in catalog.faults:
+        assert set(fault.affected_metrics).issubset(metric_ids)
+        assert fault.verification_fields
+        assert all("." in field for field in fault.verification_fields)
+        assert set(fault.diagnostic_tools).issubset(available_tools)
+
+    payload = catalog.model_dump()
+    payload["faults"][0]["diagnostic_tools"].append("sql_query")
+    with pytest.raises(ValidationError, match="diagnostic_tools must be unique"):
+        FaultCatalog.model_validate(payload)
 
 
 def test_metrics_config_rejects_invalid_timezone_and_date_grain() -> None:
