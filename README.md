@@ -108,11 +108,13 @@ PlannerRunResult
 5. 普通 `pytest` 使用 `MockModelClient`，不会访问真实 API；
 6. 只有同时设置 `RUN_LLM_INTEGRATION_TESTS=1`、`OPENAI_API_KEY` 和 `OPENAI_MODEL` 时，才运行 `tests/integration/test_openai_smoke.py`。
 
-`LLM_MAX_RETRIES` 是 API/传输层重试次数，backoff 默认依次为 0.5s、1.0s、2.0s；Planner 自身的 Schema/语义修复重试由 `Planner(max_retries=...)` 单独控制，二者不会共用计数。正式调用建议使用 `Planner.arun()` / `Planner.run()`，从 `PlannerRunResult` 读取 `fallback_used`、`fallback_reason`、`model_result` 和 `planner_repair_count`。
+`LLM_MAX_RETRIES` 是 API/传输层重试次数，backoff 默认依次为 0.5s、1.0s、2.0s；Planner 自身的 Schema/语义修复重试由 `Planner(max_retries=...)` 单独控制，二者不会共用计数。正式调用建议使用 `Planner.arun()` / `Planner.run()`，从 `PlannerRunResult` 读取 `fallback_used`、`fallback_reason`、`model_result`、`planner_repair_count`、`transport_retry_count`、`provider` 和 `model`。即使最终 fallback，失败调用的 transport retry metadata 也会保留。
 
 当前依赖范围为 `openai>=1.66,<3`；本地适配器测试使用 OpenAI Python SDK `2.54.0`。`responses.parse(..., text_format=...)` 与 `output_parsed` 是该依赖范围所要求的 Structured Outputs API 能力。
 
 默认 Registry 只注册真实存在的 `sql_query`。当前尚未实现的数据质量、管道元数据、工具执行器和修复工具不会作为 Planner 的 Available Tool；fallback 也只生成交给 SQL Runner 执行的只读 SQL。默认 `pytest` 不访问真实模型，真实 smoke test 必须显式 opt-in。
+
+Planner 当前采用 closed-set root-cause taxonomy：所有 `hypothesis.root_cause_type` 必须来自 `config/fault_catalog.yaml` 的 12 个 canonical fault types。它不会根据当前 metric 再额外缩小允许集合，也不会把 catalog 的 `expected_evidence` 或 benchmark ground truth 直接发送给模型。
 
 ---
 

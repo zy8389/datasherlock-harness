@@ -8,6 +8,7 @@ import os
 import pytest
 
 from agents.planner import Alert, Planner, load_metric_context
+from config.faults import load_fault_catalog
 from config.model_settings import ModelSettings
 from llm.factory import create_model_client
 
@@ -43,3 +44,11 @@ def test_openai_planner_returns_investigation_plan() -> None:
     assert result.plan.incident_id == alert.incident_id
     assert 3 <= len(result.plan.hypotheses) <= 5
     assert result.plan.steps
+    allowed_root_causes = {
+        fault.root_cause_type for fault in load_fault_catalog().faults
+    }
+    assert all(
+        hypothesis.root_cause_type in allowed_root_causes
+        for hypothesis in result.plan.hypotheses
+    )
+    assert all(step.tool == "sql_query" for step in result.plan.steps)

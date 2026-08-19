@@ -17,6 +17,7 @@ from .planner import (
     build_planner_prompt,
     load_metric_context,
     parse_investigation_plan,
+    validate_root_cause_types,
 )
 
 __all__ = [
@@ -36,4 +37,5 @@ __all__ = [
     "build_planner_prompt",
     "load_metric_context",
     "parse_investigation_plan",
+    "validate_root_cause_types",
 ]

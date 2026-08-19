@@ -31,11 +31,14 @@ from config.faults import (
 )
 from config.metrics import DEFAULT_METRICS_PATH, load_metrics_config
 from llm.base import (
+    ModelAuthenticationError,
     ModelCallResult,
     ModelClient,
     ModelClientError,
     ModelConfigurationError,
+    ModelProviderError,
     ModelRateLimitError,
+    ModelRequestError,
     ModelResponseError,
     ModelTimeoutError,
     ModelTransportError,
@@ -78,6 +81,9 @@ class PlannerFallbackReason(StrEnum):
     MODEL_TIMEOUT = "MODEL_TIMEOUT"
     MODEL_RATE_LIMIT = "MODEL_RATE_LIMIT"
     MODEL_TRANSPORT_ERROR = "MODEL_TRANSPORT_ERROR"
+    MODEL_AUTHENTICATION_ERROR = "MODEL_AUTHENTICATION_ERROR"
+    MODEL_REQUEST_ERROR = "MODEL_REQUEST_ERROR"
+    MODEL_PROVIDER_ERROR = "MODEL_PROVIDER_ERROR"
     MODEL_CONFIGURATION_ERROR = "MODEL_CONFIGURATION_ERROR"
     MODEL_RESPONSE_INVALID = "MODEL_RESPONSE_INVALID"
     PLANNER_VALIDATION_FAILED = "PLANNER_VALIDATION_FAILED"
@@ -288,6 +294,10 @@ class PlannerRunResult(BaseModel):
     fallback_used: bool = False
     fallback_reason: PlannerFallbackReason | None = None
     planner_repair_count: int = Field(default=0, ge=0)
+    transport_retry_count: int = Field(default=0, ge=0)
+    model_latency_ms: float | None = Field(default=None, ge=0)
+    provider: str | None = None
+    model: str | None = None
 
 
 def validate_plan_tools(plan: InvestigationPlan, tool_registry: ToolRegistry) -> None:
@@ -328,7 +338,25 @@ def validate_plan_semantics(
             "plan.incident_id does not match alert.incident_id "
             f"({plan.incident_id!r} != {request.alert.incident_id!r})"
         )
+    validate_root_cause_types(plan)
     validate_plan_tools(plan, tool_registry)
+
+
+def validate_root_cause_types(plan: InvestigationPlan) -> None:
+    """Reject hypotheses outside the canonical closed-set fault taxonomy."""
+
+    allowed = set(_canonical_root_cause_types())
+    invalid = sorted(
+        {
+            hypothesis.root_cause_type
+            for hypothesis in plan.hypotheses
+            if hypothesis.root_cause_type not in allowed
+        }
+    )
+    if invalid:
+        raise PlannerValidationError(
+            "non-canonical root_cause_type value(s): " + ", ".join(invalid)
+        )
 
 
 PLANNER_SYSTEM_PROMPT: Final[str] = """You are the DataSherlock investigation Planner.
@@ -379,6 +407,9 @@ def _build_planner_user_prompt(
 
     applicable_faults = _fault_context(request.metric_context.metric_id)
     fault_text = json.dumps(applicable_faults, ensure_ascii=False, indent=2)
+    canonical_root_causes = json.dumps(
+        _canonical_root_cause_types(), ensure_ascii=False
+    )
     input_text = json.dumps(request.model_dump(mode="json"), ensure_ascii=False, indent=2)
     parts = [
         (
@@ -387,6 +418,9 @@ def _build_planner_user_prompt(
             "Relevant canonical fault vocabulary (candidate context only; do not "
             "treat any item as confirmed):\n"
             f"{fault_text}\n\n"
+            "Canonical root_cause_type vocabulary (closed-set candidate labels; "
+            "do not treat any item as confirmed):\n"
+            f"{canonical_root_causes}\n\n"
         ),
         _available_tools_text(tool_registry),
         (
@@ -394,6 +428,8 @@ def _build_planner_user_prompt(
             "- Only use tools listed above.\n"
             "- Every investigation step must reference one available tool.\n"
             "- Every SQL query must be read-only and will be checked by SQL Runner.\n"
+            "- For root_cause_type, use only a canonical value from the supplied "
+            "fault vocabulary; do not invent new values.\n"
             "- Do not declare a final root cause or generate repair actions.\n"
         ),
     ]
@@ -537,6 +573,9 @@ class Planner:
         repair_count = 0
         transport_retry_count = 0
         last_repair_reason: PlannerFallbackReason | None = None
+        last_provider: str | None = None
+        last_model: str | None = None
+        last_latency_ms: float | None = None
 
         for attempt in range(self.max_retries + 1):
             attempt_prompt = user_prompt
@@ -552,6 +591,9 @@ class Planner:
                     response_model=InvestigationPlan,
                 )
                 transport_retry_count += result.transport_retry_count
+                last_provider = result.provider
+                last_model = result.model
+                last_latency_ms = result.latency_ms
                 plan = InvestigationPlan.model_validate(result.parsed)
                 validate_plan_semantics(plan, request, self.tool_registry)
                 self.last_planner_repair_count = repair_count
@@ -570,8 +612,15 @@ class Planner:
                     plan=plan,
                     model_result=annotated_result,
                     planner_repair_count=repair_count,
+                    transport_retry_count=transport_retry_count,
+                    model_latency_ms=annotated_result.latency_ms,
+                    provider=annotated_result.provider,
+                    model=annotated_result.model,
                 )
-            except ModelResponseError:
+            except ModelResponseError as exc:
+                last_provider = exc.provider or last_provider
+                last_model = exc.model or last_model
+                last_latency_ms = exc.latency_ms or last_latency_ms
                 last_repair_reason = PlannerFallbackReason.MODEL_RESPONSE_INVALID
                 repair_count += 1
                 continue
@@ -583,48 +632,140 @@ class Planner:
                 last_repair_reason = PlannerFallbackReason.MODEL_RESPONSE_INVALID
                 repair_count += 1
                 continue
-            except ModelTimeoutError:
+            except ModelTimeoutError as exc:
                 return self._fallback_result(
-                    request, PlannerFallbackReason.MODEL_TIMEOUT, repair_count
+                    request,
+                    PlannerFallbackReason.MODEL_TIMEOUT,
+                    repair_count,
+                    error=exc,
+                    transport_retry_count=transport_retry_count,
+                    provider=last_provider,
+                    model=last_model,
+                    latency_ms=last_latency_ms,
                 )
-            except ModelRateLimitError:
+            except ModelRateLimitError as exc:
                 return self._fallback_result(
-                    request, PlannerFallbackReason.MODEL_RATE_LIMIT, repair_count
+                    request,
+                    PlannerFallbackReason.MODEL_RATE_LIMIT,
+                    repair_count,
+                    error=exc,
+                    transport_retry_count=transport_retry_count,
+                    provider=last_provider,
+                    model=last_model,
+                    latency_ms=last_latency_ms,
                 )
-            except ModelConfigurationError:
+            except ModelAuthenticationError as exc:
                 return self._fallback_result(
-                    request, PlannerFallbackReason.MODEL_CONFIGURATION_ERROR, repair_count
+                    request,
+                    PlannerFallbackReason.MODEL_AUTHENTICATION_ERROR,
+                    repair_count,
+                    error=exc,
+                    transport_retry_count=transport_retry_count,
+                    provider=last_provider,
+                    model=last_model,
+                    latency_ms=last_latency_ms,
                 )
-            except ModelTransportError:
+            except ModelRequestError as exc:
                 return self._fallback_result(
-                    request, PlannerFallbackReason.MODEL_TRANSPORT_ERROR, repair_count
+                    request,
+                    PlannerFallbackReason.MODEL_REQUEST_ERROR,
+                    repair_count,
+                    error=exc,
+                    transport_retry_count=transport_retry_count,
+                    provider=last_provider,
+                    model=last_model,
+                    latency_ms=last_latency_ms,
                 )
-            except ModelClientError:
+            except ModelProviderError as exc:
                 return self._fallback_result(
-                    request, PlannerFallbackReason.MODEL_TRANSPORT_ERROR, repair_count
+                    request,
+                    PlannerFallbackReason.MODEL_PROVIDER_ERROR,
+                    repair_count,
+                    error=exc,
+                    transport_retry_count=transport_retry_count,
+                    provider=last_provider,
+                    model=last_model,
+                    latency_ms=last_latency_ms,
+                )
+            except ModelConfigurationError as exc:
+                return self._fallback_result(
+                    request,
+                    PlannerFallbackReason.MODEL_CONFIGURATION_ERROR,
+                    repair_count,
+                    error=exc,
+                    transport_retry_count=transport_retry_count,
+                    provider=last_provider,
+                    model=last_model,
+                    latency_ms=last_latency_ms,
+                )
+            except ModelTransportError as exc:
+                return self._fallback_result(
+                    request,
+                    PlannerFallbackReason.MODEL_TRANSPORT_ERROR,
+                    repair_count,
+                    error=exc,
+                    transport_retry_count=transport_retry_count,
+                    provider=last_provider,
+                    model=last_model,
+                    latency_ms=last_latency_ms,
+                )
+            except ModelClientError as exc:
+                return self._fallback_result(
+                    request,
+                    PlannerFallbackReason.MODEL_TRANSPORT_ERROR,
+                    repair_count,
+                    error=exc,
+                    transport_retry_count=transport_retry_count,
+                    provider=last_provider,
+                    model=last_model,
+                    latency_ms=last_latency_ms,
                 )
 
         reason = last_repair_reason or PlannerFallbackReason.MODEL_RESPONSE_INVALID
         if repair_count > 1 and reason == PlannerFallbackReason.MODEL_RESPONSE_INVALID:
             reason = PlannerFallbackReason.RETRY_EXHAUSTED
-        return self._fallback_result(request, reason, repair_count)
+        return self._fallback_result(
+            request,
+            reason,
+            repair_count,
+            transport_retry_count=transport_retry_count,
+            provider=last_provider,
+            model=last_model,
+            latency_ms=last_latency_ms,
+        )
 
     def _fallback_result(
         self,
         request: PlannerInput,
         reason: PlannerFallbackReason,
         repair_count: int,
+        *,
+        error: ModelClientError | None = None,
+        transport_retry_count: int = 0,
+        provider: str | None = None,
+        model: str | None = None,
+        latency_ms: float | None = None,
     ) -> PlannerRunResult:
         """Build and record one explicitly audited deterministic fallback."""
 
         plan = build_fallback_plan(request, tool_registry=self.tool_registry)
         self.last_planner_repair_count = repair_count
         self.last_model_result = None
+        error_retry_count = error.transport_retry_count if error is not None else 0
+        error_provider = error.provider if error is not None else None
+        error_model = error.model if error is not None else None
+        error_latency_ms = error.latency_ms if error is not None else None
         return PlannerRunResult(
             plan=plan,
             fallback_used=True,
             fallback_reason=reason,
             planner_repair_count=repair_count,
+            transport_retry_count=max(transport_retry_count, error_retry_count),
+            model_latency_ms=(
+                latency_ms if latency_ms is not None else error_latency_ms
+            ),
+            provider=provider or error_provider,
+            model=model or error_model,
         )
 
     def _plan_legacy(
@@ -813,6 +954,18 @@ def _fault_context(metric_id: str) -> list[JsonObject]:
     ]
 
 
+def _canonical_root_cause_types() -> tuple[str, ...]:
+    """Load the complete closed-set taxonomy without duplicating its labels."""
+
+    try:
+        catalog = load_fault_catalog(DEFAULT_FAULT_CATALOG_PATH)
+    except (OSError, ValueError) as exc:
+        raise PlannerValidationError(
+            f"could not load canonical fault catalog: {exc}"
+        ) from exc
+    return tuple(fault.root_cause_type for fault in catalog.faults)
+
+
 def _select_fallback_faults(request: PlannerInput) -> list[FaultDefinition]:
     """Prioritize canonical fault vocabulary while always returning 3 candidates."""
 
@@ -981,10 +1134,11 @@ def _sql_for_root_cause(
         )
     if root_cause_type == "timezone_error":
         return (
-            "SELECT device_type, EXTRACT(HOUR FROM event_time) AS event_hour, "
-            "COUNT(*) AS event_count FROM events "
-            f"WHERE CAST(event_time AS DATE) = {date_expression} "
-            "GROUP BY device_type, event_hour ORDER BY device_type, event_hour"
+            "SELECT u.region, EXTRACT(HOUR FROM e.event_time) AS event_hour, "
+            "COUNT(*) AS event_count FROM events AS e "
+            "INNER JOIN users AS u ON e.user_id = u.user_id "
+            f"WHERE CAST(e.event_time AS DATE) = {date_expression} "
+            "GROUP BY u.region, event_hour ORDER BY u.region, event_hour"
         )
     if root_cause_type == "join_filter":
         return (
@@ -1053,4 +1207,5 @@ __all__ = [
     "parse_investigation_plan",
     "validate_plan_semantics",
     "validate_plan_tools",
+    "validate_root_cause_types",
 ]

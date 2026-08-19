@@ -13,7 +13,26 @@ T = TypeVar("T", bound=BaseModel)
 
 
 class ModelClientError(RuntimeError):
-    """Base error exposed to Planner code regardless of provider SDK."""
+    """Base error exposed to Planner code regardless of provider SDK.
+
+    Provider adapters attach lightweight call metadata to terminal errors so a
+    Planner fallback remains auditable even when no ``ModelCallResult`` exists.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        transport_retry_count: int = 0,
+        provider: str | None = None,
+        model: str | None = None,
+        latency_ms: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.transport_retry_count = transport_retry_count
+        self.provider = provider
+        self.model = model
+        self.latency_ms = latency_ms
 
 
 class ModelConfigurationError(ModelClientError):
@@ -30,6 +49,18 @@ class ModelRateLimitError(ModelClientError):
 
 class ModelTransportError(ModelClientError):
     """Raised for connection or retryable provider transport failures."""
+
+
+class ModelAuthenticationError(ModelClientError):
+    """Raised when the provider rejects credentials or authorization."""
+
+
+class ModelRequestError(ModelClientError):
+    """Raised when the provider rejects a non-retryable request."""
+
+
+class ModelProviderError(ModelClientError):
+    """Raised for a terminal provider-side 5xx failure."""
 
 
 class ModelResponseError(ModelClientError):

@@ -8,10 +8,12 @@ from agents.planner import (
     Planner,
     PlannerFallbackReason,
     PlannerInput,
+    _sql_for_root_cause,
     build_fallback_plan,
     build_planner_prompt,
     load_metric_context,
 )
+from config.faults import load_fault_catalog
 from llm.mock_client import MockModelClient
 from tools.registry import build_default_tool_registry
 from tools.sql_runner import validate_readonly_sql
@@ -142,6 +144,8 @@ def test_planner_prompt_only_advertises_registry_tools_and_omits_formal_schema()
     assert "Available tools:" in prompt
     assert "Tool: sql_query" in prompt
     assert "Legacy JSON Schema" not in prompt
+    assert "target Android partition row_count is zero" not in prompt
+    assert "closed-set candidate labels" in prompt
     for unavailable in (
         "check_freshness",
         "get_partition_status",
@@ -209,3 +213,71 @@ def test_semantic_tool_argument_error_exhausts_repair_and_falls_back() -> None:
     assert result.fallback_reason == PlannerFallbackReason.PLANNER_VALIDATION_FAILED
     assert result.model_result is None
     assert result.planner_repair_count == 2
+
+
+def test_noncanonical_root_cause_is_repaired_then_accepted() -> None:
+    alert, metric_context = _request_for(dict(PLANNER_ALERT_EXAMPLES[0]))
+    fallback = build_fallback_plan(PlannerInput(alert=alert, metric_context=metric_context))
+    invalid = fallback.model_dump(mode="json")
+    invalid["hypotheses"][0]["root_cause_type"] = "magic_database_issue"
+    calls = 0
+
+    def response_factory(response_model: type[InvestigationPlan], _: str, __: str):
+        nonlocal calls
+        calls += 1
+        return response_model.model_validate(invalid if calls == 1 else fallback)
+
+    result = Planner(MockModelClient(response_factory), max_retries=1).run(
+        alert, metric_context
+    )
+
+    assert result.fallback_used is False
+    assert result.fallback_reason is None
+    assert result.planner_repair_count == 1
+    assert result.plan.hypotheses[0].root_cause_type == "missing_partition"
+
+
+def test_repeated_noncanonical_root_cause_returns_audited_fallback() -> None:
+    alert, metric_context = _request_for(dict(PLANNER_ALERT_EXAMPLES[0]))
+    fallback = build_fallback_plan(PlannerInput(alert=alert, metric_context=metric_context))
+    invalid = fallback.model_dump(mode="json")
+    invalid["hypotheses"][0]["root_cause_type"] = "magic_database_issue"
+
+    def response_factory(response_model: type[InvestigationPlan], _: str, __: str):
+        return response_model.model_validate(invalid)
+
+    result = Planner(MockModelClient(response_factory), max_retries=1).run(
+        alert, metric_context
+    )
+
+    assert result.fallback_used is True
+    assert result.fallback_reason == PlannerFallbackReason.PLANNER_VALIDATION_FAILED
+    assert result.planner_repair_count == 2
+    assert result.model_result is None
+
+
+def test_root_cause_taxonomy_is_loaded_from_catalog() -> None:
+    catalog = load_fault_catalog()
+    alert = Alert.model_validate(PLANNER_ALERT_EXAMPLES[0])
+    plan = build_fallback_plan(
+        PlannerInput(alert=alert, metric_context=load_metric_context(alert.metric))
+    )
+
+    assert len(catalog.faults) == 12
+    assert {hypothesis.root_cause_type for hypothesis in plan.hypotheses}.issubset(
+        {fault.root_cause_type for fault in catalog.faults}
+    )
+
+
+def test_timezone_fallback_uses_region_join_and_readonly_sql() -> None:
+    sql = _sql_for_root_cause(
+        "timezone_error",
+        metric="daily_active_users",
+        entity_column="user_id",
+        observed_at="2026-01-30",
+    )
+
+    assert "INNER JOIN users AS u ON e.user_id = u.user_id" in sql
+    assert "u.region" in sql
+    assert "event_hour" in sql
+    assert validate_readonly_sql(sql) == "SELECT"

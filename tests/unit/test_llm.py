@@ -2,7 +2,9 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
+import llm.openai_client as openai_client_module
 from agents.planner import (
     PLANNER_ALERT_EXAMPLES,
     Alert,
@@ -15,8 +17,11 @@ from agents.planner import (
 )
 from config.model_settings import ModelSettings
 from llm.base import (
+    ModelAuthenticationError,
     ModelConfigurationError,
+    ModelProviderError,
     ModelRateLimitError,
+    ModelRequestError,
     ModelResponseError,
     ModelTimeoutError,
     ModelTransportError,
@@ -112,6 +117,18 @@ def test_mock_model_client_and_planner_use_structured_result_without_network() -
         (ModelTimeoutError("timed out"), PlannerFallbackReason.MODEL_TIMEOUT),
         (ModelRateLimitError("rate limited"), PlannerFallbackReason.MODEL_RATE_LIMIT),
         (ModelTransportError("transport failed"), PlannerFallbackReason.MODEL_TRANSPORT_ERROR),
+        (
+            ModelAuthenticationError("authentication failed"),
+            PlannerFallbackReason.MODEL_AUTHENTICATION_ERROR,
+        ),
+        (
+            ModelRequestError("request rejected"),
+            PlannerFallbackReason.MODEL_REQUEST_ERROR,
+        ),
+        (
+            ModelProviderError("provider failed"),
+            PlannerFallbackReason.MODEL_PROVIDER_ERROR,
+        ),
     ],
 )
 def test_planner_run_records_provider_failure_fallback(
@@ -208,6 +225,67 @@ def test_openai_client_converts_timeout_and_provider_errors() -> None:
     assert len(provider_responses.calls) == 1
 
 
+def test_openai_client_classifies_parse_validation_error_as_model_response_error() -> None:
+    parse_error = ValidationError.from_exception_data(
+        "InvestigationPlan",
+        [
+            {
+                "type": "missing",
+                "loc": ("incident_id",),
+                "input": {},
+                "ctx": {"error": "Field required"},
+            }
+        ],
+    )
+    responses = _FakeResponses(error=parse_error)
+
+    with pytest.raises(ModelResponseError, match="Structured Output parsing failed"):
+        asyncio.run(
+            _client(responses).generate_structured(
+                system_prompt="system",
+                user_prompt="user",
+                response_model=InvestigationPlan,
+            )
+        )
+
+
+def test_openai_parse_validation_error_enters_planner_repair() -> None:
+    parse_error = ValidationError.from_exception_data(
+        "InvestigationPlan",
+        [
+            {
+                "type": "missing",
+                "loc": ("incident_id",),
+                "input": {},
+                "ctx": {"error": "Field required"},
+            }
+        ],
+    )
+
+    class SequenceResponses(_FakeResponses):
+        def __init__(self) -> None:
+            super().__init__()
+            self.errors = [parse_error, None]
+
+        async def parse(self, **kwargs: object) -> object:
+            self.calls.append(kwargs)
+            error = self.errors.pop(0)
+            if error is not None:
+                raise error
+            return _fake_response(_plan().model_dump(mode="json"))
+
+    alert = Alert.model_validate(PLANNER_ALERT_EXAMPLES[0])
+    context = load_metric_context(alert.metric)
+    result = Planner(
+        _client(SequenceResponses()),
+        max_retries=1,
+    ).run(alert, context)
+
+    assert result.fallback_used is False
+    assert result.model_result is not None
+    assert result.planner_repair_count == 1
+
+
 def test_openai_client_transport_retry_uses_injected_exponential_backoff() -> None:
     responses = _FakeResponses(error=TimeoutError())
     delays: list[float] = []
@@ -225,6 +303,69 @@ def test_openai_client_transport_retry_uses_injected_exponential_backoff() -> No
         )
 
     assert delays == [0.5, 1.0]
+
+
+class _FakeAPIStatusError(Exception):
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"status={status_code}")
+        self.status_code = status_code
+
+
+@pytest.mark.parametrize(
+    ("status_code", "error_type", "call_count"),
+    [
+        (401, ModelAuthenticationError, 1),
+        (403, ModelAuthenticationError, 1),
+        (400, ModelRequestError, 1),
+        (404, ModelRequestError, 1),
+        (422, ModelRequestError, 1),
+        (408, ModelTimeoutError, 3),
+        (500, ModelProviderError, 3),
+        (429, ModelRateLimitError, 3),
+    ],
+)
+def test_openai_client_classifies_http_status_without_wrong_retries(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    error_type: type[Exception],
+    call_count: int,
+) -> None:
+    monkeypatch.setattr(openai_client_module, "APIStatusError", _FakeAPIStatusError)
+    responses = _FakeResponses(error=_FakeAPIStatusError(status_code))
+
+    with pytest.raises(error_type):
+        asyncio.run(
+            _client(responses, retries=2).generate_structured(
+                system_prompt="system",
+                user_prompt="user",
+                response_model=InvestigationPlan,
+            )
+        )
+
+    assert len(responses.calls) == call_count
+
+
+def test_timeout_failure_preserves_transport_retry_metadata_in_fallback() -> None:
+    class FailingClient:
+        async def generate_structured(self, **_: object):
+            raise ModelTimeoutError(
+                "timed out",
+                transport_retry_count=2,
+                provider="openai",
+                model="test-model",
+                latency_ms=12.5,
+            )
+
+    alert = Alert.model_validate(PLANNER_ALERT_EXAMPLES[0])
+    context = load_metric_context(alert.metric)
+    result = Planner(FailingClient()).run(alert, context)
+
+    assert result.fallback_used is True
+    assert result.fallback_reason == PlannerFallbackReason.MODEL_TIMEOUT
+    assert result.transport_retry_count == 2
+    assert result.provider == "openai"
+    assert result.model == "test-model"
+    assert result.model_latency_ms == 12.5
 
 
 def test_openai_client_rejects_malformed_structured_result() -> None:

@@ -29,9 +29,12 @@ except ModuleNotFoundError:  # pragma: no cover - normal installs have openai
 from config.model_settings import ModelSettings
 
 from .base import (
+    ModelAuthenticationError,
     ModelClientError,
     ModelConfigurationError,
+    ModelProviderError,
     ModelRateLimitError,
+    ModelRequestError,
     ModelResponseError,
     ModelTimeoutError,
     ModelTransportError,
@@ -112,8 +115,22 @@ class OpenAIModelClient:
                     input=[{"role": "user", "content": user_prompt}],
                     text_format=response_model,
                 )
+            except ValidationError as exc:
+                raise ModelResponseError(
+                    f"OpenAI Structured Output parsing failed: {exc}",
+                    transport_retry_count=transport_retries,
+                    provider=self.provider,
+                    model=self.model,
+                    latency_ms=(perf_counter() - started) * 1000,
+                ) from exc
             except Exception as exc:
-                normalized = self._normalize_error(exc)
+                normalized = self._normalize_error(
+                    exc,
+                    transport_retry_count=transport_retries,
+                    provider=self.provider,
+                    model=self.model,
+                    latency_ms=(perf_counter() - started) * 1000,
+                )
                 if self._is_retryable(exc) and attempt < self.settings.llm_max_retries:
                     delay = self.settings.llm_retry_base_delay_seconds * (2**transport_retries)
                     transport_retries += 1
@@ -125,18 +142,30 @@ class OpenAIModelClient:
                 parsed_value = getattr(response, "output_parsed", None)
                 if parsed_value is None:
                     raise ModelResponseError(
-                        "OpenAI response did not contain a parsed Structured Output"
+                        "OpenAI response did not contain a parsed Structured Output",
+                        transport_retry_count=transport_retries,
+                        provider=self.provider,
+                        model=self.model,
+                        latency_ms=(perf_counter() - started) * 1000,
                     )
                 parsed = response_model.model_validate(parsed_value)
             except (ValidationError, ModelClientError) as exc:
                 if isinstance(exc, ModelClientError):
                     raise
                 raise ModelResponseError(
-                    f"OpenAI Structured Output failed Pydantic validation: {exc}"
+                    f"OpenAI Structured Output failed Pydantic validation: {exc}",
+                    transport_retry_count=transport_retries,
+                    provider=self.provider,
+                    model=self.model,
+                    latency_ms=(perf_counter() - started) * 1000,
                 ) from exc
             except Exception as exc:
                 raise ModelResponseError(
-                    f"OpenAI response could not be parsed: {exc}"
+                    f"OpenAI response could not be parsed: {exc}",
+                    transport_retry_count=transport_retries,
+                    provider=self.provider,
+                    model=self.model,
+                    latency_ms=(perf_counter() - started) * 1000,
                 ) from exc
 
             usage = getattr(response, "usage", None)
@@ -160,7 +189,13 @@ class OpenAIModelClient:
                 transport_retry_count=transport_retries,
             )
 
-        raise ModelTransportError("OpenAI request ended without a response")
+        raise ModelTransportError(
+            "OpenAI request ended without a response",
+            transport_retry_count=transport_retries,
+            provider=self.provider,
+            model=self.model,
+            latency_ms=(perf_counter() - started) * 1000,
+        )
 
     @staticmethod
     def _is_retryable(error: Exception) -> bool:
@@ -170,31 +205,62 @@ class OpenAIModelClient:
             return True
         if isinstance(error, APIStatusError):
             status_code = getattr(error, "status_code", None)
-            return status_code in {408, 409, 429} or (
+            return status_code in {408, 429} or (
                 isinstance(status_code, int) and status_code >= 500
             )
         return isinstance(error, (TimeoutError, asyncio.TimeoutError, ConnectionError))
 
     @staticmethod
-    def _normalize_error(error: Exception) -> ModelClientError:
+    def _normalize_error(
+        error: Exception,
+        *,
+        transport_retry_count: int = 0,
+        provider: str | None = None,
+        model: str | None = None,
+        latency_ms: float | None = None,
+    ) -> ModelClientError:
         """Convert OpenAI SDK-specific exceptions to stable application errors."""
 
-        if isinstance(error, (APITimeoutError, TimeoutError, asyncio.TimeoutError)):
-            return ModelTimeoutError("OpenAI request timed out")
-        if isinstance(error, RateLimitError):
-            return ModelRateLimitError("OpenAI request was rate limited")
-        if isinstance(error, APIStatusError):
-            status_code = getattr(error, "status_code", None)
-            if status_code == 429:
-                return ModelRateLimitError("OpenAI request was rate limited")
-            return ModelTransportError(
-                f"OpenAI API returned a provider error (status={status_code})"
-            )
-        if isinstance(error, (APIConnectionError, ConnectionError)):
-            return ModelTransportError("OpenAI connection failed")
         if isinstance(error, ModelClientError):
-            return error
-        return ModelTransportError(f"OpenAI provider call failed: {error}")
+            normalized = error
+        elif isinstance(error, (APITimeoutError, TimeoutError, asyncio.TimeoutError)):
+            normalized = ModelTimeoutError("OpenAI request timed out")
+        elif isinstance(error, RateLimitError):
+            normalized = ModelRateLimitError("OpenAI request was rate limited")
+        elif isinstance(error, APIStatusError):
+            status_code = getattr(error, "status_code", None)
+            if status_code in {401, 403}:
+                normalized = ModelAuthenticationError(
+                    f"OpenAI authentication failed (status={status_code})"
+                )
+            elif status_code in {400, 404, 422}:
+                normalized = ModelRequestError(
+                    f"OpenAI request was rejected (status={status_code})"
+                )
+            elif status_code == 408:
+                normalized = ModelTimeoutError("OpenAI request timed out")
+            elif status_code == 429:
+                normalized = ModelRateLimitError("OpenAI request was rate limited")
+            elif isinstance(status_code, int) and status_code >= 500:
+                normalized = ModelProviderError(
+                    f"OpenAI provider failed (status={status_code})"
+                )
+            else:
+                normalized = ModelRequestError(
+                    f"OpenAI API returned an unsupported status (status={status_code})"
+                )
+        elif isinstance(error, (APIConnectionError, ConnectionError)):
+            normalized = ModelTransportError("OpenAI connection failed")
+        else:
+            normalized = ModelTransportError(f"OpenAI provider call failed: {error}")
+
+        normalized.transport_retry_count = max(
+            normalized.transport_retry_count, transport_retry_count
+        )
+        normalized.provider = provider or normalized.provider
+        normalized.model = model or normalized.model
+        normalized.latency_ms = latency_ms
+        return normalized
 
 
 __all__ = ["OpenAIModelClient"]

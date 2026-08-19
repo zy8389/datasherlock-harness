@@ -1,10 +1,13 @@
 """Provider-neutral model client layer."""
 
 from .base import (
+    ModelAuthenticationError,
     ModelClient,
     ModelClientError,
     ModelConfigurationError,
+    ModelProviderError,
     ModelRateLimitError,
+    ModelRequestError,
     ModelResponseError,
     ModelTimeoutError,
     ModelTransportError,
@@ -32,11 +35,14 @@ def __getattr__(name: str):
 
 __all__ = [
     "MockModelClient",
+    "ModelAuthenticationError",
     "ModelCallResult",
     "ModelClient",
     "ModelClientError",
     "ModelConfigurationError",
+    "ModelProviderError",
     "ModelRateLimitError",
+    "ModelRequestError",
     "ModelResponseError",
     "ModelTimeoutError",
     "ModelTransportError",

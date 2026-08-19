@@ -90,7 +90,9 @@ planner = Planner(create_model_client(), tool_registry=registry)
 sql_query(sql: string)
 ```
 
-其中 `sql` 必须是单条只读 SQL。数据质量工具、管道辅助工具、Tool Executor 和修复工具尚未实现，因此不会出现在正式 Prompt 的 `Available tools` 中。模型输出经过 Pydantic Schema 后，还会由 Planner 校验工具是否存在、参数是否符合 Registry JSON Schema、工具是否只读，以及 `sql_query` 是否通过现有 SQL Runner 的 AST/native parser 校验。
+其中 `sql` 必须是单条只读 SQL。数据质量工具、管道辅助工具、Tool Executor 和修复工具尚未实现，因此不会出现在正式 Prompt 的 `Available tools` 中。模型输出经过 Pydantic Schema 后，还会由 Planner 校验 canonical `root_cause_type`、工具是否存在、参数是否符合 Registry JSON Schema、工具是否只读，以及 `sql_query` 是否通过现有 SQL Runner 的 AST/native parser 校验。
+
+`root_cause_type` 采用 closed-set 约束，但允许 F01-F12 中任意 canonical fault type；允许集合每次从 `config/fault_catalog.yaml` 读取，不在 Planner 中维护第二份 Literal 列表，也不会根据当前 metric 进一步缩小集合。正式 Prompt 只提供 fault vocabulary 的标签和 affected assets，不提供 `expected_evidence` 等 ground-truth 级提示。
 
 ## 调用方式
 
@@ -133,6 +135,8 @@ OpenAI Structured Outputs 先由 SDK 根据 Pydantic 模型解析，Model Client
 
 `LLM_MAX_RETRIES` 只属于 Model Client 的传输重试；Planner `max_retries` 只属于 Schema/业务计划修复重试。模型输出被判定为 `ModelResponseError` 或语义校验失败时，Planner 才执行修复重试；超时、限流和传输错误在 Model Client 内部重试后统一转换，并由 Planner 使用带有 `fallback_used` 与 `fallback_reason` 的兜底结果收束。Transport retry 和 Planner repair retry 分别记录在 `ModelCallResult.transport_retry_count` 与 `ModelCallResult.planner_repair_count`，总数记录在 `retry_count`。
 
+`responses.parse()` 直接抛出的 Pydantic `ValidationError` 属于 Structured Output response error，会转换为 `ModelResponseError` 并进入 Planner repair；它不会被误归类为 transport error。终态 fallback 的 `PlannerRunResult` 仍保留 `transport_retry_count`、`provider`、`model` 和可用的 `model_latency_ms`。
+
 为保持第一版离线测试兼容，旧的 `generate(prompt) -> str` 注入形式仍由同步 `Planner.plan()` 临时支持；新代码应使用 `ModelClient`，异步调用推荐 `await Planner(...).arun(...)`。`aplan()` / `plan()` 仍只返回 `InvestigationPlan` 以兼容旧调用方，正式 Harness 应使用 `arun()` / `run()` 获取完整 `PlannerRunResult`。模型输出不再由正式 ModelClient 路径自行 `json.loads`。
 
 ## PlannerRunResult 与 fallback
@@ -146,6 +150,10 @@ class PlannerRunResult(BaseModel):
     fallback_used: bool
     fallback_reason: PlannerFallbackReason | None
     planner_repair_count: int
+    transport_retry_count: int
+    model_latency_ms: float | None
+    provider: str | None
+    model: str | None
 ```
 
 例如：
@@ -167,6 +175,10 @@ OpenAI timeout
 ```
 
 模型不可用时，fallback 不再生成不存在的工具；当前 fallback 的每一步都是 `sql_query`，SQL 会复用 SQL Runner 的只读校验边界。
+
+Provider 错误使用 provider-neutral 类型归一化：401/403 为 `ModelAuthenticationError`，400/404/422 为 `ModelRequestError`，408 为 `ModelTimeoutError`，429 为 `ModelRateLimitError`，5xx 为可重试的 `ModelProviderError`，连接失败为 `ModelTransportError`。认证和请求错误不做无意义重试。
+
+F05 `timezone_error` 的 fallback 查询通过 `events e JOIN users u ON e.user_id = u.user_id` 获取 `u.region`，再按 region 和 `EXTRACT(HOUR FROM e.event_time)` 聚合，仍由 SQL Runner 做只读校验。
 
 ## 稳定性样例
 
