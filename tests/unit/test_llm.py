@@ -408,6 +408,86 @@ def test_planner_repair_retry_is_separate_from_transport_retry() -> None:
     assert planner.last_model_result.retry_count == 1
 
 
+def test_model_response_error_transport_retry_is_preserved_after_repair() -> None:
+    valid = _plan()
+    calls = 0
+
+    class ResponseErrorThenSuccessClient:
+        async def generate_structured(self, **_: object) -> ModelCallResult:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ModelResponseError(
+                    "structured output was invalid",
+                    transport_retry_count=1,
+                    provider="openai",
+                    model="test-model",
+                    latency_ms=10.0,
+                )
+            return ModelCallResult(
+                provider="openai",
+                model="test-model",
+                parsed=valid,
+                latency_ms=0.0,
+                retry_count=0,
+                transport_retry_count=0,
+            )
+
+    alert = Alert.model_validate(PLANNER_ALERT_EXAMPLES[0])
+    context = load_metric_context(alert.metric)
+    result = Planner(ResponseErrorThenSuccessClient(), max_retries=1).run(
+        alert, context
+    )
+
+    assert result.fallback_used is False
+    assert result.planner_repair_count == 1
+    assert result.transport_retry_count == 1
+    assert result.provider == "openai"
+    assert result.model == "test-model"
+    assert result.model_result is not None
+    assert result.model_result.transport_retry_count == 1
+    assert result.model_result.planner_repair_count == 1
+    assert result.model_result.retry_count == 2
+
+
+def test_model_response_error_and_success_transport_retries_are_summed() -> None:
+    valid = _plan()
+    calls = 0
+
+    class MixedResponseRetryClient:
+        async def generate_structured(self, **_: object) -> ModelCallResult:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ModelResponseError(
+                    "structured output was invalid",
+                    transport_retry_count=1,
+                    provider="openai",
+                    model="test-model",
+                    latency_ms=10.0,
+                )
+            return ModelCallResult(
+                provider="openai",
+                model="test-model",
+                parsed=valid,
+                latency_ms=20.0,
+                retry_count=2,
+                transport_retry_count=2,
+            )
+
+    alert = Alert.model_validate(PLANNER_ALERT_EXAMPLES[0])
+    context = load_metric_context(alert.metric)
+    result = Planner(MixedResponseRetryClient(), max_retries=1).run(alert, context)
+
+    assert result.fallback_used is False
+    assert result.planner_repair_count == 1
+    assert result.transport_retry_count == 3
+    assert result.model_result is not None
+    assert result.model_result.transport_retry_count == 3
+    assert result.model_result.planner_repair_count == 1
+    assert result.model_result.retry_count == 4
+
+
 def test_transport_retry_and_planner_repair_counts_are_both_audited() -> None:
     valid = _plan()
     invalid = valid.model_copy(deep=True)

@@ -618,9 +618,11 @@ class Planner:
                     model=annotated_result.model,
                 )
             except ModelResponseError as exc:
+                transport_retry_count += exc.transport_retry_count
                 last_provider = exc.provider or last_provider
                 last_model = exc.model or last_model
-                last_latency_ms = exc.latency_ms or last_latency_ms
+                if exc.latency_ms is not None:
+                    last_latency_ms = exc.latency_ms
                 last_repair_reason = PlannerFallbackReason.MODEL_RESPONSE_INVALID
                 repair_count += 1
                 continue
