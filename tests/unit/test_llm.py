@@ -488,6 +488,43 @@ def test_model_response_error_and_success_transport_retries_are_summed() -> None
     assert result.model_result.retry_count == 4
 
 
+def test_response_error_retries_are_summed_with_final_timeout_fallback() -> None:
+    calls = 0
+
+    class ResponseErrorThenTimeoutClient:
+        async def generate_structured(self, **_: object) -> ModelCallResult:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ModelResponseError(
+                    "structured output was invalid",
+                    transport_retry_count=1,
+                    provider="openai",
+                    model="test-model",
+                    latency_ms=10.0,
+                )
+            raise ModelTimeoutError(
+                "model request timed out",
+                transport_retry_count=2,
+                provider="openai",
+                model="test-model",
+                latency_ms=20.0,
+            )
+
+    alert = Alert.model_validate(PLANNER_ALERT_EXAMPLES[0])
+    context = load_metric_context(alert.metric)
+    result = Planner(ResponseErrorThenTimeoutClient(), max_retries=1).run(
+        alert, context
+    )
+
+    assert result.fallback_used is True
+    assert result.fallback_reason == PlannerFallbackReason.MODEL_TIMEOUT
+    assert result.transport_retry_count == 3
+    assert result.planner_repair_count == 1
+    assert result.provider == "openai"
+    assert result.model == "test-model"
+
+
 def test_transport_retry_and_planner_repair_counts_are_both_audited() -> None:
     valid = _plan()
     invalid = valid.model_copy(deep=True)

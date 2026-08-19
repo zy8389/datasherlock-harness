@@ -762,7 +762,7 @@ class Planner:
             fallback_used=True,
             fallback_reason=reason,
             planner_repair_count=repair_count,
-            transport_retry_count=max(transport_retry_count, error_retry_count),
+            transport_retry_count=transport_retry_count + error_retry_count,
             model_latency_ms=(
                 latency_ms if latency_ms is not None else error_latency_ms
             ),
