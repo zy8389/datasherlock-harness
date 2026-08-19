@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -11,10 +11,13 @@ import pandas as pd
 
 from benchmark.evaluation import calculate_effect, validate_effect
 from config.faults import (
+    INDEPENDENT_METADATA_EVIDENCE_FAULT_IDS,
+    EvidenceSourceType,
     GroundTruthCase,
     InjectionSpec,
     load_fault_catalog,
     load_ground_truth_cases,
+    validate_ground_truth_case,
 )
 from data.generator import (
     compute_definition_hash,
@@ -54,6 +57,7 @@ class FaultInjectionResult:
     effect_size_type: Literal["relative", "absolute"] = "relative"
     minimum_effect_size: float | None = None
     actual_effect: float | None = None
+    ground_truth_case: GroundTruthCase | None = None
 
 
 def _copy_tables(tables: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
@@ -126,10 +130,28 @@ def _append_metric_version(
     metric_id: str,
     query: str,
     effective_at: date,
+    *,
+    timezone: str | None = None,
+    date_grain: str | None = None,
 ) -> None:
     versions = tables["metric_versions"]
     existing = versions.loc[versions["metric_id"].eq(metric_id)]
     next_version = int(existing["version"].max()) + 1 if not existing.empty else 1
+    previous = existing.iloc[-1] if not existing.empty else None
+    inherited_timezone = (
+        str(previous["timezone"])
+        if previous is not None
+        and "timezone" in existing
+        and pd.notna(previous["timezone"])
+        else "UTC"
+    )
+    inherited_date_grain = (
+        str(previous["date_grain"])
+        if previous is not None
+        and "date_grain" in existing
+        and pd.notna(previous["date_grain"])
+        else "day"
+    )
     row = pd.DataFrame(
         [
             {
@@ -138,6 +160,8 @@ def _append_metric_version(
                 "definition_hash": compute_definition_hash(query),
                 "query": query,
                 "effective_at": pd.Timestamp(effective_at),
+                "timezone": timezone or inherited_timezone,
+                "date_grain": date_grain or inherited_date_grain,
             }
         ]
     )
@@ -390,6 +414,17 @@ def _apply_strategy(
         )
         selected = boundary if boundary.any() else target
         tables["events"].loc[selected, "event_time"] += pd.Timedelta(hours=shift_hours)
+        baseline_query = tables["metric_versions"].loc[
+            tables["metric_versions"]["metric_id"].eq("daily_active_users")
+        ].iloc[-1]["query"]
+        _append_metric_version(
+            tables,
+            "daily_active_users",
+            str(baseline_query),
+            metric_date,
+            timezone="Asia/Shanghai",
+            date_grain="day",
+        )
         _mark_pipeline(
             tables,
             metric_date=metric_date,
@@ -539,7 +574,15 @@ def validate_dataset_consistency(
         "pipeline_runs": {"target_table", "target_partition", "status"},
         "partition_metadata": {"partition_value", "row_count", "status"},
         "schema_snapshots": {"table_name", "version", "schema_json", "effective_at"},
-        "metric_versions": {"metric_id", "version", "definition_hash", "query", "effective_at"},
+        "metric_versions": {
+            "metric_id",
+            "version",
+            "definition_hash",
+            "query",
+            "effective_at",
+            "timezone",
+            "date_grain",
+        },
         "experiment_configs": {"experiment_id", "version", "effective_at"},
     }
     for table_name, columns in required_columns.items():
@@ -548,35 +591,301 @@ def validate_dataset_consistency(
             raise ValueError(f"{table_name} missing columns: {sorted(missing_columns)}")
 
 
-def validate_expected_evidence(
+def _target_date(result: FaultInjectionResult, case: GroundTruthCase) -> date:
+    return case.injection.metric_date or result.metric_date
+
+
+def _target_events(
+    tables: dict[str, pd.DataFrame], target_date: date, device_type: str | None = None
+) -> pd.DataFrame:
+    events = tables["events"]
+    mask = events["event_time"].dt.date.eq(target_date)
+    if device_type is not None:
+        mask &= events["device_type"].eq(device_type)
+    return events.loc[mask]
+
+
+def _single_row(frame: pd.DataFrame, description: str) -> pd.Series:
+    if len(frame) != 1:
+        raise ValueError(f"expected one {description} row, found {len(frame)}")
+    return frame.iloc[0]
+
+
+def _same_date(value: object, target_date: date) -> bool:
+    if value is None or pd.isna(value):
+        return False
+    return pd.Timestamp(value).date() == target_date
+
+
+def _validate_business_evidence(
     result: FaultInjectionResult,
-    baseline_tables: dict[str, pd.DataFrame] | None = None,
+    baseline_tables: dict[str, pd.DataFrame],
+    case: GroundTruthCase,
+    asset: str,
 ) -> None:
-    """Verify a metric observation and an independent metadata observation."""
-    tables = result.tables
-    validate_dataset_consistency(tables, expected_days=len(tables["daily_metrics"]))
-    if baseline_tables is not None and result.affected_metric is not None:
-        baseline_value = _metric_value(
-            baseline_tables, result.metric_date, result.affected_metric
+    target_date = _target_date(result, case)
+    spec = case.injection
+
+    if asset not in result.tables or asset not in baseline_tables:
+        raise ValueError(f"{case.case_id} business evidence asset is unavailable: {asset}")
+
+    if case.fault_id in {"F01", "F04"} and asset == "events":
+        device_type = spec.device_type or "android"
+        baseline_events = _target_events(baseline_tables, target_date, device_type)
+        fault_events = _target_events(result.tables, target_date, device_type)
+        if len(baseline_events) == 0 or len(fault_events) >= len(baseline_events):
+            raise ValueError(
+                f"{case.case_id} target-date {device_type} business events did not decrease"
+            )
+        if case.fault_id == "F04":
+            next_date = target_date + timedelta(days=1)
+            baseline_next = _target_events(baseline_tables, next_date, device_type)
+            fault_next = _target_events(result.tables, next_date, device_type)
+            if len(fault_next) <= len(baseline_next):
+                raise ValueError(
+                    f"{case.case_id} delayed events did not rebound on the following date"
+                )
+        return
+
+    if case.fault_id == "F05" and asset == "events":
+        region = spec.region or "CN"
+        region_users = set(
+            result.tables["users"].loc[
+                result.tables["users"]["region"].eq(region), "user_id"
+            ]
         )
-        fault_value = _metric_value(tables, result.metric_date, result.affected_metric)
-        if result.minimum_effect_size is not None and not validate_effect(
-            baseline_value,
-            fault_value,
-            expected_direction=result.expected_direction,
-            effect_size_type=result.effect_size_type,
-            minimum_effect_size=result.minimum_effect_size,
+        baseline_events = _target_events(baseline_tables, target_date)
+        fault_events = _target_events(result.tables, target_date)
+        baseline_hours = (
+            baseline_events.loc[baseline_events["user_id"].isin(region_users), "event_time"]
+            .dt.hour.value_counts()
+            .sort_index()
+        )
+        fault_hours = (
+            fault_events.loc[fault_events["user_id"].isin(region_users), "event_time"]
+            .dt.hour.value_counts()
+            .sort_index()
+        )
+        if baseline_hours.empty or baseline_hours.equals(fault_hours):
+            raise ValueError(f"{case.case_id} regional hourly business evidence did not change")
+        return
+
+    if case.fault_id == "F10" and asset in {"events", "daily_metrics"}:
+        if asset == "events":
+            baseline_count = len(_target_events(baseline_tables, target_date))
+            fault_count = len(_target_events(result.tables, target_date))
+            if baseline_count == 0 or fault_count >= baseline_count:
+                raise ValueError(f"{case.case_id} target-day business events did not decrease")
+        else:
+            baseline_value = _metric_value(
+                baseline_tables, target_date, case.affected_metric
+            )
+            fault_value = _metric_value(result.tables, target_date, case.affected_metric)
+            if fault_value >= baseline_value:
+                raise ValueError(f"{case.case_id} target-day metric did not decrease")
+        return
+
+    if case.fault_id == "F11" and asset == "events":
+        baseline_count = len(_target_events(baseline_tables, target_date))
+        fault_count = len(_target_events(result.tables, target_date))
+        if fault_count != baseline_count:
+            raise ValueError(f"{case.case_id} raw target-day event count is not stable")
+        return
+
+    if case.fault_id == "F12" and asset == "experiment_assignments":
+        baseline_distribution = (
+            baseline_tables[asset]["variant"].value_counts(normalize=True).sort_index()
+        )
+        fault_distribution = (
+            result.tables[asset]["variant"].value_counts(normalize=True).sort_index()
+        )
+        if baseline_distribution.equals(fault_distribution):
+            raise ValueError(f"{case.case_id} experiment assignment distribution did not change")
+        return
+
+    if case.fault_id == "F12" and asset == "subscriptions":
+        if result.tables[asset].equals(baseline_tables[asset]):
+            raise ValueError(f"{case.case_id} subscription outcome evidence did not change")
+        return
+
+    raise ValueError(
+        f"{case.case_id} has unsupported business evidence contract: {asset}"
+    )
+
+
+def _version_rows(frame: pd.DataFrame, metric_id: str) -> tuple[pd.Series, pd.Series]:
+    metric_rows = frame.loc[frame["metric_id"].eq(metric_id)].sort_values(
+        ["version", "effective_at"]
+    )
+    if metric_rows.empty:
+        raise ValueError(f"metric_versions has no row for {metric_id}")
+    return metric_rows.iloc[0], metric_rows.iloc[-1]
+
+
+def _validate_metric_version_evidence(
+    result: FaultInjectionResult,
+    baseline_tables: dict[str, pd.DataFrame],
+    case: GroundTruthCase,
+) -> None:
+    target_date = _target_date(result, case)
+    metric_id = case.affected_metric
+    _, baseline_latest = _version_rows(baseline_tables["metric_versions"], metric_id)
+    fault_rows = result.tables["metric_versions"].loc[
+        result.tables["metric_versions"]["metric_id"].eq(metric_id)
+    ]
+    fault_candidates = fault_rows.loc[
+        fault_rows["version"].astype(int).gt(int(baseline_latest["version"]))
+        & fault_rows["effective_at"].map(lambda value: _same_date(value, target_date))
+    ]
+    fault_version = _single_row(fault_candidates, f"{metric_id} fault metric version")
+
+    if case.fault_id == "F05":
+        if not str(baseline_latest["timezone"]).strip():
+            raise ValueError(f"{case.case_id} baseline timezone metadata is empty")
+        if not str(fault_version["timezone"]).strip():
+            raise ValueError(f"{case.case_id} fault timezone metadata is empty")
+        if fault_version["timezone"] == baseline_latest["timezone"]:
+            raise ValueError(f"{case.case_id} timezone metadata did not change")
+        return
+
+    if case.fault_id == "F11":
+        if fault_version["definition_hash"] == baseline_latest["definition_hash"]:
+            raise ValueError(f"{case.case_id} metric definition hash did not change")
+        if fault_version["query"] == baseline_latest["query"]:
+            raise ValueError(f"{case.case_id} metric query did not change")
+        return
+
+    raise ValueError(f"{case.case_id} has unsupported metric version evidence")
+
+
+def _validate_independent_evidence(
+    result: FaultInjectionResult,
+    baseline_tables: dict[str, pd.DataFrame],
+    case: GroundTruthCase,
+    source_type: EvidenceSourceType,
+    asset: str,
+) -> None:
+    target_date = _target_date(result, case)
+
+    if source_type == EvidenceSourceType.OPERATIONAL_METADATA and asset == "partition_metadata":
+        if case.fault_id != "F01":
+            raise ValueError(f"{case.case_id} has unsupported partition evidence")
+        device_type = case.injection.device_type or "android"
+        partition_value = f"{target_date}/{device_type}"
+        rows = result.tables[asset].loc[
+            result.tables[asset]["table_name"].eq("events")
+            & result.tables[asset]["partition_value"].eq(partition_value)
+        ]
+        row = _single_row(rows, f"{partition_value} partition metadata")
+        if int(row["row_count"]) != 0 and row["status"] not in {"missing", "stale"}:
+            raise ValueError(f"{case.case_id} target partition is not missing or empty")
+        return
+
+    if source_type == EvidenceSourceType.OPERATIONAL_METADATA and asset == "pipeline_runs":
+        if case.fault_id != "F04":
+            raise ValueError(f"{case.case_id} has unsupported pipeline evidence")
+        rows = result.tables[asset].loc[
+            result.tables[asset]["target_table"].eq("events")
+            & result.tables[asset]["target_partition"].eq(str(target_date))
+        ]
+        row = _single_row(rows, f"{target_date} events pipeline run")
+        status = str(row["status"]).lower()
+        error_type = str(row["error_type"]).lower()
+        if status not in {"delayed", "late", "stale"} and error_type != "data_delay":
+            raise ValueError(f"{case.case_id} target pipeline is not marked delayed")
+        return
+
+    if source_type == EvidenceSourceType.METRIC_VERSION and asset == "metric_versions":
+        _validate_metric_version_evidence(result, baseline_tables, case)
+        return
+
+    if source_type == EvidenceSourceType.SCHEMA_METADATA and asset == "schema_snapshots":
+        if case.fault_id != "F10":
+            raise ValueError(f"{case.case_id} has unsupported schema evidence")
+        baseline_rows = baseline_tables[asset].loc[
+            baseline_tables[asset]["table_name"].eq("events")
+        ].sort_values(["version", "effective_at"])
+        fault_rows = result.tables[asset].loc[
+            result.tables[asset]["table_name"].eq("events")
+        ].sort_values(["version", "effective_at"])
+        baseline_snapshot = _single_row(baseline_rows.tail(1), "baseline events schema")
+        fault_candidates = fault_rows.loc[
+            fault_rows["version"].astype(int).gt(int(baseline_snapshot["version"]))
+            & fault_rows["effective_at"].map(lambda value: _same_date(value, target_date))
+        ]
+        fault_snapshot = _single_row(fault_candidates, "fault events schema")
+        baseline_schema = json.loads(str(baseline_snapshot["schema_json"]))
+        fault_schema = json.loads(str(fault_snapshot["schema_json"]))
+        if baseline_schema.get("app_build_number") != "BIGINT":
+            raise ValueError(f"{case.case_id} baseline app_build_number type is unexpected")
+        if fault_schema.get("app_build_number") != "VARCHAR":
+            raise ValueError(f"{case.case_id} fault app_build_number type is unexpected")
+        return
+
+    if source_type == EvidenceSourceType.EXPERIMENT_CONFIG and asset == "experiment_configs":
+        if case.fault_id != "F12":
+            raise ValueError(f"{case.case_id} has unsupported experiment evidence")
+        experiment_id = str(baseline_tables[asset].iloc[0]["experiment_id"])
+        baseline_rows = baseline_tables[asset].loc[
+            baseline_tables[asset]["experiment_id"].eq(experiment_id)
+        ].sort_values(["version", "effective_at"])
+        fault_rows = result.tables[asset].loc[
+            result.tables[asset]["experiment_id"].eq(experiment_id)
+        ].sort_values(["version", "effective_at"])
+        baseline_config = _single_row(baseline_rows.tail(1), "baseline experiment config")
+        fault_candidates = fault_rows.loc[
+            fault_rows["version"].astype(int).gt(int(baseline_config["version"]))
+            & fault_rows["effective_at"].map(lambda value: _same_date(value, target_date))
+        ]
+        fault_config = _single_row(fault_candidates, "fault experiment config")
+        control_ratio = case.injection.control_ratio
+        treatment_ratio = case.injection.treatment_ratio
+        if control_ratio is None or treatment_ratio is None:
+            raise ValueError(f"{case.case_id} has no expected experiment allocation")
+        if not np.isclose(fault_config["control_ratio"], control_ratio):
+            raise ValueError(f"{case.case_id} control allocation is unexpected")
+        if not np.isclose(fault_config["treatment_ratio"], treatment_ratio):
+            raise ValueError(f"{case.case_id} treatment allocation is unexpected")
+        if (
+            baseline_config["control_ratio"] == fault_config["control_ratio"]
+            and baseline_config["treatment_ratio"] == fault_config["treatment_ratio"]
         ):
-            raise ValueError("fault metric does not satisfy the effect contract")
-    metadata_evidence = {
-        "F01": tables["partition_metadata"]["status"].eq("missing").any(),
-        "F04": tables["pipeline_runs"]["status"].eq("delayed").any(),
-        "F10": tables["pipeline_runs"]["error_type"].eq("schema_change").any(),
-        "F11": tables["metric_versions"]["version"].astype(int).ge(2).any(),
-        "F12": tables["experiment_configs"]["version"].astype(int).ge(2).any(),
-    }
-    if result.fault_id in metadata_evidence and not metadata_evidence[result.fault_id]:
-        raise ValueError(f"{result.fault_id} metadata evidence is missing")
+            raise ValueError(f"{case.case_id} experiment allocation did not change")
+        return
+
+    raise ValueError(
+        f"{case.case_id} has unsupported independent evidence contract: "
+        f"{source_type.value}:{asset}"
+    )
+
+
+def _resolve_ground_truth_case(
+    result: FaultInjectionResult, case: GroundTruthCase | None
+) -> GroundTruthCase:
+    resolved = case or result.ground_truth_case
+    if resolved is None and result.case_id is not None:
+        resolved = next(
+            (
+                candidate
+                for candidate in load_ground_truth_cases(_GROUND_TRUTH_DIRECTORY)
+                if candidate.case_id == result.case_id
+            ),
+            None,
+        )
+    if resolved is None:
+        raise ValueError("validate_expected_evidence requires a Ground Truth case")
+    if resolved.fault_id != result.fault_id:
+        raise ValueError(
+            f"Ground Truth fault {resolved.fault_id} does not match result {result.fault_id}"
+        )
+    return validate_ground_truth_case(resolved)
+
+
+def _validate_legacy_expected_evidence(
+    result: FaultInjectionResult,
+    baseline_tables: dict[str, pd.DataFrame] | None,
+) -> None:
+    tables = result.tables
     if baseline_tables is None:
         return
     base_events = baseline_tables["events"]
@@ -599,20 +908,55 @@ def validate_expected_evidence(
         "F09": fault_events["event_name"].eq("execute_ai_task").sum() > 0
         and fault_events["event_name"].eq("run_ai_task").sum()
         < base_events["event_name"].eq("run_ai_task").sum(),
-        "F10": not fault_day.any()
-        and tables["schema_snapshots"].query("table_name == 'events'")["version"].max() >= 2,
-        "F11": len(fault_events) == len(base_events)
-        and "daily_active_users" in result.faulty_queries,
-        "F12": len(tables["experiment_assignments"]) == len(
-            baseline_tables["experiment_assignments"]
-        )
-        and tables["experiment_assignments"]["variant"].value_counts().get("treatment", 0)
-        > baseline_tables["experiment_assignments"]["variant"].value_counts().get(
-            "treatment", 0
-        ),
     }
     if not evidence_checks[result.fault_id]:
         raise ValueError(f"{result.fault_id} data evidence is missing")
+
+
+def validate_expected_evidence(
+    result: FaultInjectionResult,
+    baseline_tables: dict[str, pd.DataFrame] | None = None,
+    ground_truth_case: GroundTruthCase | None = None,
+) -> None:
+    """Verify metric and evidence-path observations for one Ground Truth case."""
+    tables = result.tables
+    validate_dataset_consistency(tables, expected_days=len(tables["daily_metrics"]))
+    case = _resolve_ground_truth_case(result, ground_truth_case)
+    if baseline_tables is not None and result.affected_metric is not None:
+        baseline_value = _metric_value(
+            baseline_tables, result.metric_date, result.affected_metric
+        )
+        fault_value = _metric_value(tables, result.metric_date, result.affected_metric)
+        if result.minimum_effect_size is not None and not validate_effect(
+            baseline_value,
+            fault_value,
+            expected_direction=result.expected_direction,
+            effect_size_type=result.effect_size_type,
+            minimum_effect_size=result.minimum_effect_size,
+        ):
+            raise ValueError("fault metric does not satisfy the effect contract")
+    if case.fault_id in INDEPENDENT_METADATA_EVIDENCE_FAULT_IDS:
+        if baseline_tables is None:
+            raise ValueError(
+                f"{case.case_id} evidence validation requires baseline tables"
+            )
+        for path in case.evidence_paths:
+            if path.asset not in tables:
+                raise ValueError(
+                    f"{case.case_id} evidence asset is unavailable: {path.asset}"
+                )
+            if path.source_type == EvidenceSourceType.BUSINESS_DATA:
+                _validate_business_evidence(result, baseline_tables, case, path.asset)
+            else:
+                _validate_independent_evidence(
+                    result,
+                    baseline_tables,
+                    case,
+                    path.source_type,
+                    path.asset,
+                )
+        return
+    _validate_legacy_expected_evidence(result, baseline_tables)
 
 
 def _inject(
@@ -629,6 +973,7 @@ def _inject(
     start_date: pd.Timestamp,
     days: int,
     case_id: str | None,
+    ground_truth_case: GroundTruthCase | None = None,
 ) -> FaultInjectionResult:
     baseline_value = _metric_value(tables, metric_date, affected_metric)
     mutated = _copy_tables(tables)
@@ -662,6 +1007,7 @@ def _inject(
         actual_effect=calculate_effect(
             baseline_value, fault_value, effect_size_type=effect_size_type
         ),
+        ground_truth_case=ground_truth_case,
     )
     validate_dataset_consistency(mutated, expected_days=days)
     return result
@@ -676,6 +1022,7 @@ def inject_case(
     days: int,
 ) -> FaultInjectionResult:
     """Inject a concrete Ground Truth case into a materialized fault dataset."""
+    validate_ground_truth_case(case)
     metric_date = case.injection.metric_date or start_date.date()
     return _inject(
         tables,
@@ -690,6 +1037,7 @@ def inject_case(
         start_date=start_date,
         days=days,
         case_id=case.case_id,
+        ground_truth_case=case,
     )
 
 
@@ -717,6 +1065,7 @@ def inject_fault(
         raise ValueError(f"no ground-truth case exists for {fault_id}")
     concrete = matching_cases[0]
     spec = concrete.injection.model_copy(update={"metric_date": metric_date})
+    bound_case = concrete.model_copy(update={"injection": spec})
     return _inject(
         tables,
         fault_id=fault_id,
@@ -729,5 +1078,6 @@ def inject_fault(
         rng=random,
         start_date=active_start,
         days=active_days,
-        case_id=concrete.case_id,
+        case_id=bound_case.case_id,
+        ground_truth_case=bound_case,
     )

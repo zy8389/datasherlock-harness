@@ -4,7 +4,16 @@ root_cause_type: timezone_error
 affected_metric: daily_active_users
 affected_assets: [events, metric_versions, pipeline_runs]
 injection: {strategy: shift_region_boundary_events, metric_date: "2026-01-30", region: CN, shift_hours: 8}
-expected_evidence: [CN hourly distribution shifts, target-day CN DAU changes]
+expected_evidence:
+  - CN hourly business-event distribution shifts near the date boundary
+  - metric_versions records a timezone boundary configuration that disagrees with the UTC metric baseline
+evidence_paths:
+  - source_type: business_data
+    asset: events
+    signal: CN event-hour distribution shifts after the boundary event timestamps are moved
+  - source_type: metric_version
+    asset: metric_versions
+    signal: daily_active_users timezone changes from UTC to Asia/Shanghai at the target date
 expected_direction: decrease
 effect_size_type: relative
 minimum_effect_size: 0.01

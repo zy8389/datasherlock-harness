@@ -9,6 +9,7 @@ faults:
       - target Android partition row_count is zero
       - adjacent Android partitions remain populated
       - partition metadata or pipeline run is missing/failed
+    evidence_source_types: [business_data, operational_metadata]
     expected_direction: decrease
     effect_size_type: relative
     minimum_effect_size: 0.20
@@ -45,6 +46,7 @@ faults:
       - target-day Android events decrease
       - following-day Android events rebound
       - pipeline freshness metadata reports delayed data
+    evidence_source_types: [business_data, operational_metadata]
     expected_direction: decrease
     effect_size_type: relative
     minimum_effect_size: 0.10
@@ -57,6 +59,7 @@ faults:
       - hourly event distribution shifts by a fixed offset
       - target-day CN DAU changes near the date boundary
       - timezone configuration and data timestamps disagree
+    evidence_source_types: [business_data, metric_version]
     expected_direction: decrease
     effect_size_type: relative
     minimum_effect_size: 0.01
@@ -117,6 +120,7 @@ faults:
       - schema snapshot reports INTEGER to VARCHAR drift
       - pipeline compatibility status is failed
       - target partition is not fresh and DAU decreases
+    evidence_source_types: [business_data, schema_metadata]
     expected_direction: decrease
     effect_size_type: relative
     minimum_effect_size: 0.10
@@ -129,6 +133,7 @@ faults:
       - metric definition hash changes
       - old and new SQL differ by an event filter
       - raw event count does not fall with the new DAU
+    evidence_source_types: [business_data, metric_version]
     expected_direction: decrease
     effect_size_type: relative
     minimum_effect_size: 0.10
@@ -141,6 +146,7 @@ faults:
       - allocation changes from the configured 50/50 baseline
       - experiment configuration version is anomalous
       - conversion rate shifts because variants have different propensity
+    evidence_source_types: [business_data, experiment_config]
     expected_direction: increase
     effect_size_type: relative
     minimum_effect_size: 0.05

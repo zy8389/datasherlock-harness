@@ -391,6 +391,8 @@ def generate_operational_metadata(
             "definition_hash": compute_definition_hash(metric.query),
             "query": metric.query,
             "effective_at": start_date,
+            "timezone": metric_config.timezone,
+            "date_grain": metric_config.date_grain,
         }
         for metric in metric_config.metrics
     ]

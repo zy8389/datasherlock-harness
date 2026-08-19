@@ -4,7 +4,16 @@ root_cause_type: missing_partition
 affected_metric: daily_active_users
 affected_assets: [events, partition_metadata, pipeline_runs]
 injection: {strategy: remove_android_partition, metric_date: "2026-01-30", device_type: android}
-expected_evidence: [android target row_count is zero, adjacent android row_count is normal]
+expected_evidence:
+  - target-date Android business events are absent
+  - partition_metadata reports target Android partition row_count is zero
+evidence_paths:
+  - source_type: business_data
+    asset: events
+    signal: target-date Android events are absent or materially reduced
+  - source_type: operational_metadata
+    asset: partition_metadata
+    signal: target Android partition row_count is zero and status is missing
 expected_direction: decrease
 effect_size_type: relative
 minimum_effect_size: 0.20

@@ -4,7 +4,16 @@ root_cause_type: metric_definition_change
 affected_metric: daily_active_users
 affected_assets: [metric_versions, daily_metrics, events]
 injection: {strategy: filter_dau_to_core_task_events, metric_date: "2026-01-30"}
-expected_evidence: [metric definition hash changes, raw event count remains stable]
+expected_evidence:
+  - raw business event count remains stable while daily_active_users decreases
+  - metric_versions records a new definition hash and filtered query for daily_active_users
+evidence_paths:
+  - source_type: business_data
+    asset: events
+    signal: raw event row count remains stable while the affected metric decreases
+  - source_type: metric_version
+    asset: metric_versions
+    signal: daily_active_users definition hash and query change at the target date
 expected_direction: decrease
 effect_size_type: relative
 minimum_effect_size: 0.10

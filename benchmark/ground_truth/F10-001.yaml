@@ -4,7 +4,16 @@ root_cause_type: schema_change
 affected_metric: daily_active_users
 affected_assets: [events, schema_snapshots, partition_metadata, pipeline_runs]
 injection: {strategy: change_app_build_number_integer_to_varchar, metric_date: "2026-01-30", from_value: BIGINT, to_value: VARCHAR}
-expected_evidence: [schema diff reports INTEGER to VARCHAR, pipeline status is failed]
+expected_evidence:
+  - target-day business metric data is absent and DAU decreases
+  - schema_snapshots records app_build_number BIGINT to VARCHAR drift
+evidence_paths:
+  - source_type: business_data
+    asset: events
+    signal: target-day events are not materialized and daily_active_users decreases
+  - source_type: schema_metadata
+    asset: schema_snapshots
+    signal: events schema changes app_build_number from BIGINT to VARCHAR
 expected_direction: decrease
 effect_size_type: relative
 minimum_effect_size: 0.10

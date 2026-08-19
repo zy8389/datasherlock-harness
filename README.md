@@ -49,7 +49,8 @@ DataSherlock Harness 的目标是：
 
 指标配置中的 `timezone` 当前用于 IANA 时区校验；指标 SQL 仍以显式的
 `CAST(event_time AS DATE)` 执行，统一的 timezone normalization 尚未接入。
-F05 因此只验证明确的事件时间偏移和可观察的日边界变化。
+F05 因此验证明确的事件时间偏移、可观察的日边界变化，以及
+`metric_versions` 中可查询的时间语义版本差异；这不是完整的运行时 timezone engine。
 
 仍未实现或仅有接口/文档准备：
 
@@ -335,6 +336,50 @@ experiment_configs
 ```
 
 这些表与五张业务/指标表一起写入 Parquet 和 DuckDB，用于提供独立的管道、分区、Schema、指标版本和实验配置证据。
+
+### 6.7 Ground Truth Evidence Contract
+
+Metadata-dependent seed cases F01、F04、F05、F10、F11 和 F12 同时维护两种证据字段：
+
+```yaml
+expected_evidence:
+  - target-day Android business events decrease
+
+evidence_paths:
+  - source_type: business_data
+    asset: events
+    signal: target-day Android events decrease
+  - source_type: operational_metadata
+    asset: partition_metadata
+    signal: target Android partition row_count is zero
+```
+
+`expected_evidence` 是面向人类阅读和报告展示的预期信号；`evidence_paths` 是
+Benchmark 使用的 machine-readable contract。Evidence path 的 `asset` 必须属于
+该 case 的 `affected_assets`，`source_type` 必须来自合法的证据来源类别，且同一条
+path 的 source、asset、signal 不能完全重复。
+
+对 metadata-dependent faults，独立证据必须至少包含：
+
+```text
+business_data
++
+one non-business source category
+```
+
+非业务来源包括 `operational_metadata`、`schema_metadata`、`metric_version` 和
+`experiment_config`。因此两个来自不同业务表的 COUNT 不能替代独立 metadata、Schema、
+metric version 或 experiment configuration 证据。
+
+Ground Truth 的完整入口是 `load_ground_truth_cases()`，它调用
+`validate_ground_truth_case()` 完成 catalog-aware 校验。`GroundTruthCase` 本身负责字段
+格式和 case 内部一致性；完整校验负责 fault catalog 对齐、独立 evidence source 要求和
+case-level contract。注入结果绑定具体 Ground Truth case 后，
+`validate_expected_evidence()` 按 `evidence_paths` 验证目标日期、目标资产、版本和配置，
+而不是通过自然语言关键词推断证据类型。
+
+当前实现只覆盖上述六个 metadata-dependent seed cases，不代表 60-case Benchmark、
+Benchmark Runner 或后续 Harness 模块已经完成。
 
 建议首批数据规模：
 

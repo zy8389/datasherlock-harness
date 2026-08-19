@@ -4,7 +4,16 @@ root_cause_type: ab_split_anomaly
 affected_metric: conversion_rate
 affected_assets: [experiment_assignments, experiment_configs, subscriptions]
 injection: {strategy: change_experiment_split_to_20_80, metric_date: "2026-01-30", control_ratio: 0.20, treatment_ratio: 0.80}
-expected_evidence: [allocation changes from 50/50, conversion rate shifts with variant propensity]
+expected_evidence:
+  - experiment assignment business data changes from a 50/50 allocation
+  - experiment_configs records the anomalous 20/80 allocation and new version
+evidence_paths:
+  - source_type: business_data
+    asset: experiment_assignments
+    signal: experiment assignment distribution changes from the baseline 50/50 split
+  - source_type: experiment_config
+    asset: experiment_configs
+    signal: experiment configuration version changes to control 20/80 treatment allocation
 expected_direction: increase
 effect_size_type: relative
 minimum_effect_size: 0.04

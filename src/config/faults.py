@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from datetime import date
+from enum import StrEnum
 from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def _resolve_config_path(filename: str) -> Path:
@@ -21,6 +22,36 @@ def _resolve_config_path(filename: str) -> Path:
 
 DEFAULT_FAULT_CATALOG_PATH = _resolve_config_path("fault_catalog.yaml")
 EXPECTED_FAULT_IDS = {f"F{number:02d}" for number in range(1, 13)}
+INDEPENDENT_METADATA_EVIDENCE_FAULT_IDS = frozenset(
+    {"F01", "F04", "F05", "F10", "F11", "F12"}
+)
+
+
+class EvidenceSourceType(StrEnum):
+    """Machine-readable categories for independent benchmark evidence."""
+
+    BUSINESS_DATA = "business_data"
+    OPERATIONAL_METADATA = "operational_metadata"
+    SCHEMA_METADATA = "schema_metadata"
+    METRIC_VERSION = "metric_version"
+    EXPERIMENT_CONFIG = "experiment_config"
+
+
+class EvidencePath(BaseModel):
+    """One machine-readable source, asset, and signal contract."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_type: EvidenceSourceType
+    asset: str = Field(min_length=1)
+    signal: str = Field(min_length=1)
+
+    @field_validator("asset", "signal")
+    @classmethod
+    def reject_blank_values(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("evidence path values must not be blank")
+        return value
 
 
 class FaultDefinition(BaseModel):
@@ -34,6 +65,7 @@ class FaultDefinition(BaseModel):
     affected_assets: list[str] = Field(min_length=1)
     injection_strategy: str = Field(min_length=1)
     expected_evidence: list[str] = Field(min_length=2)
+    evidence_source_types: list[EvidenceSourceType] = Field(default_factory=list)
     expected_direction: Literal["increase", "decrease"]
     effect_size_type: Literal["relative", "absolute"] = "relative"
     minimum_effect_size: float = Field(gt=0)
@@ -56,6 +88,19 @@ class FaultCatalog(BaseModel):
             raise ValueError("fault catalog must contain exactly F01-F12")
         if len(root_causes) != len(set(root_causes)):
             raise ValueError("root_cause_type values must be unique")
+        for fault in self.faults:
+            source_types = set(fault.evidence_source_types)
+            if len(source_types) != len(fault.evidence_source_types):
+                raise ValueError(
+                    f"{fault.id} evidence_source_types must be unique"
+                )
+            if fault.id in INDEPENDENT_METADATA_EVIDENCE_FAULT_IDS and (
+                EvidenceSourceType.BUSINESS_DATA not in source_types
+                or len(source_types) < 2
+            ):
+                raise ValueError(
+                    f"{fault.id} must declare business and independent evidence sources"
+                )
         return self
 
     def by_id(self, fault_id: str) -> FaultDefinition:
@@ -84,9 +129,30 @@ class GroundTruthCase(BaseModel):
     affected_assets: list[str] = Field(min_length=1)
     injection: InjectionSpec
     expected_evidence: list[str] = Field(min_length=2)
+    evidence_paths: list[EvidencePath] = Field(default_factory=list)
     expected_direction: Literal["increase", "decrease"]
     effect_size_type: Literal["relative", "absolute"] = "relative"
     minimum_effect_size: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_evidence_paths(self) -> GroundTruthCase:
+        path_keys = [
+            (path.source_type, path.asset, path.signal)
+            for path in self.evidence_paths
+        ]
+        if len(path_keys) != len(set(path_keys)):
+            raise ValueError(
+                f"{self.case_id} evidence paths must be unique"
+            )
+        undeclared_assets = {
+            path.asset for path in self.evidence_paths
+        }.difference(self.affected_assets)
+        if undeclared_assets:
+            raise ValueError(
+                f"{self.case_id} evidence assets are not affected assets: "
+                + ", ".join(sorted(undeclared_assets))
+            )
+        return self
 
 
 class InjectionSpec(BaseModel):
@@ -133,17 +199,52 @@ def load_ground_truth_cases(
     if len(case_ids) != len(set(case_ids)):
         raise ValueError("ground-truth case ids must be unique")
     for case in cases:
-        fault = active_catalog.by_id(case.fault_id)
-        if case.root_cause_type != fault.root_cause_type:
-            raise ValueError(
-                f"{case.case_id} root cause does not match {case.fault_id}"
-            )
-        if case.affected_metric not in fault.affected_metrics:
-            raise ValueError(f"{case.case_id} metric is not valid for {case.fault_id}")
-        if case.injection.strategy != fault.injection_strategy:
-            raise ValueError(f"{case.case_id} strategy does not match {case.fault_id}")
-        if case.expected_direction != fault.expected_direction:
-            raise ValueError(f"{case.case_id} direction does not match {case.fault_id}")
-        if case.effect_size_type != fault.effect_size_type:
-            raise ValueError(f"{case.case_id} effect type does not match {case.fault_id}")
+        validate_ground_truth_case(case, active_catalog)
     return cases
+
+
+def validate_ground_truth_case(
+    case: GroundTruthCase, catalog: FaultCatalog | None = None
+) -> GroundTruthCase:
+    """Apply the complete catalog-aware contract validation to one case.
+
+    ``GroundTruthCase`` owns field-level and same-case checks.  This function
+    is the single entry point for rules that need the canonical fault catalog,
+    including evidence source declarations and independent-path requirements.
+    """
+
+    active_catalog = catalog or load_fault_catalog()
+    fault = active_catalog.by_id(case.fault_id)
+    if case.root_cause_type != fault.root_cause_type:
+        raise ValueError(f"{case.case_id} root cause does not match {case.fault_id}")
+    if case.affected_metric not in fault.affected_metrics:
+        raise ValueError(f"{case.case_id} metric is not valid for {case.fault_id}")
+    if case.injection.strategy != fault.injection_strategy:
+        raise ValueError(f"{case.case_id} strategy does not match {case.fault_id}")
+    if case.expected_direction != fault.expected_direction:
+        raise ValueError(f"{case.case_id} direction does not match {case.fault_id}")
+    if case.effect_size_type != fault.effect_size_type:
+        raise ValueError(f"{case.case_id} effect type does not match {case.fault_id}")
+
+    declared_sources = set(fault.evidence_source_types)
+    undeclared_sources = {
+        path.source_type for path in case.evidence_paths
+    }.difference(declared_sources)
+    if undeclared_sources:
+        values = ", ".join(sorted(source.value for source in undeclared_sources))
+        raise ValueError(
+            f"{case.case_id} evidence source types are not declared by "
+            f"{case.fault_id}: {values}"
+        )
+
+    if case.fault_id in INDEPENDENT_METADATA_EVIDENCE_FAULT_IDS:
+        source_types = {path.source_type for path in case.evidence_paths}
+        if len(case.evidence_paths) < 2:
+            raise ValueError(f"{case.case_id} requires at least two evidence paths")
+        if EvidenceSourceType.BUSINESS_DATA not in source_types:
+            raise ValueError(f"{case.case_id} requires a business_data evidence path")
+        if not source_types.difference({EvidenceSourceType.BUSINESS_DATA}):
+            raise ValueError(
+                f"{case.case_id} requires an independent non-business evidence path"
+            )
+    return case
