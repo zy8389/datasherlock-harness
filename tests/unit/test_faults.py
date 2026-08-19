@@ -198,6 +198,21 @@ def test_f12_ab_split_rebuild_changes_conversion_rate(
         start_date=START_DATE,
         days=30,
     )
+    assignments = result.tables["experiment_assignments"]
+    original_treatment_users = set(
+        baseline["experiment_assignments"].loc[
+            baseline["experiment_assignments"]["variant"].eq("treatment"), "user_id"
+        ]
+    )
+    fault_treatment_users = set(
+        assignments.loc[assignments["variant"].eq("treatment"), "user_id"]
+    )
+    assert assignments["user_id"].is_unique
+    assert assignments["variant"].value_counts(normalize=True).to_dict() == {
+        "treatment": pytest.approx(0.80),
+        "control": pytest.approx(0.20),
+    }
+    assert original_treatment_users <= fault_treatment_users
     assert result.tables["experiment_configs"].iloc[-1]["control_ratio"] == 0.2
     assert result.tables["experiment_configs"].iloc[0]["control_ratio"] == 0.5
     assert (
@@ -207,28 +222,10 @@ def test_f12_ab_split_rebuild_changes_conversion_rate(
 
 
 def _effect_contract_cases() -> list[object]:
-    parameters: list[object] = []
-    for case in load_ground_truth_cases(Path("benchmark/ground_truth")):
-        if case.fault_id == "F05":
-            continue
-        if case.fault_id == "F12":
-            parameters.append(
-                pytest.param(
-                    case,
-                    id=case.case_id,
-                    marks=pytest.mark.xfail(
-                        strict=True,
-                        reason=(
-                            "BLOCKER F12: Catalog minimum_effect_size is 0.05, "
-                            "but the current injector effect is approximately 0.043478 "
-                            "(Owner: Fault Injector task / YE)"
-                        ),
-                    ),
-                )
-            )
-        else:
-            parameters.append(pytest.param(case, id=case.case_id))
-    return parameters
+    return [
+        pytest.param(case, id=case.case_id)
+        for case in load_ground_truth_cases(Path("benchmark/ground_truth"))
+    ]
 
 
 @pytest.mark.parametrize("case", _effect_contract_cases())

@@ -3,7 +3,7 @@ fault_id: F05
 root_cause_type: timezone_error
 affected_metric: daily_active_users
 affected_assets: [events, metric_versions, pipeline_runs]
-injection: {strategy: shift_region_boundary_events, metric_date: "2026-01-30", region: CN, shift_hours: 8}
+injection: {strategy: shift_region_boundary_events, metric_date: "2026-01-30", region: CN, shift_hours: 8, to_value: Asia/Shanghai}
 expected_evidence:
   - CN hourly business-event distribution shifts near the date boundary
   - metric_versions records a timezone boundary configuration that disagrees with the UTC metric baseline
