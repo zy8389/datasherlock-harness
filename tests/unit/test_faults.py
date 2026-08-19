@@ -103,6 +103,15 @@ def test_f04_delay_moves_android_events_to_next_day(
         & fault_events["device_type"].eq("android")
     ).sum()
     assert fault_count < base_count
+    base_next_count = (
+        (base_events["event_time"].dt.date == TARGET_DATE + pd.Timedelta(days=1))
+        & base_events["device_type"].eq("android")
+    ).sum()
+    fault_next_count = (
+        (fault_events["event_time"].dt.date == TARGET_DATE + pd.Timedelta(days=1))
+        & fault_events["device_type"].eq("android")
+    ).sum()
+    assert fault_next_count > base_next_count
     assert (
         result.tables["partition_metadata"]
         .query("partition_value == '2026-01-16/android'")
@@ -174,6 +183,16 @@ def test_f10_schema_change_marks_partition_failed_and_reduces_dau(
         .iloc[0]["error_type"]
         == "schema_change"
     )
+    snapshots = result.tables["schema_snapshots"].query("table_name == 'events'")
+    assert set(snapshots["version"]) == {1, 2}
+    assert '"app_build_number": "BIGINT"' in snapshots.iloc[0]["schema_json"]
+    assert '"app_build_number": "VARCHAR"' in snapshots.iloc[-1]["schema_json"]
+    assert (
+        result.tables["partition_metadata"]
+        .query("partition_value == '2026-01-16/android'")
+        .iloc[0]["status"]
+        == "failed"
+    )
 
 
 def test_f11_metric_definition_change_reduces_dau_query_result(
@@ -182,6 +201,19 @@ def test_f11_metric_definition_change_reduces_dau_query_result(
     result = _inject(baseline, "F11")
     observed = _metrics(result.tables).loc[TARGET_DATE, "daily_active_users"]
     assert observed < _metrics(baseline).loc[TARGET_DATE, "daily_active_users"]
+    base_count = (
+        baseline["events"]["event_time"].dt.date == TARGET_DATE
+    ).sum()
+    fault_count = (
+        result.tables["events"]["event_time"].dt.date == TARGET_DATE
+    ).sum()
+    assert fault_count == base_count
+    versions = result.tables["metric_versions"].query(
+        "metric_id == 'daily_active_users'"
+    ).sort_values(["version", "effective_at"])
+    assert versions.iloc[-1]["version"] > versions.iloc[-2]["version"]
+    assert versions.iloc[-1]["definition_hash"] != versions.iloc[-2]["definition_hash"]
+    assert versions.iloc[-1]["query"] != versions.iloc[-2]["query"]
 
 
 def test_f12_ab_split_rebuild_changes_conversion_rate(
