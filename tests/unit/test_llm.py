@@ -1,0 +1,220 @@
+import asyncio
+from types import SimpleNamespace
+
+import pytest
+
+from agents.planner import (
+    PLANNER_ALERT_EXAMPLES,
+    Alert,
+    InvestigationPlan,
+    Planner,
+    PlannerInput,
+    build_fallback_plan,
+    load_metric_context,
+)
+from config.model_settings import ModelSettings
+from llm.base import (
+    ModelConfigurationError,
+    ModelRateLimitError,
+    ModelResponseError,
+    ModelTimeoutError,
+    ModelTransportError,
+)
+from llm.factory import create_model_client
+from llm.mock_client import MockModelClient
+from llm.models import ModelUsage
+from llm.openai_client import OpenAIModelClient
+
+
+def _plan() -> InvestigationPlan:
+    alert = Alert.model_validate(PLANNER_ALERT_EXAMPLES[0])
+    context = load_metric_context(alert.metric)
+    return build_fallback_plan(PlannerInput(alert=alert, metric_context=context))
+
+
+class _FakeResponses:
+    def __init__(self, response: object | None = None, error: Exception | None = None):
+        self.response = response
+        self.error = error
+        self.calls: list[dict[str, object]] = []
+
+    async def parse(self, **kwargs: object) -> object:
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+
+class _FakeClient:
+    def __init__(self, responses: _FakeResponses):
+        self.responses = responses
+
+
+def _fake_response(parsed: object) -> SimpleNamespace:
+    return SimpleNamespace(
+        output_parsed=parsed,
+        output_text="structured output",
+        id="resp_test",
+        _request_id="req_test",
+        usage=SimpleNamespace(input_tokens=11, output_tokens=7, total_tokens=18),
+    )
+
+
+def _client(responses: _FakeResponses, *, retries: int = 0) -> OpenAIModelClient:
+    return OpenAIModelClient(
+        ModelSettings(
+            openai_api_key="test-key",
+            openai_model="test-model",
+            llm_max_retries=retries,
+        ),
+        client=_FakeClient(responses),
+    )
+
+
+def test_mock_model_client_and_planner_use_structured_result_without_network() -> None:
+    model_client = MockModelClient(
+        _plan(),
+        model="mock-planner",
+        usage=ModelUsage(input_tokens=100, output_tokens=40, total_tokens=140),
+    )
+    alert = Alert.model_validate(PLANNER_ALERT_EXAMPLES[0])
+    context = load_metric_context(alert.metric)
+
+    planner = Planner(model_client)
+    result = planner.plan(alert, context)
+
+    assert result.incident_id == alert.incident_id
+    assert len(result.hypotheses) == 5
+    assert len(result.steps) == 5
+    assert len(model_client.calls) == 1
+    assert model_client.calls[0]["system_prompt"]
+    assert model_client.calls[0]["user_prompt"]
+    assert planner.last_model_result is not None
+
+
+def test_model_call_result_preserves_provider_usage_latency_and_retry_metadata() -> None:
+    responses = _FakeResponses(response=_fake_response(_plan()))
+    result = asyncio.run(
+        _client(responses).generate_structured(
+            system_prompt="system",
+            user_prompt="user",
+            response_model=InvestigationPlan,
+        )
+    )
+
+    assert result.provider == "openai"
+    assert result.model == "test-model"
+    assert result.parsed.incident_id == "INC-DAU-001"
+    assert result.usage == ModelUsage(input_tokens=11, output_tokens=7, total_tokens=18)
+    assert result.latency_ms >= 0
+    assert result.request_id == "req_test"
+    assert result.retry_count == 0
+    assert result.transport_retry_count == 0
+    assert result.planner_repair_count == 0
+
+
+def test_openai_client_uses_responses_parse_with_pydantic_model() -> None:
+    responses = _FakeResponses(response=_fake_response(_plan().model_dump(mode="json")))
+    client = _client(responses)
+
+    asyncio.run(
+        client.generate_structured(
+            system_prompt="system prompt",
+            user_prompt="user prompt",
+            response_model=InvestigationPlan,
+        )
+    )
+
+    assert responses.calls[0]["model"] == "test-model"
+    assert responses.calls[0]["instructions"] == "system prompt"
+    assert responses.calls[0]["text_format"] is InvestigationPlan
+    assert responses.calls[0]["input"] == [
+        {"role": "user", "content": "user prompt"}
+    ]
+
+
+def test_openai_client_converts_timeout_and_provider_errors() -> None:
+    timeout_responses = _FakeResponses(error=TimeoutError())
+    with pytest.raises(ModelTimeoutError):
+        asyncio.run(
+            _client(timeout_responses, retries=1).generate_structured(
+                system_prompt="system",
+                user_prompt="user",
+                response_model=InvestigationPlan,
+            )
+        )
+    assert len(timeout_responses.calls) == 2
+
+    provider_responses = _FakeResponses(error=RuntimeError("server unavailable"))
+    with pytest.raises(ModelTransportError, match="provider call failed"):
+        asyncio.run(
+            _client(provider_responses).generate_structured(
+                system_prompt="system",
+                user_prompt="user",
+                response_model=InvestigationPlan,
+            )
+        )
+    assert len(provider_responses.calls) == 1
+
+
+def test_openai_client_rejects_malformed_structured_result() -> None:
+    responses = _FakeResponses(response=_fake_response({"incident_id": "INC-DAU-001"}))
+
+    with pytest.raises(ModelResponseError, match="Pydantic validation"):
+        asyncio.run(
+            _client(responses).generate_structured(
+                system_prompt="system",
+                user_prompt="user",
+                response_model=InvestigationPlan,
+            )
+        )
+
+
+def test_planner_repair_retry_is_separate_from_transport_retry() -> None:
+    plan = _plan()
+    calls = 0
+
+    def response_factory(response_model: type[InvestigationPlan], _: str, __: str):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ModelResponseError("semantic plan validation failed")
+        return response_model.model_validate(plan)
+
+    model_client = MockModelClient(response_factory)
+    alert = Alert.model_validate(PLANNER_ALERT_EXAMPLES[0])
+    context = load_metric_context(alert.metric)
+    planner = Planner(model_client, max_retries=1)
+
+    result = planner.plan(alert, context)
+
+    assert result == plan
+    assert calls == 2
+    assert planner.last_planner_repair_count == 1
+    assert planner.last_model_result is not None
+    assert planner.last_model_result.transport_retry_count == 0
+    assert planner.last_model_result.planner_repair_count == 1
+    assert planner.last_model_result.retry_count == 1
+
+
+def test_model_settings_does_not_require_secrets_and_normalizes_blank_url() -> None:
+    settings = ModelSettings(
+        model_provider="OPENAI",
+        openai_api_key="",
+        openai_model="test-model",
+        openai_base_url="",
+    )
+
+    assert settings.model_provider == "openai"
+    assert settings.openai_api_key is None
+    assert settings.openai_base_url is None
+    assert settings.openai_model == "test-model"
+
+
+def test_unused_rate_limit_error_is_exposed_as_provider_neutral_type() -> None:
+    assert issubclass(ModelRateLimitError, RuntimeError)
+
+
+def test_provider_selection_stays_in_model_client_factory() -> None:
+    with pytest.raises(ModelConfigurationError, match="unsupported model provider"):
+        create_model_client(ModelSettings(model_provider="qwen"))

@@ -42,7 +42,9 @@ DataSherlock Harness 的目标是：
 - `config/metrics.yaml` 的强类型校验和可执行指标 SQL；
 - `config/fault_catalog.yaml`、F01-F12 canonical taxonomy 和 machine-readable Ground Truth；
 - F01-F12 最小故障注入器及目标 observable 测试；
-- `IncidentState` 和严格只读 SQL Runner，包括 AST 校验、超时、行数限制、结构化响应和独立 JSONL audit；
+- `IncidentState`、结构化 Planner 和严格只读 SQL Runner，包括 AST 校验、超时、行数限制、结构化响应和独立 JSONL audit；
+- Planner 的 Pydantic 输入/输出契约、JSON 重试与确定性兜底计划，以及三条告警样例测试；
+- Provider-neutral `ModelClient`、异步 `OpenAIModelClient`、`MockModelClient`、调用元数据和可选真实 API smoke test；
 - GitHub Actions CI 配置和完整单元测试。
 
 指标配置中的 `timezone` 当前用于 IANA 时区校验；指标 SQL 仍以显式的
@@ -51,7 +53,7 @@ F05 因此只验证明确的事件时间偏移和可观察的日边界变化。
 
 仍未实现或仅有接口/文档准备：
 
-- Data Quality Tools、Planner、Hypothesis Manager、Harness Graph、Checkpoint Runtime；
+- Data Quality Tools、Hypothesis Manager、Harness Graph、Checkpoint Runtime；
 - Guardrail Runtime、Validators、完整 Fault Injector/Benchmark Runner、Approval Flow 和 Sandbox Repair；
 - 完整 Streamlit 诊断界面、Benchmark 评测报告和生产数据接入。
 
@@ -74,6 +76,19 @@ docker compose up --build
 ```bash
 curl http://localhost:8000/health
 ```
+
+## LLM Configuration
+
+模型调用通过 `Planner → ModelClient → OpenAIModelClient` 完成。Planner 不读取 API Key，也不创建 OpenAI SDK 客户端；Provider、模型和连接参数由环境配置及 Model Client factory 管理。
+
+1. 复制 `.env.example` 为 `.env`；
+2. 填写 `OPENAI_API_KEY` 和 `OPENAI_MODEL`；
+3. `OPENAI_BASE_URL` 留空时使用 OpenAI SDK 默认 endpoint；需要兼容 endpoint 时再填写；
+4. 使用 `LLM_TIMEOUT_SECONDS` 和 `LLM_MAX_RETRIES` 控制 Model Client 的传输层行为；
+5. 普通 `pytest` 使用 `MockModelClient`，不会访问真实 API；
+6. 只有同时设置 `RUN_LLM_INTEGRATION_TESTS=1`、`OPENAI_API_KEY` 和 `OPENAI_MODEL` 时，才运行 `tests/integration/test_openai_smoke.py`。
+
+`LLM_MAX_RETRIES` 是 API/传输层重试次数；Planner 自身的 Schema 修复重试由 `Planner(max_retries=...)` 单独控制，二者不会共用计数。
 
 ---
 
@@ -562,6 +577,12 @@ datasherlock-harness/
 ├── src/
 │   ├── agents/
 │   │   └── planner.py
+│   ├── llm/
+│   │   ├── base.py
+│   │   ├── models.py
+│   │   ├── openai_client.py
+│   │   ├── mock_client.py
+│   │   └── factory.py
 │   ├── benchmark/
 │   │   ├── fault_injector.py
 │   │   └── runner.py
