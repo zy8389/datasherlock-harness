@@ -318,6 +318,7 @@ def _apply_strategy(
     fault_id: str,
     metric_date: date,
     spec: InjectionSpec,
+    minimum_effect_size: float,
     rng: np.random.Generator,
     start_date: pd.Timestamp,
     days: int,
@@ -405,6 +406,7 @@ def _apply_strategy(
     elif fault_id == "F05":
         region = spec.region or "CN"
         shift_hours = spec.shift_hours if spec.shift_hours is not None else 8
+        target_timezone = spec.to_value or "Asia/Shanghai"
         region_users = tables["users"].loc[
             tables["users"]["region"].eq(region), "user_id"
         ]
@@ -414,6 +416,16 @@ def _apply_strategy(
         )
         selected = boundary if boundary.any() else target
         tables["events"].loc[selected, "event_time"] += pd.Timedelta(hours=shift_hours)
+        _, current_metric_version = _version_rows(
+            tables["metric_versions"], "daily_active_users"
+        )
+        _append_metric_version(
+            tables,
+            "daily_active_users",
+            str(current_metric_version["query"]),
+            metric_date,
+            timezone=target_timezone,
+        )
         _mark_pipeline(
             tables,
             metric_date=metric_date,
@@ -421,7 +433,10 @@ def _apply_strategy(
             error_type="timezone_error",
             error_message=f"{region} boundary events shifted by {shift_hours} hours",
         )
-        notes.append(f"{region} boundary events are shifted by {shift_hours} hours")
+        notes.append(
+            f"{region} boundary events are shifted by {shift_hours} hours and the "
+            f"metric timezone changes to {target_timezone}"
+        )
     elif fault_id == "F06":
         ratio = _required_ratio(spec)
         multiplier = spec.multiplier
@@ -496,24 +511,85 @@ def _apply_strategy(
             raise ValueError(f"{spec.strategy} requires control_ratio and treatment_ratio")
         assignments = tables["experiment_assignments"].copy()
         original_variants = assignments.set_index("user_id")["variant"]
-        assignments["variant"] = "control"
         treatment_count = round(len(assignments) * treatment_ratio)
         users = tables["users"].set_index("user_id")
         active_users = set(events.loc[mask, "user_id"].dropna().astype(int))
         preferred: list[int] = []
-        for row in users.loc[users.index.intersection(original_variants.index)].itertuples():
+        for row in users.itertuples():
+            user_id = int(row.Index)
+            if row.user_type not in {"trial", "paid"} or user_id not in active_users:
+                continue
             base_probability = 0.72 if row.user_type == "paid" else 0.32
-            if (
-                int(row.Index) in active_users
-                and original_variants.loc[row.Index] == "control"
-                and base_probability <= row.conversion_score < base_probability + 0.20
-            ):
-                preferred.append(int(row.Index))
-        preferred = preferred[:treatment_count]
-        remaining = assignments.loc[~assignments["user_id"].isin(preferred), "user_id"].to_numpy()
-        fill_count = treatment_count - len(preferred)
+            original_variant = original_variants.get(user_id)
+            baseline_probability = base_probability
+            if original_variant == "control":
+                baseline_probability += 0.02
+            elif original_variant == "treatment":
+                baseline_probability += 0.20
+            treatment_probability = min(base_probability + 0.20, 0.95)
+            if baseline_probability <= row.conversion_score < treatment_probability:
+                preferred.append(user_id)
+
+        target_metrics = tables["daily_metrics"].loc[
+            pd.to_datetime(tables["daily_metrics"]["metric_date"])
+            .dt.date.eq(metric_date)
+        ]
+        if len(target_metrics) != 1:
+            raise ValueError("F12 requires one target-date baseline metric row")
+        baseline_paid_users = round(
+            float(target_metrics.iloc[0]["daily_active_users"])
+            * float(target_metrics.iloc[0]["conversion_rate"])
+        )
+        required_uplift_users = max(
+            1, int(np.ceil(baseline_paid_users * minimum_effect_size))
+        )
+        preferred = preferred[:required_uplift_users]
+        if len(preferred) < required_uplift_users:
+            raise ValueError(
+                "F12 has too few deterministic treatment-uplift users to satisfy "
+                "the effect contract"
+            )
+
+        assigned_users = set(assignments["user_id"].astype(int))
+        missing_preferred = [user_id for user_id in preferred if user_id not in assigned_users]
+        if missing_preferred:
+            free_users = set(users.index[users["user_type"].eq("free")].astype(int))
+            original_treatment_users = set(
+                original_variants.index[original_variants.eq("treatment")].astype(int)
+            )
+            replaceable = assignments.index[
+                assignments["user_id"].isin(free_users)
+                & ~assignments["user_id"].isin(preferred)
+                & ~assignments["user_id"].isin(original_treatment_users)
+            ]
+            if len(replaceable) < len(missing_preferred):
+                raise ValueError(
+                    "F12 requires enough non-converting assignment rows to inject "
+                    "the target treatment allocation"
+                )
+            replacement_rows = replaceable[: len(missing_preferred)]
+            assignments.loc[replacement_rows, "user_id"] = missing_preferred
+            assignments.loc[replacement_rows, "assigned_time"] = users.loc[
+                missing_preferred, "register_time"
+            ].to_numpy()
+
+        preserved_treatment = [
+            int(user_id)
+            for user_id in assignments["user_id"]
+            if original_variants.get(int(user_id)) == "treatment"
+        ]
+        treatment_priority = list(dict.fromkeys([*preferred, *preserved_treatment]))
+        treatment_priority = treatment_priority[:treatment_count]
+        assignments["variant"] = "control"
+        remaining = assignments.loc[
+            ~assignments["user_id"].isin(treatment_priority), "user_id"
+        ].to_numpy()
+        fill_count = treatment_count - len(treatment_priority)
         filler = rng.choice(remaining, size=fill_count, replace=False) if fill_count else []
-        treatment_indices = assignments.index[assignments["user_id"].isin([*preferred, *filler])]
+        treatment_users = [*treatment_priority, *filler]
+        treatment_indices = assignments.index[
+            assignments["user_id"].isin(treatment_users)
+        ]
         assignments.loc[treatment_indices, "variant"] = "treatment"
         tables["experiment_assignments"] = assignments
         # User latent variables make outcomes deterministic across paired scenarios.
@@ -527,7 +603,9 @@ def _apply_strategy(
             effective_at=metric_date,
         )
         notes.append(
-            "only experiment allocation changed; subscription outcomes reuse fixed user latents"
+            "experiment allocation changed to the requested split while preserving "
+            f"treatment exposure and adding {required_uplift_users} deterministic "
+            "target-date uplift users"
         )
     else:
         raise ValueError(f"unknown fault id: {fault_id}")
@@ -971,6 +1049,7 @@ def _inject(
         fault_id=fault_id,
         metric_date=metric_date,
         spec=spec,
+        minimum_effect_size=minimum_effect_size,
         rng=rng,
         start_date=start_date,
         days=days,

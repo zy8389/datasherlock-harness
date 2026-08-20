@@ -72,13 +72,17 @@ checks the declared paths against the baseline and injected tables. The checks a
 the case's target date, target asset, target dimension, version, and configuration values.
 They do not infer source categories from `expected_evidence` or `signal` text.
 
-## Known Injector Blocker
+## Injector Coverage
 
-F05 retains a `business_data + metric_version` contract. After the boundary-respecting F05
-injector rollback, it shifts CN boundary event timestamps and records a pipeline warning but does
-not create fault-specific `metric_versions` metadata. The runtime evidence validator therefore
-correctly rejects F05 for a missing newer target-date metric version. This is a blocker owned by
-the Fault Injector task / YE; the contract must not be weakened to business-only evidence.
+F05 retains a `business_data + metric_version` contract. Its injector shifts CN boundary event
+timestamps, records a pipeline warning, and appends a target-date `metric_versions` row that changes
+the metric timezone from `UTC` to `Asia/Shanghai` without changing the metric SQL definition.
+Runtime validation requires both the hourly business distribution change and that independent
+metric-version record.
+
+F12 preserves existing treatment exposure while moving the configured allocation from 50/50 to
+20/80. Target-day active users with deterministic treatment uplift are prioritized so the injected
+conversion-rate change satisfies the Catalog effect threshold without weakening that threshold.
 
 The contract and SQL Runner tests currently cover only the six metadata-dependent seed cases.
 This does not claim that the 60-case Benchmark, Benchmark Runner, or later Harness modules are

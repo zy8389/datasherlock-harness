@@ -17,6 +17,16 @@ metrics:
       FROM events
       GROUP BY metric_date
     unit: users
+    common_anomalies:
+      - sudden daily active-user decrease
+      - device or region segment disappearance
+      - target-day drop followed by a rebound
+    verification_fields:
+      - events.event_time
+      - events.user_id
+      - events.device_type
+      - users.region
+    diagnostic_tools: [sql_query]
 
   - id: new_users
     name: New Users
@@ -32,6 +42,16 @@ metrics:
       FROM users
       GROUP BY metric_date
     unit: users
+    common_anomalies:
+      - registrations unexpectedly reach zero
+      - registration volume spikes or shifts to the wrong date
+      - region or device segment disappears
+    verification_fields:
+      - users.user_id
+      - users.register_time
+      - users.region
+      - users.device_type
+    diagnostic_tools: [sql_query]
 
   - id: paid_users
     name: Paid Users
@@ -69,6 +89,16 @@ metrics:
       OR CAST(subscriptions.end_time AS DATE) > dates.metric_date)
       GROUP BY dates.metric_date
     unit: users
+    common_anomalies:
+      - paid-user count drops despite active subscriptions
+      - ended subscriptions remain counted
+      - paid users exceed active users
+    verification_fields:
+      - subscriptions.user_id
+      - subscriptions.start_time
+      - subscriptions.end_time
+      - subscriptions.subscription_status
+    diagnostic_tools: [sql_query]
 
   - id: ai_task_count
     name: AI Task Count
@@ -87,6 +117,16 @@ metrics:
       WHERE event_name = 'run_ai_task'
       GROUP BY metric_date
     unit: events
+    common_anomalies:
+      - task count spikes from duplicate ingestion or join multiplication
+      - task count drops after event-name drift
+      - task volume is inconsistent with raw events
+    verification_fields:
+      - events.event_id
+      - events.event_name
+      - events.event_time
+      - experiment_assignments.user_id
+    diagnostic_tools: [sql_query]
 
   - id: average_session_duration
     name: Average Session Duration
@@ -109,6 +149,16 @@ metrics:
       ) AS sessions
       GROUP BY metric_date
     unit: seconds
+    common_anomalies:
+      - average duration is amplified by a unit conversion error
+      - duration distribution develops extreme outliers
+      - session duration falls outside the normal range
+    verification_fields:
+      - events.duration_seconds
+      - events.session_id
+      - events.user_id
+      - events.event_time
+    diagnostic_tools: [sql_query]
 
   - id: conversion_rate
     name: Paid User Conversion Rate
@@ -145,3 +195,14 @@ metrics:
       AND newly_paid_users.user_id = active_users.user_id
       GROUP BY active_users.metric_date
     unit: ratio
+    common_anomalies:
+      - conversion rate shifts after an experiment allocation change
+      - numerator or denominator unexpectedly becomes zero
+      - conversion rate moves independently of active-user volume
+    verification_fields:
+      - events.user_id
+      - events.event_time
+      - subscriptions.user_id
+      - subscriptions.start_time
+      - experiment_assignments.variant
+    diagnostic_tools: [sql_query]

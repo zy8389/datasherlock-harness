@@ -13,6 +13,15 @@ faults:
     expected_direction: decrease
     effect_size_type: relative
     minimum_effect_size: 0.20
+    verification_fields:
+      - events.event_time
+      - events.device_type
+      - events.user_id
+      - partition_metadata.partition_value
+      - partition_metadata.row_count
+      - partition_metadata.status
+      - pipeline_runs.status
+    diagnostic_tools: [sql_query]
   - id: F02
     root_cause_type: duplicate_batch
     affected_metrics: [ai_task_count]
@@ -25,6 +34,13 @@ faults:
     expected_direction: increase
     effect_size_type: relative
     minimum_effect_size: 0.20
+    verification_fields:
+      - events.event_id
+      - events.event_name
+      - events.event_time
+      - pipeline_runs.status
+      - pipeline_runs.error_type
+    diagnostic_tools: [sql_query]
   - id: F03
     root_cause_type: null_value_anomaly
     affected_metrics: [daily_active_users]
@@ -37,6 +53,13 @@ faults:
     expected_direction: decrease
     effect_size_type: relative
     minimum_effect_size: 0.01
+    verification_fields:
+      - events.user_id
+      - events.event_time
+      - events.device_type
+      - pipeline_runs.status
+      - pipeline_runs.error_type
+    diagnostic_tools: [sql_query]
   - id: F04
     root_cause_type: data_delay
     affected_metrics: [daily_active_users]
@@ -50,6 +73,14 @@ faults:
     expected_direction: decrease
     effect_size_type: relative
     minimum_effect_size: 0.10
+    verification_fields:
+      - events.event_time
+      - events.device_type
+      - partition_metadata.partition_value
+      - partition_metadata.status
+      - pipeline_runs.status
+      - pipeline_runs.error_type
+    diagnostic_tools: [sql_query]
   - id: F05
     root_cause_type: timezone_error
     affected_metrics: [daily_active_users]
@@ -63,6 +94,14 @@ faults:
     expected_direction: decrease
     effect_size_type: relative
     minimum_effect_size: 0.01
+    verification_fields:
+      - events.event_time
+      - events.user_id
+      - users.region
+      - metric_versions.timezone
+      - metric_versions.effective_at
+      - pipeline_runs.error_type
+    diagnostic_tools: [sql_query]
   - id: F06
     root_cause_type: unit_error
     affected_metrics: [average_session_duration]
@@ -75,6 +114,12 @@ faults:
     expected_direction: increase
     effect_size_type: relative
     minimum_effect_size: 0.20
+    verification_fields:
+      - events.duration_seconds
+      - events.session_id
+      - events.event_time
+      - schema_snapshots.schema_json
+    diagnostic_tools: [sql_query]
   - id: F07
     root_cause_type: join_filter
     affected_metrics: [daily_active_users]
@@ -87,6 +132,13 @@ faults:
     expected_direction: decrease
     effect_size_type: relative
     minimum_effect_size: 0.01
+    verification_fields:
+      - events.user_id
+      - subscriptions.user_id
+      - subscriptions.start_time
+      - metric_versions.query
+      - metric_versions.definition_hash
+    diagnostic_tools: [sql_query]
   - id: F08
     root_cause_type: join_explosion
     affected_metrics: [ai_task_count]
@@ -99,6 +151,13 @@ faults:
     expected_direction: increase
     effect_size_type: relative
     minimum_effect_size: 0.20
+    verification_fields:
+      - events.event_id
+      - events.user_id
+      - experiment_assignments.user_id
+      - metric_versions.query
+      - metric_versions.definition_hash
+    diagnostic_tools: [sql_query]
   - id: F09
     root_cause_type: field_drift
     affected_metrics: [ai_task_count]
@@ -111,6 +170,12 @@ faults:
     expected_direction: decrease
     effect_size_type: relative
     minimum_effect_size: 0.10
+    verification_fields:
+      - events.event_name
+      - events.app_build_number
+      - events.event_time
+      - schema_snapshots.schema_json
+    diagnostic_tools: [sql_query]
   - id: F10
     root_cause_type: schema_change
     affected_metrics: [daily_active_users]
@@ -124,6 +189,14 @@ faults:
     expected_direction: decrease
     effect_size_type: relative
     minimum_effect_size: 0.10
+    verification_fields:
+      - events.event_time
+      - schema_snapshots.schema_json
+      - partition_metadata.partition_value
+      - partition_metadata.status
+      - pipeline_runs.status
+      - pipeline_runs.error_type
+    diagnostic_tools: [sql_query]
   - id: F11
     root_cause_type: metric_definition_change
     affected_metrics: [daily_active_users]
@@ -137,6 +210,13 @@ faults:
     expected_direction: decrease
     effect_size_type: relative
     minimum_effect_size: 0.10
+    verification_fields:
+      - events.event_time
+      - events.event_name
+      - metric_versions.version
+      - metric_versions.definition_hash
+      - metric_versions.query
+    diagnostic_tools: [sql_query]
   - id: F12
     root_cause_type: ab_split_anomaly
     affected_metrics: [conversion_rate]
@@ -150,3 +230,11 @@ faults:
     expected_direction: increase
     effect_size_type: relative
     minimum_effect_size: 0.05
+    verification_fields:
+      - experiment_assignments.user_id
+      - experiment_assignments.variant
+      - experiment_configs.version
+      - experiment_configs.control_ratio
+      - experiment_configs.treatment_ratio
+      - subscriptions.start_time
+    diagnostic_tools: [sql_query]

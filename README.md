@@ -50,9 +50,11 @@ DataSherlock Harness 的目标是：
 指标配置中的 `timezone` 当前用于 IANA 时区校验；指标 SQL 仍以显式的
 `CAST(event_time AS DATE)` 执行，统一的 timezone normalization 尚未接入。
 F05 的 Evidence Contract 保留事件时间偏移和 `metric_versions` 独立证据的要求。
-当前 Fault Injector 只产生边界事件偏移和 `pipeline_runs` warning，不产生 fault-specific
-`metric_versions` record；因此 F05 的运行期独立 metadata evidence 是明确 blocker，归属
-Fault Injector task / YE。这不是完整的运行时 timezone engine。
+当前 Fault Injector 会同时产生边界事件偏移、`pipeline_runs` warning 和目标日期的
+fault-specific `metric_versions` record，把指标时区从 `UTC` 改为 `Asia/Shanghai`；这用于
+Benchmark 的独立证据验证，但仍不是完整的运行时 timezone engine。F12 的 20/80 分流注入
+会保留原 treatment 暴露并优先分配具有确定性 treatment uplift 的目标日活跃用户，以满足
+Catalog 的最小效果阈值。
 
 仍未实现或仅有接口/文档准备：
 

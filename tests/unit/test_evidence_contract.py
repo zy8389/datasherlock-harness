@@ -31,8 +31,10 @@ FOCUSED_CASE_IDS = (
 POSITIVE_RUNTIME_EVIDENCE_CASE_IDS = (
     "F01-001",
     "F04-001",
+    "F05-001",
     "F10-001",
     "F11-001",
+    "F12-001",
 )
 
 
@@ -104,7 +106,7 @@ def test_missing_case_specific_metadata_fails_validation(
         validate_expected_evidence(result, baseline)
 
 
-def test_f05_current_injector_exposes_independent_metadata_blocker(
+def test_f05_injector_emits_independent_metric_version_evidence(
     baseline: dict[str, pd.DataFrame],
     focused_cases: dict[str, GroundTruthCase],
 ) -> None:
@@ -153,10 +155,12 @@ def test_f05_current_injector_exposes_independent_metadata_blocker(
             lambda value: pd.Timestamp(value).date() == target_date
         )
     ]
-    assert fault_specific_versions.empty
-
-    with pytest.raises(ValueError, match="fault metric version"):
-        validate_expected_evidence(result, baseline)
+    assert len(fault_specific_versions) == 1
+    fault_version = fault_specific_versions.iloc[0]
+    assert fault_version["timezone"] == case.injection.to_value == "Asia/Shanghai"
+    assert fault_version["query"] == baseline_versions.iloc[-1]["query"]
+    assert fault_version["definition_hash"] == baseline_versions.iloc[-1]["definition_hash"]
+    validate_expected_evidence(result, baseline)
 
 
 def test_single_evidence_path_fails_complete_ground_truth_validation(
@@ -403,7 +407,10 @@ def test_each_focused_fault_has_business_and_independent_sql_evidence(
         target = metadata_rows[0]
         assert target["status"] == "delayed" or target["error_type"] == "data_delay"
     elif case.fault_id == "F05":
-        assert metadata_rows[-1]["timezone"] == "UTC"
+        baseline_version, fault_version = metadata_rows[0], metadata_rows[-1]
+        assert int(fault_version["version"]) > int(baseline_version["version"])
+        assert baseline_version["timezone"] == "UTC"
+        assert fault_version["timezone"] == "Asia/Shanghai"
     elif case.fault_id == "F10":
         schema = json.loads(str(metadata_rows[-1]["schema_json"]))
         assert schema["app_build_number"] == "VARCHAR"
