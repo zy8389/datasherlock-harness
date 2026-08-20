@@ -93,12 +93,17 @@ def test_prompt_contains_structured_input_schema_and_json_only_constraint() -> N
 def test_metric_diagnostics_stay_out_of_planner_context_and_prompt() -> None:
     metric = load_metrics_config().metrics[0]
     context = load_metric_context(metric.id)
+    request = PlannerInput(alert=PLANNER_ALERT_EXAMPLES[0], metric_context=context)
     prompt = build_planner_prompt(PLANNER_ALERT_EXAMPLES[0], context)
 
     context_payload = context.model_dump(mode="json")
+    request_payload = request.model_dump(mode="json")
     assert "common_anomalies" not in context_payload
     assert "verification_fields" not in context_payload
     assert "diagnostic_tools" not in context_payload
+    assert "common_anomalies" not in request_payload["metric_context"]
+    assert "verification_fields" not in request_payload["metric_context"]
+    assert "diagnostic_tools" not in request_payload["metric_context"]
     for diagnostic in (
         *metric.common_anomalies,
         *metric.verification_fields,
