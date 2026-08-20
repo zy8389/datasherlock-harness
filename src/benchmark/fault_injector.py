@@ -508,6 +508,7 @@ def _apply_strategy(
         if control_ratio is None or treatment_ratio is None:
             raise ValueError(f"{spec.strategy} requires control_ratio and treatment_ratio")
         assignments = tables["experiment_assignments"].copy()
+        assignment_identity = assignments.drop(columns=["variant"]).copy(deep=True)
         original_variants = assignments.set_index("user_id")["variant"]
         treatment_count = round(len(assignments) * treatment_ratio)
         users = tables["users"].set_index("user_id")
@@ -535,10 +536,15 @@ def _apply_strategy(
             assignments["user_id"].isin(treatment_users)
         ]
         assignments.loc[treatment_indices, "variant"] = "treatment"
-        if set(assignments["user_id"]) != cohort_user_ids:
-            raise RuntimeError("F12 injection changed the experiment cohort")
+        if set(assignments["user_id"]) != cohort_user_ids or not assignments.drop(
+            columns=["variant"]
+        ).equals(assignment_identity):
+            raise RuntimeError(
+                "F12 injection must preserve assignment identity and change only variants"
+            )
         tables["experiment_assignments"] = assignments
-        # User latent variables make outcomes deterministic across paired scenarios.
+        # Recompute downstream subscription outcomes from the changed variants;
+        # the experiment cohort and all assignment identity fields remain fixed.
         tables["subscriptions"] = generate_subscriptions(
             tables["users"], start_date, days, rng, assignments, tables["events"]
         )
