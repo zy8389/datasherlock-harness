@@ -137,9 +137,6 @@ class MetricContext(BaseModel):
     dependencies: list[str] = Field(default_factory=list)
     dimensions: list[str] = Field(default_factory=list)
     related_faults: list[str] = Field(default_factory=list)
-    common_anomalies: list[str] = Field(default_factory=list)
-    verification_fields: list[str] = Field(default_factory=list)
-    diagnostic_tools: list[str] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -879,9 +876,6 @@ def load_metric_context(
         filters=cast(dict[str, JsonValue], definition.filters),
         dependencies=definition.dependencies,
         dimensions=definition.group_by,
-        common_anomalies=definition.common_anomalies,
-        verification_fields=definition.verification_fields,
-        diagnostic_tools=definition.diagnostic_tools,
     )
 
 

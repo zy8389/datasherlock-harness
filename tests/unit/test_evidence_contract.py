@@ -163,6 +163,49 @@ def test_f05_injector_emits_independent_metric_version_evidence(
     validate_expected_evidence(result, baseline)
 
 
+def test_f05_validator_requires_utc_baseline_timezone(
+    baseline: dict[str, pd.DataFrame],
+    focused_cases: dict[str, GroundTruthCase],
+) -> None:
+    case = focused_cases["F05-001"]
+    result = _inject(baseline, case)
+    invalid_baseline = {name: frame.copy(deep=True) for name, frame in baseline.items()}
+    invalid_baseline["metric_versions"].loc[
+        invalid_baseline["metric_versions"]["metric_id"].eq(case.affected_metric),
+        "timezone",
+    ] = "Asia/Shanghai"
+
+    with pytest.raises(ValueError, match="baseline timezone must be UTC"):
+        validate_expected_evidence(result, invalid_baseline)
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "message"),
+    [
+        ("query", "SELECT changed", "query must remain unchanged"),
+        ("definition_hash", "changed", "definition hash must remain unchanged"),
+    ],
+)
+def test_f05_validator_requires_unchanged_metric_definition(
+    column: str,
+    value: str,
+    message: str,
+    baseline: dict[str, pd.DataFrame],
+    focused_cases: dict[str, GroundTruthCase],
+) -> None:
+    case = focused_cases["F05-001"]
+    result = _inject(baseline, case)
+    fault_versions = result.tables["metric_versions"]
+    fault_index = fault_versions.index[
+        fault_versions["metric_id"].eq(case.affected_metric)
+        & fault_versions["version"].astype(int).gt(1)
+    ][0]
+    fault_versions.loc[fault_index, column] = value
+
+    with pytest.raises(ValueError, match=message):
+        validate_expected_evidence(result, baseline)
+
+
 def test_single_evidence_path_fails_complete_ground_truth_validation(
     focused_cases: dict[str, GroundTruthCase],
 ) -> None:

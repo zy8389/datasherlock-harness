@@ -9,7 +9,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from benchmark.evaluation import calculate_effect, validate_effect
+from benchmark.evaluation import calculate_effect
 from config.faults import (
     INDEPENDENT_METADATA_EVIDENCE_FAULT_IDS,
     EvidenceSourceType,
@@ -55,7 +55,6 @@ class FaultInjectionResult:
     case_id: str | None = None
     affected_metric: str | None = None
     effect_size_type: Literal["relative", "absolute"] = "relative"
-    minimum_effect_size: float | None = None
     actual_effect: float | None = None
     ground_truth_case: GroundTruthCase | None = None
 
@@ -318,7 +317,6 @@ def _apply_strategy(
     fault_id: str,
     metric_date: date,
     spec: InjectionSpec,
-    minimum_effect_size: float,
     rng: np.random.Generator,
     start_date: pd.Timestamp,
     days: int,
@@ -515,82 +513,30 @@ def _apply_strategy(
         users = tables["users"].set_index("user_id")
         active_users = set(events.loc[mask, "user_id"].dropna().astype(int))
         preferred: list[int] = []
-        for row in users.itertuples():
-            user_id = int(row.Index)
-            if row.user_type not in {"trial", "paid"} or user_id not in active_users:
-                continue
+        for row in users.loc[users.index.intersection(original_variants.index)].itertuples():
             base_probability = 0.72 if row.user_type == "paid" else 0.32
-            original_variant = original_variants.get(user_id)
-            baseline_probability = base_probability
-            if original_variant == "control":
-                baseline_probability += 0.02
-            elif original_variant == "treatment":
-                baseline_probability += 0.20
-            treatment_probability = min(base_probability + 0.20, 0.95)
-            if baseline_probability <= row.conversion_score < treatment_probability:
-                preferred.append(user_id)
+            if (
+                int(row.Index) in active_users
+                and original_variants.loc[row.Index] == "control"
+                and base_probability <= row.conversion_score < base_probability + 0.20
+            ):
+                preferred.append(int(row.Index))
 
-        target_metrics = tables["daily_metrics"].loc[
-            pd.to_datetime(tables["daily_metrics"]["metric_date"])
-            .dt.date.eq(metric_date)
-        ]
-        if len(target_metrics) != 1:
-            raise ValueError("F12 requires one target-date baseline metric row")
-        baseline_paid_users = round(
-            float(target_metrics.iloc[0]["daily_active_users"])
-            * float(target_metrics.iloc[0]["conversion_rate"])
-        )
-        required_uplift_users = max(
-            1, int(np.ceil(baseline_paid_users * minimum_effect_size))
-        )
-        preferred = preferred[:required_uplift_users]
-        if len(preferred) < required_uplift_users:
-            raise ValueError(
-                "F12 has too few deterministic treatment-uplift users to satisfy "
-                "the effect contract"
-            )
-
-        assigned_users = set(assignments["user_id"].astype(int))
-        missing_preferred = [user_id for user_id in preferred if user_id not in assigned_users]
-        if missing_preferred:
-            free_users = set(users.index[users["user_type"].eq("free")].astype(int))
-            original_treatment_users = set(
-                original_variants.index[original_variants.eq("treatment")].astype(int)
-            )
-            replaceable = assignments.index[
-                assignments["user_id"].isin(free_users)
-                & ~assignments["user_id"].isin(preferred)
-                & ~assignments["user_id"].isin(original_treatment_users)
-            ]
-            if len(replaceable) < len(missing_preferred):
-                raise ValueError(
-                    "F12 requires enough non-converting assignment rows to inject "
-                    "the target treatment allocation"
-                )
-            replacement_rows = replaceable[: len(missing_preferred)]
-            assignments.loc[replacement_rows, "user_id"] = missing_preferred
-            assignments.loc[replacement_rows, "assigned_time"] = users.loc[
-                missing_preferred, "register_time"
-            ].to_numpy()
-
-        preserved_treatment = [
-            int(user_id)
-            for user_id in assignments["user_id"]
-            if original_variants.get(int(user_id)) == "treatment"
-        ]
-        treatment_priority = list(dict.fromkeys([*preferred, *preserved_treatment]))
-        treatment_priority = treatment_priority[:treatment_count]
+        preferred = preferred[:treatment_count]
+        cohort_user_ids = set(assignments["user_id"])
         assignments["variant"] = "control"
         remaining = assignments.loc[
-            ~assignments["user_id"].isin(treatment_priority), "user_id"
+            ~assignments["user_id"].isin(preferred), "user_id"
         ].to_numpy()
-        fill_count = treatment_count - len(treatment_priority)
+        fill_count = treatment_count - len(preferred)
         filler = rng.choice(remaining, size=fill_count, replace=False) if fill_count else []
-        treatment_users = [*treatment_priority, *filler]
+        treatment_users = [*preferred, *filler]
         treatment_indices = assignments.index[
             assignments["user_id"].isin(treatment_users)
         ]
         assignments.loc[treatment_indices, "variant"] = "treatment"
+        if set(assignments["user_id"]) != cohort_user_ids:
+            raise RuntimeError("F12 injection changed the experiment cohort")
         tables["experiment_assignments"] = assignments
         # User latent variables make outcomes deterministic across paired scenarios.
         tables["subscriptions"] = generate_subscriptions(
@@ -604,8 +550,7 @@ def _apply_strategy(
         )
         notes.append(
             "experiment allocation changed to the requested split while preserving "
-            f"treatment exposure and adding {required_uplift_users} deterministic "
-            "target-date uplift users"
+            "the experiment cohort"
         )
     else:
         raise ValueError(f"unknown fault id: {fault_id}")
@@ -807,12 +752,21 @@ def _validate_metric_version_evidence(
     fault_version = _single_row(fault_candidates, f"{metric_id} fault metric version")
 
     if case.fault_id == "F05":
-        if not str(baseline_latest["timezone"]).strip():
-            raise ValueError(f"{case.case_id} baseline timezone metadata is empty")
-        if not str(fault_version["timezone"]).strip():
-            raise ValueError(f"{case.case_id} fault timezone metadata is empty")
-        if fault_version["timezone"] == baseline_latest["timezone"]:
-            raise ValueError(f"{case.case_id} timezone metadata did not change")
+        expected_timezone = case.injection.to_value
+        if baseline_latest["timezone"] != "UTC":
+            raise ValueError(f"{case.case_id} baseline timezone must be UTC")
+        if not expected_timezone:
+            raise ValueError(f"{case.case_id} injection.to_value must declare a timezone")
+        if fault_version["timezone"] != expected_timezone:
+            raise ValueError(
+                f"{case.case_id} fault timezone must be {expected_timezone}"
+            )
+        if fault_version["query"] != baseline_latest["query"]:
+            raise ValueError(f"{case.case_id} F05 metric query must remain unchanged")
+        if fault_version["definition_hash"] != baseline_latest["definition_hash"]:
+            raise ValueError(
+                f"{case.case_id} F05 metric definition hash must remain unchanged"
+            )
         return
 
     if case.fault_id == "F11":
@@ -989,19 +943,6 @@ def validate_expected_evidence(
     tables = result.tables
     validate_dataset_consistency(tables, expected_days=len(tables["daily_metrics"]))
     case = _resolve_ground_truth_case(result, ground_truth_case)
-    if baseline_tables is not None and result.affected_metric is not None:
-        baseline_value = _metric_value(
-            baseline_tables, result.metric_date, result.affected_metric
-        )
-        fault_value = _metric_value(tables, result.metric_date, result.affected_metric)
-        if result.minimum_effect_size is not None and not validate_effect(
-            baseline_value,
-            fault_value,
-            expected_direction=result.expected_direction,
-            effect_size_type=result.effect_size_type,
-            minimum_effect_size=result.minimum_effect_size,
-        ):
-            raise ValueError("fault metric does not satisfy the effect contract")
     if case.fault_id in INDEPENDENT_METADATA_EVIDENCE_FAULT_IDS:
         if baseline_tables is None:
             raise ValueError(
@@ -1035,7 +976,6 @@ def _inject(
     expected_direction: Literal["increase", "decrease"],
     affected_metric: str,
     effect_size_type: Literal["relative", "absolute"],
-    minimum_effect_size: float,
     rng: np.random.Generator,
     start_date: pd.Timestamp,
     days: int,
@@ -1049,7 +989,6 @@ def _inject(
         fault_id=fault_id,
         metric_date=metric_date,
         spec=spec,
-        minimum_effect_size=minimum_effect_size,
         rng=rng,
         start_date=start_date,
         days=days,
@@ -1071,7 +1010,6 @@ def _inject(
         case_id=case_id,
         affected_metric=affected_metric,
         effect_size_type=effect_size_type,
-        minimum_effect_size=minimum_effect_size,
         actual_effect=calculate_effect(
             baseline_value, fault_value, effect_size_type=effect_size_type
         ),
@@ -1100,7 +1038,6 @@ def inject_case(
         expected_direction=case.expected_direction,
         affected_metric=case.affected_metric,
         effect_size_type=case.effect_size_type,
-        minimum_effect_size=case.minimum_effect_size,
         rng=rng,
         start_date=start_date,
         days=days,
@@ -1142,7 +1079,6 @@ def inject_fault(
         expected_direction=concrete.expected_direction,
         affected_metric=concrete.affected_metric,
         effect_size_type=concrete.effect_size_type,
-        minimum_effect_size=concrete.minimum_effect_size,
         rng=random,
         start_date=active_start,
         days=active_days,

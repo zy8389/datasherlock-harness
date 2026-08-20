@@ -80,9 +80,10 @@ the metric timezone from `UTC` to `Asia/Shanghai` without changing the metric SQ
 Runtime validation requires both the hourly business distribution change and that independent
 metric-version record.
 
-F12 preserves existing treatment exposure while moving the configured allocation from 50/50 to
-20/80. Target-day active users with deterministic treatment uplift are prioritized so the injected
-conversion-rate change satisfies the Catalog effect threshold without weakening that threshold.
+F12 preserves the experiment cohort while moving the configured allocation from 50/50 to 20/80.
+The injector does not change `experiment_assignments.user_id` or use the Catalog
+`minimum_effect_size` to target a generated effect. The evaluator independently checks the
+conversion-rate effect; if it misses the threshold, the result remains a reported F12 blocker.
 
 The contract and SQL Runner tests currently cover only the six metadata-dependent seed cases.
 This does not claim that the 60-case Benchmark, Benchmark Runner, or later Harness modules are

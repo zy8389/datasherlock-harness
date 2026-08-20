@@ -6,7 +6,6 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from agents.planner import load_metric_context
 from benchmark.evaluation import calculate_effect, validate_effect
 from config.faults import FaultCatalog, InjectionSpec, load_fault_catalog
 from config.metrics import MetricsConfig, load_metrics_config
@@ -27,7 +26,7 @@ def test_metrics_config_has_six_unique_executable_metrics() -> None:
     assert config.date_grain == "day"
 
 
-def test_metric_diagnostics_are_complete_and_available_to_planner() -> None:
+def test_metric_diagnostics_are_complete_in_metrics_config() -> None:
     config = load_metrics_config()
     available_tools = set(build_default_tool_registry().names())
 
@@ -36,11 +35,6 @@ def test_metric_diagnostics_are_complete_and_available_to_planner() -> None:
         assert metric.verification_fields
         assert set(metric.diagnostic_tools).issubset(available_tools)
         assert all("." in field for field in metric.verification_fields)
-
-        context = load_metric_context(metric.id)
-        assert context.common_anomalies == metric.common_anomalies
-        assert context.verification_fields == metric.verification_fields
-        assert context.diagnostic_tools == metric.diagnostic_tools
 
 
 def test_fault_catalog_has_queryable_verification_mappings() -> None:

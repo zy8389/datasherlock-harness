@@ -299,14 +299,23 @@ def generate_experiment_assignments(
     days: int,
     rng: np.random.Generator,
 ) -> pd.DataFrame:
-    sampled_users = rng.choice(users["user_id"].to_numpy(), size=int(len(users) * 0.4), replace=False)
+    cohort_size = int(len(users) * 0.4)
+    cohort_size -= cohort_size % 2
+    sampled_users = rng.choice(
+        users["user_id"].to_numpy(), size=cohort_size, replace=False
+    )
     user_register_map = users.set_index("user_id")["register_time"]
     register_times = pd.Series(sampled_users).map(user_register_map)
+    variants = np.array(
+        ["control"] * (cohort_size // 2) + ["treatment"] * (cohort_size // 2),
+        dtype=object,
+    )
+    rng.shuffle(variants)
     return pd.DataFrame(
         {
             "experiment_id": "exp_onboarding_v1",
             "user_id": sampled_users,
-            "variant": rng.choice(["control", "treatment"], size=len(sampled_users), p=[0.5, 0.5]),
+            "variant": variants,
             "assigned_time": register_times.to_numpy(),
         }
     )

@@ -14,6 +14,7 @@ from agents.planner import (
     load_metric_context,
 )
 from config.faults import load_fault_catalog
+from config.metrics import load_metrics_config
 from llm.mock_client import MockModelClient
 from tools.registry import build_default_tool_registry
 from tools.sql_runner import validate_readonly_sql
@@ -87,6 +88,24 @@ def test_prompt_contains_structured_input_schema_and_json_only_constraint() -> N
     assert '"expected_evidence"' in prompt
     assert alert.incident_id in prompt
     assert metric_context.metric_id in prompt
+
+
+def test_metric_diagnostics_stay_out_of_planner_context_and_prompt() -> None:
+    metric = load_metrics_config().metrics[0]
+    context = load_metric_context(metric.id)
+    prompt = build_planner_prompt(PLANNER_ALERT_EXAMPLES[0], context)
+
+    context_payload = context.model_dump(mode="json")
+    assert "common_anomalies" not in context_payload
+    assert "verification_fields" not in context_payload
+    assert "diagnostic_tools" not in context_payload
+    for diagnostic in (
+        *metric.common_anomalies,
+        *metric.verification_fields,
+    ):
+        assert diagnostic not in prompt
+    assert "diagnostic_tools" not in prompt
+    assert "Tool: sql_query" in prompt
 
 
 def test_plan_schema_rejects_missing_fields_unknown_hypothesis_and_repairs() -> None:
