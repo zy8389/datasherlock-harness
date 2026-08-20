@@ -58,6 +58,26 @@ MIN_HYPOTHESES: Final = 3
 MAX_HYPOTHESES: Final = 5
 MAX_STEPS: Final = 10
 
+# Keep the Planner boundary limited to metric semantics.  Diagnostics belong to
+# benchmark and validator consumers, not to model-generated investigation input.
+PLANNER_METRIC_CONTEXT_FIELDS: Final[tuple[str, ...]] = (
+    "metric_id",
+    "name",
+    "description",
+    "aggregation",
+    "formula",
+    "query",
+    "unit",
+    "source_tables",
+    "time_column",
+    "entity_column",
+    "group_by",
+    "filters",
+    "dependencies",
+    "dimensions",
+    "related_faults",
+)
+
 # These operations are intentionally excluded from an investigation plan.
 # Investigation is read-only; repair belongs to a later, approval-gated
 # harness state.
@@ -137,6 +157,17 @@ class MetricContext(BaseModel):
     dependencies: list[str] = Field(default_factory=list)
     dimensions: list[str] = Field(default_factory=list)
     related_faults: list[str] = Field(default_factory=list)
+
+    def planner_payload(self) -> JsonObject:
+        """Return only the semantic fields allowed into Planner prompts."""
+
+        return cast(
+            JsonObject,
+            self.model_dump(
+                mode="json",
+                include=set(PLANNER_METRIC_CONTEXT_FIELDS),
+            ),
+        )
 
     @model_validator(mode="before")
     @classmethod
@@ -410,7 +441,9 @@ def _build_planner_user_prompt(
     canonical_root_causes = json.dumps(
         _canonical_root_cause_types(), ensure_ascii=False
     )
-    input_text = json.dumps(request.model_dump(mode="json"), ensure_ascii=False, indent=2)
+    input_payload = request.model_dump(mode="json")
+    input_payload["metric_context"] = request.metric_context.planner_payload()
+    input_text = json.dumps(input_payload, ensure_ascii=False, indent=2)
     parts = [
         (
             "Canonical input:\n"
