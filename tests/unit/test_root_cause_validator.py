@@ -24,6 +24,7 @@ def _evidence(evidence_id: str, source_type: str) -> EvidenceReference:
 def _state(
     *,
     confidence: float = 0.85,
+    status: HypothesisStatus = HypothesisStatus.SUPPORTED,
     evidence_ids: list[str] | None = None,
     supporting_ids: list[str] | None = None,
     contradicting_ids: list[str] | None = None,
@@ -32,7 +33,7 @@ def _state(
         hypothesis_id="H01",
         root_cause_type="missing_partition",
         description="The target partition may be missing.",
-        status=HypothesisStatus.SUPPORTED,
+        status=status,
         confidence=confidence,
         evidence_ids=evidence_ids or ["E01", "E02"],
         supporting_evidence_ids=supporting_ids or ["E01", "E02"],
@@ -61,6 +62,16 @@ def test_high_confidence_does_not_bypass_minimum_supporting_evidence() -> None:
 
     assert result.validated is False
     assert result.confidence == pytest.approx(0.9)
+    assert result.recommended_next_state == "HYPOTHESIS_TESTING"
+
+
+def test_only_supported_hypothesis_can_validate_root_cause() -> None:
+    result = RootCauseValidator().validate(
+        _state(status=HypothesisStatus.TESTING),
+        _independent_supporting_evidence(),
+    )
+
+    assert result.validated is False
     assert result.recommended_next_state == "HYPOTHESIS_TESTING"
 
 
@@ -191,6 +202,20 @@ def test_duplicate_evidence_reference_id_is_rejected() -> None:
             [
                 _evidence("E01", "business_data"),
                 _evidence("E01", "operational_metadata"),
+            ],
+        )
+
+
+def test_noncanonical_evidence_source_type_is_rejected() -> None:
+    with pytest.raises(
+        RootCauseValidationError,
+        match="canonical EvidenceSourceType",
+    ):
+        RootCauseValidator().validate(
+            _state(),
+            [
+                _evidence("E01", "business_data"),
+                _evidence("E02", "custom_runtime_source"),
             ],
         )
 

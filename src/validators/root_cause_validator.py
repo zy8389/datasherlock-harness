@@ -11,6 +11,7 @@ from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from config.faults import EvidenceSourceType
 from harness.hypothesis import (
     SUPPORTED_CONFIDENCE_THRESHOLD,
     EvidenceReference,
@@ -104,7 +105,9 @@ class RootCauseValidator:
 
         independent_source_types = _ordered_unique(
             [
-                evidence_by_id[evidence_id].source_type
+                EvidenceSourceType(
+                    evidence_by_id[evidence_id].source_type
+                ).value
                 for evidence_id in supporting_ids
                 if evidence_id in evidence_by_id
             ]
@@ -116,7 +119,8 @@ class RootCauseValidator:
         ]
 
         validated = (
-            not missing_evidence
+            hypothesis.status is HypothesisStatus.SUPPORTED
+            and not missing_evidence
             and len(supporting_ids) >= self.min_supporting_evidence
             and len(independent_source_types) >= self.min_independent_source_types
             and hypothesis.confidence >= self.confidence_threshold
@@ -180,6 +184,13 @@ class RootCauseValidator:
                 raise RootCauseValidationError(
                     f"duplicate evidence id: {evidence_id}"
                 )
+            try:
+                EvidenceSourceType(reference.source_type)
+            except (TypeError, ValueError) as exc:
+                raise RootCauseValidationError(
+                    "evidence source_type must be a canonical EvidenceSourceType: "
+                    f"{reference.source_type!r}"
+                ) from exc
             indexed[evidence_id] = reference
         return indexed
 
