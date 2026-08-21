@@ -47,7 +47,9 @@ _ALLOWED_STATUS_TRANSITIONS: Final[dict[HypothesisStatus, frozenset[HypothesisSt
             HypothesisStatus.REJECTED,
         }
     ),
-    HypothesisStatus.SUPPORTED: frozenset({HypothesisStatus.SUPPORTED}),
+    HypothesisStatus.SUPPORTED: frozenset(
+        {HypothesisStatus.SUPPORTED, HypothesisStatus.TESTING}
+    ),
     HypothesisStatus.REJECTED: frozenset({HypothesisStatus.REJECTED}),
 }
 
@@ -150,6 +152,23 @@ class HypothesisManager:
             f"cannot start testing from terminal state {state.status.value}"
         )
 
+    def return_to_testing(self, hypothesis_id: str) -> HypothesisState:
+        """Return a supported candidate after root-cause validation fails.
+
+        This is the only supported-hypothesis rollback. Rejected hypotheses
+        remain terminal and proposed hypotheses must use ``start_testing``.
+        """
+
+        state = self.get_hypothesis(hypothesis_id)
+        if state.status is HypothesisStatus.SUPPORTED:
+            self._set_status(state, HypothesisStatus.TESTING)
+            return state
+        if state.status is HypothesisStatus.TESTING:
+            return state
+        raise HypothesisStateError(
+            f"cannot return hypothesis to testing from state {state.status.value}"
+        )
+
     def attach_evidence(
         self,
         hypothesis_id: str,
@@ -242,6 +261,7 @@ def _clamp_confidence(value: float) -> float:
 __all__ = [
     "CONFIDENCE_CONTRADICTION_DELTA",
     "CONFIDENCE_SUPPORT_DELTA",
+    "SUPPORTED_CONFIDENCE_THRESHOLD",
     "EvidenceReference",
     "HypothesisManager",
     "HypothesisState",
