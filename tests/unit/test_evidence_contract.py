@@ -106,6 +106,39 @@ def test_missing_case_specific_metadata_fails_validation(
         validate_expected_evidence(result, baseline)
 
 
+@pytest.mark.parametrize(
+    ("asset", "message"),
+    [
+        ("experiment_configs", "fault experiment config"),
+        ("experiment_assignments", "assignment distribution did not change"),
+    ],
+)
+def test_f12_evidence_requires_changed_assignment_and_config(
+    asset: str,
+    message: str,
+    baseline: dict[str, pd.DataFrame],
+    focused_cases: dict[str, GroundTruthCase],
+) -> None:
+    case = focused_cases["F12-001"]
+    result = _inject(baseline, case)
+    result.tables[asset] = baseline[asset].copy(deep=True)
+
+    with pytest.raises(ValueError, match=message):
+        validate_expected_evidence(result, baseline)
+
+
+def test_f12_evidence_requires_business_metric_effect(
+    baseline: dict[str, pd.DataFrame],
+    focused_cases: dict[str, GroundTruthCase],
+) -> None:
+    case = focused_cases["F12-001"]
+    result = _inject(baseline, case)
+    result.tables["daily_metrics"] = baseline["daily_metrics"].copy(deep=True)
+
+    with pytest.raises(ValueError, match="effect contract"):
+        validate_expected_evidence(result, baseline)
+
+
 def test_f05_injector_emits_independent_metric_version_evidence(
     baseline: dict[str, pd.DataFrame],
     focused_cases: dict[str, GroundTruthCase],

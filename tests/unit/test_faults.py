@@ -255,25 +255,10 @@ def test_f12_ab_split_rebuild_changes_conversion_rate(
 
 
 def _effect_contract_cases() -> list[object]:
-    parameters: list[object] = []
-    for case in load_ground_truth_cases(Path("benchmark/ground_truth")):
-        if case.fault_id == "F12":
-            parameters.append(
-                pytest.param(
-                    case,
-                    id=case.case_id,
-                    marks=pytest.mark.xfail(
-                        strict=True,
-                        reason=(
-                            "BLOCKER F12: the injector does not satisfy the "
-                            "Catalog minimum_effect_size (Owner: Fault Injector implementation)"
-                        ),
-                    ),
-                )
-            )
-        else:
-            parameters.append(pytest.param(case, id=case.case_id))
-    return parameters
+    return [
+        pytest.param(case, id=case.case_id)
+        for case in load_ground_truth_cases(Path("benchmark/ground_truth"))
+    ]
 
 
 @pytest.mark.parametrize("case", _effect_contract_cases())
@@ -382,8 +367,13 @@ def test_f12_is_paired_deterministic_and_causally_ordered(
     ].copy(deep=True)
     first = _inject(baseline, "F12")
     second = _inject(baseline, "F12")
-    assert_frame_equal(first.tables["experiment_assignments"], second.tables["experiment_assignments"])
-    assert_frame_equal(first.tables["subscriptions"], second.tables["subscriptions"])
+    for table_name in (
+        "experiment_assignments",
+        "experiment_configs",
+        "subscriptions",
+        "daily_metrics",
+    ):
+        assert_frame_equal(first.tables[table_name], second.tables[table_name])
     assert_frame_equal(
         before_users,
         baseline["users"][

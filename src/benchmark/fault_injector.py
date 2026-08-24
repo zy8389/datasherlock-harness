@@ -9,7 +9,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from benchmark.evaluation import calculate_effect
+from benchmark.evaluation import calculate_effect, validate_effect
 from config.faults import (
     INDEPENDENT_METADATA_EVIDENCE_FAULT_IDS,
     EvidenceSourceType,
@@ -40,6 +40,7 @@ REQUIRED_TABLES = {
 }
 
 _GROUND_TRUTH_DIRECTORY = Path(__file__).parents[2] / "benchmark" / "ground_truth"
+_F12_FREE_TREATMENT_CONVERSION_PROBABILITY = 0.20
 
 
 @dataclass
@@ -214,6 +215,69 @@ def _append_experiment_config(
         ]
     )
     tables["experiment_configs"] = pd.concat([configs, row], ignore_index=True)
+
+
+def _append_f12_free_treatment_subscriptions(
+    tables: dict[str, pd.DataFrame],
+    *,
+    user_ids: list[int],
+    users: pd.DataFrame,
+    metric_date: date,
+    days: int,
+) -> None:
+    """Materialize F12's treatment-only onboarding conversions from latent data."""
+    if not user_ids:
+        return
+
+    subscriptions = tables["subscriptions"]
+    next_subscription_id = (
+        int(subscriptions["subscription_id"].max()) + 1
+        if not subscriptions.empty
+        else 1
+    )
+    fee_map = {"basic": 19.0, "pro": 49.0, "enterprise": 199.0}
+    rows: list[dict[str, object]] = []
+    start_time = pd.Timestamp(metric_date)
+    cancellation_window = max(1, min(30, days))
+    for offset, user_id in enumerate(sorted(user_ids)):
+        row = users.loc[user_id]
+        plan_score = float(row.subscription_plan_score)
+        plan_type = (
+            "basic"
+            if plan_score < 0.55
+            else "pro"
+            if plan_score < 0.90
+            else "enterprise"
+        )
+        cancelled = float(row.subscription_cancel_score) < 0.15
+        end_time = (
+            start_time
+            + pd.Timedelta(
+                days=1
+                + int(
+                    np.floor(
+                        float(row.subscription_cancel_score) * cancellation_window
+                    )
+                )
+            )
+            if cancelled
+            else pd.NaT
+        )
+        rows.append(
+            {
+                "subscription_id": next_subscription_id + offset,
+                "user_id": user_id,
+                "plan_type": plan_type,
+                "start_time": start_time,
+                "end_time": end_time,
+                "subscription_status": "cancelled" if cancelled else "active",
+                "monthly_fee": fee_map[plan_type],
+            }
+        )
+    tables["subscriptions"] = pd.concat(
+        [subscriptions, pd.DataFrame(rows, columns=subscriptions.columns)],
+        ignore_index=True,
+    )
 
 
 def _upsert_partition(
@@ -512,26 +576,67 @@ def _apply_strategy(
         original_variants = assignments.set_index("user_id")["variant"]
         treatment_count = round(len(assignments) * treatment_ratio)
         users = tables["users"].set_index("user_id")
+        preserved_treatment = assignments.loc[
+            assignments["variant"].eq("treatment"), "user_id"
+        ].astype(int).tolist()
+        if treatment_count < len(preserved_treatment):
+            raise ValueError(
+                "F12 target allocation cannot remove existing treatment exposure"
+            )
+
+        # Select users whose fixed latent score makes the allocation change causal
+        # for the target date: control would not convert, treatment would convert.
+        latest_event_dates = (
+            events.assign(metric_day=events["event_time"].dt.date)
+            .groupby("user_id")["metric_day"]
+            .max()
+        )
         active_users = set(events.loc[mask, "user_id"].dropna().astype(int))
         preferred: list[int] = []
         for row in users.loc[users.index.intersection(original_variants.index)].itertuples():
-            base_probability = 0.72 if row.user_type == "paid" else 0.32
+            user_id = int(row.Index)
             if (
-                int(row.Index) in active_users
-                and original_variants.loc[row.Index] == "control"
-                and base_probability <= row.conversion_score < base_probability + 0.20
+                original_variants.loc[user_id] != "control"
+                or user_id not in active_users
             ):
-                preferred.append(int(row.Index))
+                continue
+            if row.user_type == "free":
+                if row.conversion_score < _F12_FREE_TREATMENT_CONVERSION_PROBABILITY:
+                    preferred.append(user_id)
+                continue
+            if (
+                row.user_type not in {"trial", "paid"}
+                or latest_event_dates.get(user_id) != metric_date
+            ):
+                continue
+            base_probability = 0.72 if row.user_type == "paid" else 0.32
+            control_probability = min(base_probability + 0.02, 0.95)
+            treatment_probability = min(base_probability + 0.20, 0.95)
+            if control_probability <= row.conversion_score < treatment_probability:
+                preferred.append(user_id)
 
-        preferred = preferred[:treatment_count]
+        # A stable score/user-id order makes the causal selection independent of
+        # dataframe order and Python hash randomization.
+        preferred.sort(
+            key=lambda user_id: (
+                users.loc[user_id, "user_type"] == "free",
+                -float(users.loc[user_id, "conversion_score"]),
+                user_id,
+            )
+        )
         cohort_user_ids = set(assignments["user_id"])
-        assignments["variant"] = "control"
+        treatment_users = set(preserved_treatment)
+        treatment_users.update(
+            preferred[: treatment_count - len(preserved_treatment)]
+        )
         remaining = assignments.loc[
-            ~assignments["user_id"].isin(preferred), "user_id"
+            ~assignments["user_id"].isin(treatment_users), "user_id"
         ].to_numpy()
-        fill_count = treatment_count - len(preferred)
-        filler = rng.choice(remaining, size=fill_count, replace=False) if fill_count else []
-        treatment_users = [*preferred, *filler]
+        fill_count = treatment_count - len(treatment_users)
+        if fill_count:
+            filler = rng.choice(remaining, size=fill_count, replace=False)
+            treatment_users.update(int(user_id) for user_id in filler)
+        assignments["variant"] = "control"
         treatment_indices = assignments.index[
             assignments["user_id"].isin(treatment_users)
         ]
@@ -548,6 +653,19 @@ def _apply_strategy(
         tables["subscriptions"] = generate_subscriptions(
             tables["users"], start_date, days, rng, assignments, tables["events"]
         )
+        free_treatment_users = [
+            user_id
+            for user_id in preferred
+            if user_id in treatment_users
+            and users.loc[user_id, "user_type"] == "free"
+        ]
+        _append_f12_free_treatment_subscriptions(
+            tables,
+            user_ids=free_treatment_users,
+            users=users,
+            metric_date=metric_date,
+            days=days,
+        )
         _append_experiment_config(
             tables,
             control_ratio=control_ratio,
@@ -556,7 +674,7 @@ def _apply_strategy(
         )
         notes.append(
             "experiment allocation changed to the requested split while preserving "
-            "the experiment cohort"
+            "the experiment cohort and prioritizing target-date treatment uplift users"
         )
     else:
         raise ValueError(f"unknown fault id: {fault_id}")
@@ -949,6 +1067,22 @@ def validate_expected_evidence(
     tables = result.tables
     validate_dataset_consistency(tables, expected_days=len(tables["daily_metrics"]))
     case = _resolve_ground_truth_case(result, ground_truth_case)
+    if baseline_tables is not None:
+        target_date = _target_date(result, case)
+        baseline_value = _metric_value(
+            baseline_tables, target_date, case.affected_metric
+        )
+        fault_value = _metric_value(tables, target_date, case.affected_metric)
+        if not validate_effect(
+            baseline_value,
+            fault_value,
+            expected_direction=case.expected_direction,
+            effect_size_type=case.effect_size_type,
+            minimum_effect_size=case.minimum_effect_size,
+        ):
+            raise ValueError(
+                f"{case.case_id} business metric does not satisfy the effect contract"
+            )
     if case.fault_id in INDEPENDENT_METADATA_EVIDENCE_FAULT_IDS:
         if baseline_tables is None:
             raise ValueError(
