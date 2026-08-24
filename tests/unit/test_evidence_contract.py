@@ -36,6 +36,7 @@ POSITIVE_RUNTIME_EVIDENCE_CASE_IDS = (
     "F11-001",
     "F12-001",
 )
+SQL_EVIDENCE_CASE_IDS = ("F07-001", "F08-001", "F09-001")
 
 
 @pytest.fixture(scope="module")
@@ -47,6 +48,14 @@ def baseline() -> dict[str, pd.DataFrame]:
 def focused_cases() -> dict[str, GroundTruthCase]:
     cases = load_ground_truth_cases(Path("benchmark/ground_truth"))
     return {case.case_id: case for case in cases if case.case_id in FOCUSED_CASE_IDS}
+
+
+@pytest.fixture(scope="module")
+def all_cases() -> dict[str, GroundTruthCase]:
+    return {
+        case.case_id: case
+        for case in load_ground_truth_cases(Path("benchmark/ground_truth"))
+    }
 
 
 def _inject(
@@ -383,6 +392,52 @@ def _evidence_sql(case: GroundTruthCase) -> tuple[str, str]:
     next_date_literal = (target_date + timedelta(days=1)).isoformat()
 
     queries = {
+        "F07": (
+            (
+                "SELECT COUNT(DISTINCT e.user_id) AS event_users, "
+                "COUNT(DISTINCT s.user_id) AS matched_users, "
+                "COUNT(DISTINCT e.user_id) - COUNT(DISTINCT s.user_id) "
+                "AS unmatched_users FROM events e "
+                "LEFT JOIN subscriptions s ON e.user_id = s.user_id "
+                f"WHERE CAST(e.event_time AS DATE) = DATE '{date_literal}'"
+            ),
+            (
+                "SELECT metric_id, version, definition_hash, query, effective_at "
+                "FROM metric_versions WHERE metric_id = 'daily_active_users' "
+                "ORDER BY version"
+            ),
+        ),
+        "F08": (
+            (
+                "WITH joined AS ("
+                "SELECT e.event_id FROM events e "
+                "INNER JOIN experiment_assignments a ON e.user_id = a.user_id "
+                f"WHERE CAST(e.event_time AS DATE) = DATE '{date_literal}' "
+                "AND e.event_name = 'run_ai_task') "
+                "SELECT (SELECT COUNT(*) FROM experiment_assignments) AS assignment_rows, "
+                "(SELECT COUNT(DISTINCT user_id) FROM experiment_assignments) AS assignment_users, "
+                "COUNT(*) AS joined_rows, COUNT(DISTINCT event_id) AS joined_events "
+                "FROM joined"
+            ),
+            (
+                "SELECT metric_id, version, definition_hash, query, effective_at "
+                "FROM metric_versions WHERE metric_id = 'ai_task_count' "
+                "ORDER BY version"
+            ),
+        ),
+        "F09": (
+            (
+                "SELECT COUNT(*) AS total_events, "
+                "COUNT(*) FILTER (WHERE event_name = 'run_ai_task') AS run_ai_task_rows, "
+                "COUNT(*) FILTER (WHERE event_name = 'execute_ai_task') AS execute_ai_task_rows "
+                "FROM events "
+                f"WHERE CAST(event_time AS DATE) = DATE '{date_literal}'"
+            ),
+            (
+                "SELECT table_name, version, schema_json, effective_at "
+                "FROM schema_snapshots WHERE table_name = 'events' ORDER BY version"
+            ),
+        ),
         "F01": (
             (
                 f"SELECT device_type, COUNT(*) AS event_count FROM events "
@@ -499,3 +554,53 @@ def test_each_focused_fault_has_business_and_independent_sql_evidence(
         target = metadata_rows[-1]
         assert float(target["control_ratio"]) == pytest.approx(0.20)
         assert float(target["treatment_ratio"]) == pytest.approx(0.80)
+
+
+@pytest.mark.parametrize("case_id", SQL_EVIDENCE_CASE_IDS)
+def test_f07_to_f09_causal_evidence_is_queryable_through_sql_runner(
+    case_id: str,
+    tmp_path: Path,
+    baseline: dict[str, pd.DataFrame],
+    all_cases: dict[str, GroundTruthCase],
+) -> None:
+    case = all_cases[case_id]
+    result = _inject(baseline, case)
+    baseline_dir = tmp_path / "baseline"
+    fault_dir = tmp_path / "fault"
+    write_outputs(baseline_dir, baseline)
+    write_outputs(fault_dir, result.tables)
+
+    business_sql, metadata_sql = _evidence_sql(case)
+    baseline_business = run_readonly_sql(
+        baseline_dir / "datasherlock.duckdb", business_sql
+    )
+    fault_business = run_readonly_sql(
+        fault_dir / "datasherlock.duckdb", business_sql
+    )
+    fault_metadata = run_readonly_sql(
+        fault_dir / "datasherlock.duckdb", metadata_sql
+    )
+    assert fault_business.row_count == 1
+    assert fault_business.columns
+    assert fault_metadata.row_count >= 1
+    assert fault_metadata.columns
+
+    baseline_values = dict(
+        zip(baseline_business.columns, baseline_business.rows[0], strict=True)
+    )
+    fault_values = dict(
+        zip(fault_business.columns, fault_business.rows[0], strict=True)
+    )
+    if case.fault_id == "F07":
+        assert fault_values["matched_users"] < fault_values["event_users"]
+        assert fault_values["unmatched_users"] > 0
+        assert fault_values["matched_users"] == baseline_values["matched_users"]
+    elif case.fault_id == "F08":
+        assert baseline_values["assignment_rows"] == baseline_values["assignment_users"]
+        assert fault_values["assignment_rows"] > fault_values["assignment_users"]
+        assert fault_values["joined_rows"] > baseline_values["joined_rows"]
+        assert fault_values["joined_events"] == baseline_values["joined_events"]
+    else:
+        assert fault_values["total_events"] == baseline_values["total_events"]
+        assert fault_values["run_ai_task_rows"] < baseline_values["run_ai_task_rows"]
+        assert fault_values["execute_ai_task_rows"] > 0

@@ -1138,7 +1138,7 @@ def _inject(
         start_date=start_date,
         days=days,
         query_overrides=faulty_queries,
-    )
+    ).round(10)
     fault_value = _metric_value(mutated, metric_date, affected_metric)
     result = FaultInjectionResult(
         fault_id=fault_id,

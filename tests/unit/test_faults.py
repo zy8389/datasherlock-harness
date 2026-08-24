@@ -21,6 +21,7 @@ from data.generator import generate_dataset
 
 TARGET_DATE = date(2026, 1, 16)
 START_DATE = pd.Timestamp("2026-01-01")
+LATER_FAULT_IDS = ("F07", "F08", "F09", "F10", "F11", "F12")
 
 
 @pytest.fixture(scope="module")
@@ -386,6 +387,39 @@ def test_f12_is_paired_deterministic_and_causally_ordered(
             baseline["users"].set_index("user_id")["register_time"]
         )
     ).all()
+
+
+@pytest.mark.parametrize("fault_id", LATER_FAULT_IDS)
+def test_f07_to_f12_are_exactly_reproducible_for_same_seed(
+    fault_id: str,
+    baseline: dict[str, pd.DataFrame],
+) -> None:
+    case = next(
+        case
+        for case in load_ground_truth_cases(Path("benchmark/ground_truth"))
+        if case.fault_id == fault_id
+    )
+    first = inject_case(
+        baseline,
+        case,
+        rng=np.random.default_rng(99),
+        start_date=START_DATE,
+        days=30,
+    )
+    second = inject_case(
+        baseline,
+        case,
+        rng=np.random.default_rng(99),
+        start_date=START_DATE,
+        days=30,
+    )
+
+    for table_name in first.tables:
+        assert_frame_equal(
+            first.tables[table_name],
+            second.tables[table_name],
+            check_exact=True,
+        )
 
 
 def test_fault_injection_does_not_mutate_healthy_baseline(

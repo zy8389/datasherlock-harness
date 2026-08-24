@@ -53,9 +53,10 @@ F05 的 Evidence Contract 保留事件时间偏移和 `metric_versions` 独立�
 当前 Fault Injector 会同时产生边界事件偏移、`pipeline_runs` warning 和目标日期的
 fault-specific `metric_versions` record，把指标时区从 `UTC` 改为 `Asia/Shanghai`；这用于
 Benchmark 的独立证据验证，但仍不是完整的运行时 timezone engine。F12 的 20/80 分流注入
-只重分配既有 experiment cohort 的 variant，不修改 `experiment_assignments.user_id`；
-Catalog 的 `minimum_effect_size` 由 evaluator 独立判断，注入器不会用它驱动数据生成。
-如果实际效果未达到目录阈值，评测会报告 F12 blocker，而不会降低阈值。
+保留既有 experiment cohort，只改变 variant 以及由 treatment propensity 产生的
+subscription outcome，不修改 `experiment_assignments.user_id`；Catalog 的
+`minimum_effect_size` 由 evaluator 独立判断，注入器不会用它驱动数据生成。当前
+F12-001 已通过目录 effect threshold 和 Evidence Contract。
 
 仍未实现或仅有接口/文档准备：
 

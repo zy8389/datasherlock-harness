@@ -82,8 +82,10 @@ metric-version record.
 
 F12 preserves the experiment cohort while moving the configured allocation from 50/50 to 20/80.
 The injector does not change `experiment_assignments.user_id` or use the Catalog
-`minimum_effect_size` to target a generated effect. The evaluator independently checks the
-conversion-rate effect; if it misses the threshold, the result remains a reported F12 blocker.
+`minimum_effect_size` to target a generated effect. Treatment propensity produces the
+subscription outcome from fixed latent user data, and the evaluator independently checks the
+conversion-rate effect. The current F12-001 case satisfies the catalog threshold and Evidence
+Contract.
 
 The contract and SQL Runner tests currently cover only the six metadata-dependent seed cases.
 This does not claim that the 60-case Benchmark, Benchmark Runner, or later Harness modules are
