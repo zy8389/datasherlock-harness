@@ -56,7 +56,9 @@ class IncidentState(BaseModel):
     hypotheses: list[JsonObject] = Field(default_factory=list)
     evidence: list[JsonObject] = Field(default_factory=list)
     tool_trace: list[JsonObject] = Field(default_factory=list)
+    planner_metadata: JsonObject | None = None
     root_cause: JsonObject | None = None
+    fix_proposal: JsonObject | None = None
     approval: JsonObject | None = None
     repair_result: JsonObject | None = None
     status: IncidentStatus = IncidentStatus.RECEIVED

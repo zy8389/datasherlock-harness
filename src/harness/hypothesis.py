@@ -128,6 +128,11 @@ class HypothesisManager:
 
         return tuple(self._hypotheses.values())
 
+    def evidence(self) -> tuple[EvidenceReference, ...]:
+        """Return registered evidence in registration order."""
+
+        return tuple(self._evidence.values())
+
     def register_evidence(self, evidence: EvidenceReference) -> EvidenceReference:
         """Register lightweight evidence metadata for later binding."""
 
