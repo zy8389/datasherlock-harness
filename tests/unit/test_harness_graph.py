@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from harness.graph import (
@@ -5,20 +7,19 @@ from harness.graph import (
     HarnessGraph,
     HarnessTransitionError,
 )
-from harness.hypothesis import EvidenceReference, HypothesisState, HypothesisStatus
+from harness.hypothesis import EvidenceReference, HypothesisStatus
 from harness.state import IncidentState, IncidentStatus
 from agents.planner import (
     Hypothesis,
     InvestigationPlan,
     InvestigationStep,
+    MetricContext,
+    Planner,
     PlannerFallbackReason,
     PlannerRunResult,
 )
-from tools.executor import ToolExecutionResult
-from validators.root_cause_validator import (
-    RootCauseValidationResult,
-    RootCauseValidator,
-)
+from tools.executor import ToolExecutionResult, ToolExecutor
+from tools.sql_runner import SqlExecutionResponse
 
 
 def _alert() -> dict[str, object]:
@@ -26,19 +27,11 @@ def _alert() -> dict[str, object]:
         "incident_id": "INC-001",
         "metric": "daily_active_users",
         "observed_at": "2026-08-25T00:00:00Z",
+        "expected_value": 100.0,
+        "observed_value": 75.0,
+        "change_rate": -0.25,
+        "severity": "high",
     }
-
-
-def _validator_result(*, validated: bool, next_state: str) -> RootCauseValidationResult:
-    return RootCauseValidationResult(
-        hypothesis_id="H01",
-        root_cause_type="missing_partition",
-        validated=validated,
-        confidence=0.85,
-        supporting_evidence_ids=["E01", "E02"],
-        independent_source_types=["business_data", "operational_metadata"],
-        recommended_next_state=next_state,
-    )
 
 
 def _plan() -> InvestigationPlan:
@@ -87,6 +80,102 @@ class _SuccessfulExecutor:
         )
 
 
+def _real_plan_payload() -> dict[str, object]:
+    return {
+        "incident_id": "INC-001",
+        "hypotheses": [
+            {
+                "hypothesis_id": "H01",
+                "root_cause_type": "missing_partition",
+                "description": "The target partition may be missing.",
+                "initial_confidence": 0.55,
+            },
+            {
+                "hypothesis_id": "H02",
+                "root_cause_type": "data_delay",
+                "description": "The target data may have arrived late.",
+                "initial_confidence": 0.25,
+            },
+            {
+                "hypothesis_id": "H03",
+                "root_cause_type": "null_value_anomaly",
+                "description": "The target rows may contain null user IDs.",
+                "initial_confidence": 0.20,
+            },
+        ],
+        "steps": [
+            {
+                "step_id": "S01",
+                "purpose": "Inspect the bounded event result.",
+                "hypothesis_id": "H01",
+                "tool": "sql_query",
+                "arguments": {"sql": "SELECT 1"},
+                "expected_evidence": ["event result"],
+                "stop_condition": "stop after the bounded query",
+            }
+        ],
+    }
+
+
+def _real_runtime(
+    *,
+    source_types: tuple[str, str] = ("business_data", "operational_metadata"),
+) -> tuple[HarnessGraph, IncidentState, list[EvidenceReference]]:
+    query_number = 0
+
+    def execute_sql(
+        _database_path: str,
+        _sql: str,
+        **_kwargs: object,
+    ) -> SqlExecutionResponse:
+        nonlocal query_number
+        query_number += 1
+        return SqlExecutionResponse(
+            query_id=f"Q{query_number:02d}",
+            status="success",
+            statement_type="SELECT",
+            columns=["answer"],
+            rows=[[1]],
+            row_count=1,
+        )
+
+    planner = Planner(
+        lambda _: json.dumps(_real_plan_payload()),
+        max_retries=0,
+    )
+    graph = HarnessGraph(
+        planner=planner,
+        tool_executor=ToolExecutor("unused.duckdb", sql_execution=execute_sql),
+    )
+    state = IncidentState(alert=_alert())
+    graph.plan_incident(
+        state,
+        metric_context=MetricContext(
+            metric_id="daily_active_users",
+            source_tables=["events"],
+        ),
+    )
+    graph.execute_next_step(state)
+    graph.enter_hypothesis_testing(state)
+    evidence = [
+        EvidenceReference(
+            evidence_id="E01",
+            source_type=source_types[0],
+            description="The target event partition is empty.",
+        ),
+        EvidenceReference(
+            evidence_id="E02",
+            source_type=source_types[1],
+            description="Partition metadata is missing.",
+        ),
+    ]
+    for reference in evidence:
+        graph.register_evidence(state, reference)
+    graph.attach_evidence(state, "H01", "E01", supports=True)
+    graph.attach_evidence(state, "H01", "E02", supports=True)
+    return graph, state, evidence
+
+
 def test_planner_output_and_fallback_metadata_are_persisted() -> None:
     graph = HarnessGraph(planner=_FallbackPlanner())
     state = IncidentState(alert=_alert())
@@ -120,8 +209,36 @@ def test_execution_result_becomes_unvalidated_observation() -> None:
     assert state.evidence[0]["root_cause_validated"] is False
 
 
-def _to_hypothesis_testing(graph: HarnessGraph) -> IncidentState:
+def _to_hypothesis_testing(
+    graph: HarnessGraph,
+    *,
+    source_types: tuple[str, str] = ("business_data", "operational_metadata"),
+) -> IncidentState:
     state = IncidentState(alert=_alert(), plan=[{"step_id": "P01"}])
+    graph.hypothesis_manager.create_hypothesis(
+        Hypothesis(
+            hypothesis_id="H01",
+            root_cause_type="missing_partition",
+            description="The target partition may be missing.",
+            initial_confidence=0.55,
+        )
+    )
+    evidence = [
+        EvidenceReference(
+            evidence_id="E01",
+            source_type=source_types[0],
+            description="The target event partition is empty.",
+        ),
+        EvidenceReference(
+            evidence_id="E02",
+            source_type=source_types[1],
+            description="Partition metadata is missing.",
+        ),
+    ]
+    for reference in evidence:
+        graph.register_evidence(state, reference)
+    graph.attach_evidence(state, "H01", "E01", supports=True)
+    graph.attach_evidence(state, "H01", "E02", supports=True)
     graph.transition(state, IncidentStatus.TRIAGE)
     graph.transition(state, IncidentStatus.PLANNING)
     graph.transition(state, IncidentStatus.EXECUTING)
@@ -131,14 +248,11 @@ def _to_hypothesis_testing(graph: HarnessGraph) -> IncidentState:
     return state
 
 
-def test_full_success_path_uses_stub_payloads() -> None:
-    graph = HarnessGraph()
-    state = _to_hypothesis_testing(graph)
+def test_full_success_path_uses_real_runtime_components() -> None:
+    graph, state, evidence = _real_runtime()
 
-    graph.apply_root_cause_validation(
-        state,
-        _validator_result(validated=True, next_state="ROOT_CAUSE_FOUND"),
-    )
+    result = graph.validate_hypothesis(state, "H01", evidence)
+    assert result.to_status is IncidentStatus.ROOT_CAUSE_FOUND
     graph.propose_fix(state, {"action": "rerun_partition"})
     graph.record_approval(state, approved=True, reviewer="data-engineer")
     graph.record_repair_result(state, succeeded=True, action="rerun_partition")
@@ -147,36 +261,47 @@ def test_full_success_path_uses_stub_payloads() -> None:
     assert state.status is IncidentStatus.RESOLVED
     assert state.final_status is IncidentStatus.RESOLVED
     assert state.retry_count == 0
-    assert state.root_cause == {
+    assert state.root_cause["confidence"] == pytest.approx(0.85)
+    assert {
+        key: value
+        for key, value in state.root_cause.items()
+        if key != "confidence"
+    } == {
         "hypothesis_id": "H01",
         "root_cause_type": "missing_partition",
-        "confidence": 0.85,
         "supporting_evidence_ids": ["E01", "E02"],
         "independent_source_types": ["business_data", "operational_metadata"],
     }
 
 
-def test_validator_fail_then_retry_then_pass() -> None:
-    graph = HarnessGraph()
-    state = _to_hypothesis_testing(graph)
-
-    failed = graph.apply_root_cause_validation(
-        state,
-        _validator_result(validated=False, next_state="HYPOTHESIS_TESTING"),
+def test_validator_fail_then_retry_then_pass_uses_real_runtime_components() -> None:
+    graph, state, evidence = _real_runtime(
+        source_types=("business_data", "business_data"),
     )
+
+    failed = graph.validate_hypothesis(state, "H01", evidence)
     assert failed.to_status is IncidentStatus.HYPOTHESIS_TESTING
     assert state.status is IncidentStatus.HYPOTHESIS_TESTING
+    assert graph.hypothesis_manager.get_hypothesis("H01").status is HypothesisStatus.TESTING
     graph.request_more_evidence(state)
     assert state.status is IncidentStatus.EXECUTING
     assert state.retry_count == 1
 
-    state.evidence.append({"evidence_id": "E03"})
-    graph.transition(state, IncidentStatus.VALIDATING)
-    graph.transition(state, IncidentStatus.HYPOTHESIS_TESTING)
-    graph.apply_root_cause_validation(
-        state,
-        _validator_result(validated=True, next_state="ROOT_CAUSE_FOUND"),
+    additional_evidence = EvidenceReference(
+        evidence_id="E03",
+        source_type="operational_metadata",
+        description="A second metadata source confirms the missing partition.",
     )
+    graph.register_evidence(state, additional_evidence)
+    graph.attach_evidence(state, "H01", "E03", supports=True)
+    graph.execute_next_step(state)
+    graph.enter_hypothesis_testing(state)
+    passing = graph.validate_hypothesis(
+        state,
+        "H01",
+        [*evidence, additional_evidence],
+    )
+    assert passing.to_status is IncidentStatus.ROOT_CAUSE_FOUND
     assert state.status is IncidentStatus.ROOT_CAUSE_FOUND
     assert state.retry_count == 1
 
@@ -349,10 +474,11 @@ def test_transition_error_exposes_structured_statuses() -> None:
 def test_incident_state_serialization_survives_graph_operations() -> None:
     graph = HarnessGraph()
     state = _to_hypothesis_testing(graph)
-    graph.apply_root_cause_validation(
-        state,
-        _validator_result(validated=True, next_state="ROOT_CAUSE_FOUND"),
+    result = graph.root_cause_validator.validate(
+        graph.hypothesis_manager.get_hypothesis("H01"),
+        graph.hypothesis_manager.evidence(),
     )
+    graph.apply_root_cause_validation(state, result)
 
     restored = IncidentState.from_json(state.to_json())
     assert restored == state
@@ -361,29 +487,10 @@ def test_incident_state_serialization_survives_graph_operations() -> None:
 def test_real_validator_pass_integrates_without_llm() -> None:
     graph = HarnessGraph()
     state = _to_hypothesis_testing(graph)
-    hypothesis = HypothesisState(
-        hypothesis_id="H01",
-        root_cause_type="missing_partition",
-        description="The target partition is missing.",
-        status=HypothesisStatus.SUPPORTED,
-        confidence=0.85,
-        evidence_ids=["E01", "E02"],
-        supporting_evidence_ids=["E01", "E02"],
+    result = graph.root_cause_validator.validate(
+        graph.hypothesis_manager.get_hypothesis("H01"),
+        graph.hypothesis_manager.evidence(),
     )
-    evidence = [
-        EvidenceReference(
-            evidence_id="E01",
-            source_type="business_data",
-            description="Observed event gap.",
-        ),
-        EvidenceReference(
-            evidence_id="E02",
-            source_type="operational_metadata",
-            description="Partition metadata is missing.",
-        ),
-    ]
-
-    result = RootCauseValidator().validate(hypothesis, evidence)
     graph.apply_root_cause_validation(state, result)
 
     assert result.validated is True
@@ -394,30 +501,14 @@ def test_real_validator_pass_integrates_without_llm() -> None:
 
 def test_real_validator_fail_integrates_and_can_request_evidence() -> None:
     graph = HarnessGraph()
-    state = _to_hypothesis_testing(graph)
-    hypothesis = HypothesisState(
-        hypothesis_id="H01",
-        root_cause_type="missing_partition",
-        description="The target partition is missing.",
-        status=HypothesisStatus.SUPPORTED,
-        confidence=0.85,
-        evidence_ids=["E01", "E02"],
-        supporting_evidence_ids=["E01", "E02"],
+    state = _to_hypothesis_testing(
+        graph,
+        source_types=("business_data", "business_data"),
     )
-    same_source_evidence = [
-        EvidenceReference(
-            evidence_id="E01",
-            source_type="business_data",
-            description="Observed event gap.",
-        ),
-        EvidenceReference(
-            evidence_id="E02",
-            source_type="business_data",
-            description="Repeated event gap.",
-        ),
-    ]
-
-    result = RootCauseValidator().validate(hypothesis, same_source_evidence)
+    result = graph.root_cause_validator.validate(
+        graph.hypothesis_manager.get_hypothesis("H01"),
+        graph.hypothesis_manager.evidence(),
+    )
     graph.apply_root_cause_validation(state, result)
     assert result.validated is False
     assert state.status is IncidentStatus.HYPOTHESIS_TESTING
@@ -439,11 +530,33 @@ def test_malformed_validator_result_is_rejected(
 ) -> None:
     graph = HarnessGraph()
     state = _to_hypothesis_testing(graph)
+    authoritative = graph.root_cause_validator.validate(
+        graph.hypothesis_manager.get_hypothesis("H01"),
+        graph.hypothesis_manager.evidence(),
+    )
+    malformed = authoritative.model_copy(
+        update={
+            "validated": validated,
+            "recommended_next_state": next_state,
+        }
+    )
 
     with pytest.raises(HarnessTransitionError, match="malformed"):
-        graph.apply_root_cause_validation(
-            state,
-            _validator_result(validated=validated, next_state=next_state),
-        )
+        graph.apply_root_cause_validation(state, malformed)
+    assert state.status is IncidentStatus.HYPOTHESIS_TESTING
+    assert state.root_cause is None
+
+
+def test_forged_validated_result_must_match_live_managed_hypothesis() -> None:
+    graph = HarnessGraph()
+    state = _to_hypothesis_testing(graph)
+    authoritative = graph.root_cause_validator.validate(
+        graph.hypothesis_manager.get_hypothesis("H01"),
+        graph.hypothesis_manager.evidence(),
+    )
+    forged = authoritative.model_copy(update={"confidence": 1.0})
+
+    with pytest.raises(HarnessTransitionError, match="does not match"):
+        graph.apply_root_cause_validation(state, forged)
     assert state.status is IncidentStatus.HYPOTHESIS_TESTING
     assert state.root_cause is None

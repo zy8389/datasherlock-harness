@@ -24,10 +24,13 @@ from harness.hypothesis import (
     EvidenceReference,
     HypothesisManager,
     HypothesisState,
+    HypothesisStateError,
+    HypothesisStatus,
 )
 from harness.state import IncidentState, IncidentStatus
 from tools.executor import ToolExecutionResult, ToolExecutor
 from validators.root_cause_validator import (
+    RootCauseValidationError,
     RootCauseValidationResult,
     RootCauseValidator,
 )
@@ -339,9 +342,13 @@ class HarnessGraph:
             evidence,
             resolved_contradiction_ids=resolved_contradiction_ids,
         )
-        transition_result = self.apply_root_cause_validation(state, result, reason=reason)
-        if not result.validated and hypothesis.status.value == "SUPPORTED":
-            self.hypothesis_manager.return_to_testing(hypothesis_id)
+        transition_result = self.apply_root_cause_validation(
+            state,
+            result,
+            resolved_contradiction_ids=resolved_contradiction_ids,
+            reason=reason,
+        )
+        if not result.validated:
             self._sync_hypotheses(state)
         return transition_result
 
@@ -365,9 +372,16 @@ class HarnessGraph:
         state: IncidentState,
         result: RootCauseValidationResult,
         *,
+        resolved_contradiction_ids: Sequence[str] = (),
         reason: str | None = None,
     ) -> HarnessTransitionResult:
-        """Apply one validator result; FAIL remains in HYPOTHESIS_TESTING."""
+        """Apply an authoritative result; FAIL remains in HYPOTHESIS_TESTING.
+
+        The result is revalidated against the live ``HypothesisManager`` before
+        any incident mutation. This prevents a caller from constructing a
+        ``validated=True`` envelope for an unrelated or non-supported
+        hypothesis and using it to enter ``ROOT_CAUSE_FOUND``.
+        """
 
         self._ensure_incident_state(state)
         self._ensure_active(state)
@@ -397,7 +411,46 @@ class HarnessGraph:
                 f"{result.validated!r} recommends {result.recommended_next_state!r}",
             )
 
+        try:
+            managed_hypothesis = self.hypothesis_manager.get_hypothesis(
+                result.hypothesis_id
+            )
+        except HypothesisStateError as exc:
+            raise self._error(
+                state,
+                IncidentStatus.ROOT_CAUSE_FOUND,
+                f"validation result references an unmanaged hypothesis: {result.hypothesis_id}",
+            ) from exc
+
+        if result.validated and managed_hypothesis.status is not HypothesisStatus.SUPPORTED:
+            raise self._error(
+                state,
+                IncidentStatus.ROOT_CAUSE_FOUND,
+                "validated=True requires the current managed hypothesis to be SUPPORTED",
+            )
+        try:
+            authoritative_result = self.root_cause_validator.validate(
+                managed_hypothesis,
+                self.hypothesis_manager.evidence(),
+                resolved_contradiction_ids=resolved_contradiction_ids,
+            )
+        except RootCauseValidationError as exc:
+            raise self._error(
+                state,
+                IncidentStatus.ROOT_CAUSE_FOUND,
+                f"current managed hypothesis failed validation: {exc}",
+            ) from exc
+        if authoritative_result.model_dump(mode="json") != result.model_dump(mode="json"):
+            raise self._error(
+                state,
+                IncidentStatus.ROOT_CAUSE_FOUND,
+                "validation result does not match the current HypothesisManager state",
+            )
+
         if not result.validated:
+            if managed_hypothesis.status is HypothesisStatus.SUPPORTED:
+                self.hypothesis_manager.return_to_testing(result.hypothesis_id)
+                self._sync_hypotheses(state)
             return HarnessTransitionResult(
                 from_status=state.status,
                 to_status=state.status,
@@ -503,7 +556,11 @@ class HarnessGraph:
             elif result_status in ("failed", "failure", "fatal"):
                 outcome_values.append(False)
         if not outcome_values:
-            raise self._error(state, IncidentStatus.POST_VALIDATION, "record_repair_result requires succeeded, success, or fatal")
+            raise self._error(
+                state,
+                IncidentStatus.POST_VALIDATION,
+                "record_repair_result requires succeeded, success, or fatal",
+            )
         if any(not isinstance(value, bool) for value in outcome_values):
             raise self._error(state, IncidentStatus.POST_VALIDATION, "repair outcome must be boolean")
         if len(set(outcome_values)) != 1:
