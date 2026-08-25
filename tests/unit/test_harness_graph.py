@@ -2,13 +2,6 @@ import json
 
 import pytest
 
-from harness.graph import (
-    ALLOWED_TRANSITIONS,
-    HarnessGraph,
-    HarnessTransitionError,
-)
-from harness.hypothesis import EvidenceReference, HypothesisStatus
-from harness.state import IncidentState, IncidentStatus
 from agents.planner import (
     Hypothesis,
     InvestigationPlan,
@@ -18,6 +11,13 @@ from agents.planner import (
     PlannerFallbackReason,
     PlannerRunResult,
 )
+from harness.graph import (
+    ALLOWED_TRANSITIONS,
+    HarnessGraph,
+    HarnessTransitionError,
+)
+from harness.hypothesis import EvidenceReference, HypothesisStatus
+from harness.state import IncidentState, IncidentStatus
 from tools.executor import ToolExecutionResult, ToolExecutor
 from tools.sql_runner import SqlExecutionResponse
 

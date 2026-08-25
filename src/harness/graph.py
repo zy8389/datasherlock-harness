@@ -188,7 +188,7 @@ class HarnessGraph:
             run_result = _coerce_planner_result(raw_result)
         except HarnessPlanningError:
             raise
-        except Exception as exc:  # noqa: BLE001 - surface a stable graph boundary
+        except Exception as exc:
             raise HarnessPlanningError(f"Planner failed: {exc}") from exc
 
         manager_states: list[dict[str, JsonValue]] = []
@@ -759,9 +759,12 @@ class HarnessGraph:
         elif current is IncidentStatus.SANDBOX_REPAIR and target is IncidentStatus.POST_VALIDATION:
             if repair_succeeded is not True and not _repair_payload_succeeded(state):
                 raise cls._error(state, target, "SANDBOX_REPAIR -> POST_VALIDATION requires a successful repair result")
-        elif current is IncidentStatus.POST_VALIDATION and target is IncidentStatus.RESOLVED:
-            if not state.repair_result:
-                raise cls._error(state, target, "POST_VALIDATION -> RESOLVED requires repair_result")
+        elif (
+            current is IncidentStatus.POST_VALIDATION
+            and target is IncidentStatus.RESOLVED
+            and not state.repair_result
+        ):
+            raise cls._error(state, target, "POST_VALIDATION -> RESOLVED requires repair_result")
 
     @staticmethod
     def _error(
@@ -816,7 +819,7 @@ def _coerce_planner_result(raw_result: object) -> PlannerRunResult:
     if isinstance(raw_result, InvestigationPlan):
         return PlannerRunResult(plan=raw_result)
     if hasattr(raw_result, "plan"):
-        plan = getattr(raw_result, "plan")
+        plan = raw_result.plan
         if isinstance(plan, InvestigationPlan):
             payload: dict[str, Any] = {"plan": plan}
             for name in (
