@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Final
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from agents.planner import Hypothesis
 
@@ -59,13 +59,15 @@ class HypothesisStateError(ValueError):
 
 
 class EvidenceReference(BaseModel):
-    """Lightweight evidence metadata used until a full EvidenceResult exists."""
+    """Serializable evidence metadata shared by tools and validators."""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     evidence_id: str = Field(min_length=1)
     source_type: str = Field(min_length=1)
     description: str = Field(min_length=1)
+    query_id: str | None = Field(default=None, min_length=1)
+    observation: dict[str, JsonValue] = Field(default_factory=dict)
 
 
 class HypothesisState(BaseModel):
