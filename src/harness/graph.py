@@ -269,7 +269,10 @@ class HarnessGraph:
 
         self._ensure_incident_state(state)
         metadata = resume or ResumeMetadata(
-            resume_action=resume_action_for_status(state.status)
+            resume_action=resume_action_for_status(
+                state.status,
+                plan_persisted=bool(state.plan),
+            )
         )
         try:
             validate_resume_metadata(state, metadata)
@@ -667,8 +670,12 @@ class HarnessGraph:
 
         if not isinstance(proposal, Mapping) or not proposal:
             raise self._error(state, IncidentStatus.FIX_PROPOSED, "fix proposal must be a non-empty mapping")
-        self.transition(state, IncidentStatus.FIX_PROPOSED, reason=reason)
-        state.fix_proposal = dict(proposal)
+        self._transition(
+            state,
+            IncidentStatus.FIX_PROPOSED,
+            reason=reason,
+            before_commit=lambda: setattr(state, "fix_proposal", dict(proposal)),
+        )
         return self.transition(state, IncidentStatus.AWAITING_APPROVAL, reason=reason)
 
     def record_approval(
@@ -959,11 +966,19 @@ class HarnessGraph:
                 raise CheckpointError(
                     "checkpoint-enabled graph requires alert.incident_id"
                 )
-            return ResumeMetadata(resume_action=resume_action_for_status(state.status))
+            return ResumeMetadata(
+                resume_action=resume_action_for_status(
+                    state.status,
+                    plan_persisted=bool(state.plan),
+                )
+            )
         existing = self._resume_metadata.get(incident_id)
         if existing is None:
             existing = ResumeMetadata(
-                resume_action=resume_action_for_status(state.status)
+                resume_action=resume_action_for_status(
+                    state.status,
+                    plan_persisted=bool(state.plan),
+                )
             )
             self._resume_metadata[incident_id] = existing
         return existing
@@ -972,7 +987,10 @@ class HarnessGraph:
         if self.checkpoint_manager is None:
             return
         metadata = self._resume_metadata_for(state)
-        metadata.resume_action = resume_action_for_status(state.status)
+        metadata.resume_action = resume_action_for_status(
+            state.status,
+            plan_persisted=bool(state.plan),
+        )
         self.checkpoint_manager.save(state, reason=reason, resume=metadata)
 
     def _validate_execution_step(

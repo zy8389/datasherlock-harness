@@ -61,6 +61,9 @@ class ResumeIntegrityError(ResumeError):
 
 
 class ResumeAction(StrEnum):
+    CONTINUE_TRIAGE = "CONTINUE_TRIAGE"
+    CONTINUE_PLANNING = "CONTINUE_PLANNING"
+    ENTER_EXECUTING = "ENTER_EXECUTING"
     EXECUTE_NEXT_TOOL = "EXECUTE_NEXT_TOOL"
     CONTINUE_VALIDATION = "CONTINUE_VALIDATION"
     CONTINUE_HYPOTHESIS_TESTING = "CONTINUE_HYPOTHESIS_TESTING"
@@ -242,6 +245,8 @@ class CheckpointStore(Protocol):
 
     def load_latest_valid(self, incident_id: str) -> CheckpointEnvelope: ...
 
+    def next_sequence(self, incident_id: str) -> int: ...
+
 
 class FileCheckpointStore:
     """Atomic JSON-file checkpoint store with incident isolation."""
@@ -293,6 +298,16 @@ class FileCheckpointStore:
         checkpoints = tuple(self._read(path) for path in paths)
         return tuple(sorted(checkpoints, key=lambda item: (item.sequence, item.created_at, item.checkpoint_id)))
 
+    def next_sequence(self, incident_id: str) -> int:
+        """Return the next filename sequence without parsing checkpoint JSON."""
+
+        paths = self._incident_dir(incident_id).glob("*.json")
+        max_sequence = max(
+            (self._sequence_from_filename(path) for path in paths),
+            default=0,
+        )
+        return max_sequence + 1
+
     def load_latest(self, incident_id: str) -> CheckpointEnvelope:
         return self.load_latest_valid(incident_id)
 
@@ -304,7 +319,9 @@ class FileCheckpointStore:
         for path in paths:
             try:
                 return self._read(path)
-            except CheckpointError as exc:
+            except CheckpointVersionError:
+                raise
+            except CheckpointIntegrityError as exc:
                 errors.append(exc)
         raise errors[-1] if errors else CheckpointNotFoundError(
             f"no valid checkpoint exists for incident: {incident_id}"
@@ -338,8 +355,12 @@ class FileCheckpointStore:
 
     @staticmethod
     def _path_sort_key(path: Path) -> tuple[int, str]:
+        return (FileCheckpointStore._sequence_from_filename(path), path.name)
+
+    @staticmethod
+    def _sequence_from_filename(path: Path) -> int:
         match = re.match(r"^(\d+)-", path.name)
-        return (int(match.group(1)) if match else -1, path.name)
+        return int(match.group(1)) if match else -1
 
 
 class CheckpointManager:
@@ -356,11 +377,13 @@ class CheckpointManager:
         resume: ResumeMetadata | None = None,
     ) -> CheckpointEnvelope:
         metadata = resume or ResumeMetadata(
-            resume_action=resume_action_for_status(state.status)
+            resume_action=resume_action_for_status(
+                state.status,
+                plan_persisted=bool(state.plan),
+            )
         )
         incident_id = _incident_id_from_state(state)
-        existing = self.store.list(incident_id)
-        sequence = max((checkpoint.sequence for checkpoint in existing), default=0) + 1
+        sequence = self.store.next_sequence(incident_id)
         checkpoint = CheckpointEnvelope.create(
             state,
             reason=reason,
@@ -505,7 +528,15 @@ def build_resume_plan(state: IncidentState, resume: ResumeMetadata) -> ResumePla
             terminal=False,
             reason="all planned tools are complete",
         )
-    if state.status is IncidentStatus.VALIDATING:
+    if state.status in {IncidentStatus.RECEIVED, IncidentStatus.TRIAGE}:
+        action = ResumeAction.CONTINUE_TRIAGE
+    elif state.status is IncidentStatus.PLANNING:
+        action = (
+            ResumeAction.ENTER_EXECUTING
+            if state.plan
+            else ResumeAction.CONTINUE_PLANNING
+        )
+    elif state.status is IncidentStatus.VALIDATING:
         action = ResumeAction.CONTINUE_VALIDATION
     elif state.status is IncidentStatus.HYPOTHESIS_TESTING:
         action = ResumeAction.CONTINUE_HYPOTHESIS_TESTING
@@ -519,9 +550,21 @@ def build_resume_plan(state: IncidentState, resume: ResumeMetadata) -> ResumePla
     )
 
 
-def resume_action_for_status(status: IncidentStatus) -> ResumeAction:
+def resume_action_for_status(
+    status: IncidentStatus,
+    *,
+    plan_persisted: bool = False,
+) -> ResumeAction:
     if status.is_terminal:
         return ResumeAction.TERMINAL
+    if status in {IncidentStatus.RECEIVED, IncidentStatus.TRIAGE}:
+        return ResumeAction.CONTINUE_TRIAGE
+    if status is IncidentStatus.PLANNING:
+        return (
+            ResumeAction.ENTER_EXECUTING
+            if plan_persisted
+            else ResumeAction.CONTINUE_PLANNING
+        )
     if status is IncidentStatus.EXECUTING:
         return ResumeAction.EXECUTE_NEXT_TOOL
     if status is IncidentStatus.VALIDATING:

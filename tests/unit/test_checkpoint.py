@@ -174,6 +174,45 @@ def test_latest_checkpoint_is_deterministic_and_incidents_are_isolated(tmp_path)
     assert store.list("INC-B")[0].incident_id == "INC-B"
 
 
+def test_recovery_can_continue_saving_after_newer_corrupt_checkpoint(tmp_path) -> None:
+    store = FileCheckpointStore(tmp_path)
+    manager = CheckpointManager(store)
+    cp1 = manager.save(_state(status=IncidentStatus.TRIAGE), reason="triage")
+    cp2 = manager.save(_state(status=IncidentStatus.PLANNING), reason="planning")
+    cp2_path = next(
+        path for path in tmp_path.rglob("*.json") if cp2.checkpoint_id in path.name
+    )
+    cp2_path.write_text("{\"schema_version\": 1,", encoding="utf-8")
+
+    restored = manager.restore_latest("INC-CP-001")
+    cp3 = manager.save(
+        restored.state.model_copy(update={"status": IncidentStatus.EXECUTING}),
+        reason="continued after recovery",
+    )
+
+    assert restored.checkpoint_id == cp1.checkpoint_id
+    assert cp3.sequence == 3
+    assert store.load_latest_valid("INC-CP-001").checkpoint_id == cp3.checkpoint_id
+    with pytest.raises(CheckpointIntegrityError):
+        store.load(cp2.checkpoint_id)
+
+
+def test_latest_valid_fails_closed_on_newer_unsupported_checkpoint_version(tmp_path) -> None:
+    store = FileCheckpointStore(tmp_path)
+    manager = CheckpointManager(store)
+    manager.save(_state(status=IncidentStatus.TRIAGE), reason="triage")
+    cp2 = manager.save(_state(status=IncidentStatus.PLANNING), reason="future")
+    cp2_path = next(
+        path for path in tmp_path.rglob("*.json") if cp2.checkpoint_id in path.name
+    )
+    payload = json.loads(cp2_path.read_text(encoding="utf-8"))
+    payload["schema_version"] = 999
+    cp2_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(CheckpointVersionError, match="unsupported checkpoint schema"):
+        store.load_latest_valid("INC-CP-001")
+
+
 def test_unsupported_version_is_rejected(tmp_path) -> None:
     store = FileCheckpointStore(tmp_path)
     checkpoint = CheckpointManager(store).save(_state(), reason="versioned")
@@ -254,3 +293,44 @@ def test_resume_plan_skips_completed_steps_and_handles_terminal_state() -> None:
     terminal_plan = build_resume_plan(terminal_state, terminal_resume)
     assert terminal_plan.action is ResumeAction.TERMINAL
     assert terminal_plan.terminal is True
+
+
+def test_early_stage_resume_actions_are_explicit(tmp_path) -> None:
+    store = FileCheckpointStore(tmp_path)
+    manager = CheckpointManager(store)
+
+    triage = _state(status=IncidentStatus.TRIAGE)
+    triage_checkpoint = manager.save(triage, reason="triage")
+    triage_restored = manager.restore(triage_checkpoint)
+    assert triage_restored.resume.resume_action is ResumeAction.CONTINUE_TRIAGE
+    assert manager.resume_plan(
+        triage_restored.state,
+        triage_restored.resume,
+    ).action is ResumeAction.CONTINUE_TRIAGE
+
+    planning_without_plan = _state(status=IncidentStatus.PLANNING)
+    planning_without_plan.plan = []
+    planning_without_plan.planner_metadata = None
+    planning_checkpoint = manager.save(
+        planning_without_plan,
+        reason="planning without plan",
+    )
+    planning_restored = manager.restore(planning_checkpoint)
+    assert planning_restored.resume.resume_action is ResumeAction.CONTINUE_PLANNING
+    assert manager.resume_plan(
+        planning_restored.state,
+        planning_restored.resume,
+    ).action is ResumeAction.CONTINUE_PLANNING
+
+    planning_with_plan = _state(status=IncidentStatus.PLANNING)
+    planning_with_plan.planner_metadata = {"fallback_used": False}
+    persisted_checkpoint = manager.save(
+        planning_with_plan,
+        reason="planning with persisted plan",
+    )
+    persisted_restored = manager.restore(persisted_checkpoint)
+    assert persisted_restored.resume.resume_action is ResumeAction.ENTER_EXECUTING
+    assert manager.resume_plan(
+        persisted_restored.state,
+        persisted_restored.resume,
+    ).action is ResumeAction.ENTER_EXECUTING

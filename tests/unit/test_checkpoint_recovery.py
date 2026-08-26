@@ -408,6 +408,66 @@ def test_restart_preserves_explicit_retry_replay_for_completed_step(tmp_path) ->
     assert restored.status is IncidentStatus.VALIDATING
 
 
+def test_persisted_planning_checkpoint_enters_execution_without_replanning(tmp_path) -> None:
+    plan = _plan(
+        [_step("S01", "sql_query", {"sql": "SELECT 1"})],
+        incident_id="INC-PLANNING-RECOVERY",
+    )
+    state = IncidentState(
+        alert=_alert("INC-PLANNING-RECOVERY"),
+        plan=[step.model_dump(mode="json") for step in plan.steps],
+        planner_metadata={"fallback_used": False},
+        status=IncidentStatus.PLANNING,
+    )
+    manager = _manager(tmp_path)
+    manager.save(state, reason="planner output persisted")
+
+    planner = _CountingPlanner(plan)
+    graph = HarnessGraph(planner=planner, checkpoint_manager=manager)
+    restored, resume = graph.resume_latest("INC-PLANNING-RECOVERY")
+
+    assert resume.action is ResumeAction.ENTER_EXECUTING
+    assert planner.calls == 0
+    assert restored.plan == state.plan
+    graph.transition(restored, IncidentStatus.EXECUTING)
+    assert restored.status is IncidentStatus.EXECUTING
+    assert planner.calls == 0
+
+
+def test_fix_proposal_is_checkpointed_before_approval_transition(tmp_path) -> None:
+    proposal = {
+        "repair_type": "backfill_partition",
+        "target": "events/2026-08-25",
+    }
+    store = FileCheckpointStore(tmp_path / "checkpoints")
+    manager = CheckpointManager(store)
+    graph = HarnessGraph(checkpoint_manager=manager)
+    state = IncidentState(
+        alert=_alert("INC-FIX-RECOVERY"),
+        root_cause={"hypothesis_id": "H01", "confidence": 0.9},
+        status=IncidentStatus.ROOT_CAUSE_FOUND,
+    )
+
+    graph.propose_fix(state, proposal)
+
+    fix_checkpoint = next(
+        checkpoint
+        for checkpoint in store.list("INC-FIX-RECOVERY")
+        if checkpoint.state.status is IncidentStatus.FIX_PROPOSED
+    )
+    assert fix_checkpoint.state.fix_proposal == proposal
+
+    restored_graph = HarnessGraph(checkpoint_manager=manager)
+    restored = manager.restore(fix_checkpoint)
+    resume = restored_graph.restore_runtime(restored.state, restored.resume)
+    assert restored.state.status is IncidentStatus.FIX_PROPOSED
+    assert restored.state.fix_proposal == proposal
+    assert resume.action is ResumeAction.CONTINUE_POST_ROOT_CAUSE_FLOW
+
+    restored_graph.transition(restored.state, IncidentStatus.AWAITING_APPROVAL)
+    assert restored.state.status is IncidentStatus.AWAITING_APPROVAL
+
+
 def test_hypothesis_manager_rehydrates_and_authoritatively_validates(tmp_path) -> None:
     initial_manager = HypothesisManager()
     hypothesis = initial_manager.create_hypothesis(
