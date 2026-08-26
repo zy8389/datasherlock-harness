@@ -98,7 +98,9 @@ class ToolExecutor:
         self.registry = registry or build_default_tool_registry()
         self.sql_execution = sql_execution
         self.data_quality_execution = dict(
-            data_quality_execution or DEFAULT_DATA_QUALITY_EXECUTORS
+            DEFAULT_DATA_QUALITY_EXECUTORS
+            if data_quality_execution is None
+            else data_quality_execution
         )
         self.audit_path = audit_path
 

@@ -202,6 +202,72 @@ def test_executor_rejects_data_quality_contract_errors_before_execution() -> Non
     assert result.result is None
 
 
+def test_executor_empty_data_quality_mapping_disables_all_quality_adapters() -> None:
+    result = ToolExecutor(
+        "unused.duckdb",
+        data_quality_execution={},
+    ).execute_step(
+        _quality_step(
+            "check_null_rate",
+            {"table": "events", "column": "user_id"},
+        )
+    )
+
+    assert result.success is False
+    assert result.error == {
+        "type": "unsupported_tool",
+        "message": "no execution adapter is registered for tool: check_null_rate",
+    }
+
+
+def test_executor_custom_data_quality_mapping_only_enables_injected_adapters() -> None:
+    calls: list[tuple[str, str, str]] = []
+
+    def fake_check_null_rate(
+        database_path: str,
+        table: str,
+        column: str,
+        **_: object,
+    ) -> DataQualityCheckResult:
+        calls.append((database_path, table, column))
+        return DataQualityCheckResult(
+            check_name="check_null_rate",
+            status="success",
+            passed=True,
+            table=table,
+            column=column,
+            observed_value=0.0,
+            threshold=0.01,
+            query_id="Q-CUSTOM-001",
+        )
+
+    executor = ToolExecutor(
+        "injected.duckdb",
+        data_quality_execution={"check_null_rate": fake_check_null_rate},
+    )
+    enabled = executor.execute_step(
+        _quality_step(
+            "check_null_rate",
+            {"table": "events", "column": "user_id"},
+        )
+    )
+    disabled = executor.execute_step(
+        _quality_step(
+            "check_duplicate_rate",
+            {"table": "events", "keys": ["event_id"]},
+        )
+    )
+
+    assert enabled.success is True
+    assert enabled.query_id == "Q-CUSTOM-001"
+    assert calls == [("injected.duckdb", "events", "user_id")]
+    assert disabled.success is False
+    assert disabled.error == {
+        "type": "unsupported_tool",
+        "message": "no execution adapter is registered for tool: check_duplicate_rate",
+    }
+
+
 def test_executor_returns_structured_data_quality_tool_failure(tmp_path) -> None:
     database_path = tmp_path / "missing-schema-table.duckdb"
     with duckdb.connect(str(database_path)):

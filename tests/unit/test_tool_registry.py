@@ -130,6 +130,33 @@ def test_data_quality_registry_rejects_wrong_types_and_unknown_arguments() -> No
         )
 
 
+@pytest.mark.parametrize(
+    "keys",
+    [
+        [["event_id"]],
+        [{"column": "event_id"}],
+    ],
+)
+def test_duplicate_rate_rejects_unhashable_items_as_tool_arguments(
+    keys: list[object],
+) -> None:
+    registry = build_default_tool_registry()
+
+    with pytest.raises(ToolArgumentsError, match=r"arguments\.keys\[0\]"):
+        registry.validate_arguments(
+            "check_duplicate_rate",
+            {"table": "events", "keys": keys},
+        )
+
+
+def test_duplicate_rate_rejects_duplicate_string_keys_as_tool_arguments() -> None:
+    with pytest.raises(ToolArgumentsError, match="unique"):
+        build_default_tool_registry().validate_arguments(
+            "check_duplicate_rate",
+            {"table": "events", "keys": ["event_id", "event_id"]},
+        )
+
+
 def test_registry_validates_required_and_unknown_arguments() -> None:
     registry = build_default_tool_registry()
 

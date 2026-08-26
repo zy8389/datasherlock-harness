@@ -133,12 +133,14 @@ def _validate_json_schema(value: object, schema: Mapping[str, Any], *, path: str
         minimum = schema.get("minItems")
         if isinstance(minimum, int) and len(value) < minimum:
             raise ToolArgumentsError(f"{path} must contain at least {minimum} item(s)")
-        if schema.get("uniqueItems") is True and len(value) != len(set(value)):
-            raise ToolArgumentsError(f"{path} must contain unique item(s)")
         item_schema = schema.get("items")
         if isinstance(item_schema, Mapping):
             for index, item in enumerate(value):
                 _validate_json_schema(item, item_schema, path=f"{path}[{index}]")
+        if schema.get("uniqueItems") is True:
+            for index, item in enumerate(value):
+                if any(item == previous for previous in value[:index]):
+                    raise ToolArgumentsError(f"{path} must contain unique item(s)")
         return
 
     if expected_type == "boolean":
