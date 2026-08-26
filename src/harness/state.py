@@ -7,6 +7,8 @@ from typing import Final, TypeAlias, cast
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from harness.guardrails import GuardrailEvent, GuardrailUsage
+
 JsonObject: TypeAlias = dict[str, JsonValue]
 
 
@@ -67,6 +69,8 @@ class IncidentState(BaseModel):
     retry_count: int = Field(default=0, ge=0)
     token_cost: float = Field(default=0.0, ge=0)
     current_conclusion: str | None = None
+    guardrail_usage: GuardrailUsage = Field(default_factory=GuardrailUsage)
+    guardrail_events: list[GuardrailEvent] = Field(default_factory=list)
 
     def to_dict(self) -> JsonObject:
         """Return a detached, JSON-compatible checkpoint payload."""
