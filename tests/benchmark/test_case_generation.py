@@ -167,6 +167,28 @@ def test_generated_cases_match_canonical_ground_truth(
             assert len(sources) >= 2
 
 
+def test_variant_parameters_preserve_canonical_evidence_subjects(
+    generated_manifests: list[object],
+) -> None:
+    for manifest in generated_manifests:
+        evidence_text = " ".join(
+            [
+                *manifest.expected_evidence,
+                *(path.signal for path in manifest.evidence_paths),
+            ]
+        ).lower()
+        if manifest.fault_id == "F01":
+            assert manifest.injection.device_type == "android"
+            assert "android" in evidence_text
+        if manifest.fault_id == "F04":
+            assert manifest.injection.device_type == "android"
+            assert "android" in evidence_text
+        if manifest.fault_id == "F05":
+            assert manifest.injection.region == "CN"
+            assert manifest.injection.to_value == "Asia/Shanghai"
+            assert "cn" in evidence_text
+
+
 def test_generation_is_deterministic_and_matches_committed_manifests(
     generated_manifests: list[object],
 ) -> None:

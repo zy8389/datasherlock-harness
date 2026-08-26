@@ -20,21 +20,21 @@ injection:
   strategy: delay_android_events_one_day
   metric_date: '2026-01-26'
   ratio: 0.6
-  device_type: ios
+  device_type: android
   shift_days: 1
 original_alert:
   incident_id: INC-F04-005
   metric: daily_active_users
   observed_at: '2026-01-26'
   expected_value: 110.0
-  observed_value: 91.0
-  change_rate: -0.17272727
+  observed_value: 94.0
+  change_rate: -0.14545455
   severity: medium
 expected_direction: decrease
 effect_size_type: relative
 minimum_effect_size: 0.1
-actual_effect: -0.17272727
-affected_row_count: 63
+actual_effect: -0.14545455
+affected_row_count: 82
 severity: medium
 expected_evidence:
 - target-day Android business events decrease and following-day events rebound

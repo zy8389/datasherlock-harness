@@ -9,8 +9,8 @@ variants:
   - {source_seed_case_id: F01-001, variant_index: 1, seed: 1001, metric_date: '2026-01-30', injection_overrides: {}}
   - {source_seed_case_id: F01-001, variant_index: 2, seed: 1002, metric_date: '2026-01-29', injection_overrides: {}}
   - {source_seed_case_id: F01-001, variant_index: 3, seed: 1003, metric_date: '2026-01-28', injection_overrides: {}}
-  - {source_seed_case_id: F01-001, variant_index: 4, seed: 1004, metric_date: '2026-01-27', injection_overrides: {device_type: ios}}
-  - {source_seed_case_id: F01-001, variant_index: 5, seed: 1005, metric_date: '2026-01-26', injection_overrides: {device_type: web}}
+  - {source_seed_case_id: F01-001, variant_index: 4, seed: 1004, metric_date: '2026-01-27', injection_overrides: {}}
+  - {source_seed_case_id: F01-001, variant_index: 5, seed: 1005, metric_date: '2026-01-26', injection_overrides: {}}
 
   - {source_seed_case_id: F02-001, variant_index: 1, seed: 2001, metric_date: '2026-01-30', injection_overrides: {}}
   - {source_seed_case_id: F02-001, variant_index: 2, seed: 2002, metric_date: '2026-01-29', injection_overrides: {}}
@@ -21,19 +21,19 @@ variants:
   - {source_seed_case_id: F03-001, variant_index: 1, seed: 3001, metric_date: '2026-01-30', injection_overrides: {}}
   - {source_seed_case_id: F03-001, variant_index: 2, seed: 3002, metric_date: '2026-01-29', injection_overrides: {}}
   - {source_seed_case_id: F03-001, variant_index: 3, seed: 3003, metric_date: '2026-01-28', injection_overrides: {ratio: 0.35}}
-  - {source_seed_case_id: F03-001, variant_index: 4, seed: 3004, metric_date: '2026-01-27', injection_overrides: {device_type: ios}}
+  - {source_seed_case_id: F03-001, variant_index: 4, seed: 3004, metric_date: '2026-01-27', injection_overrides: {}}
   - {source_seed_case_id: F03-001, variant_index: 5, seed: 3005, metric_date: '2026-01-26', injection_overrides: {ratio: 0.50}}
 
   - {source_seed_case_id: F04-001, variant_index: 1, seed: 4001, metric_date: '2026-01-30', injection_overrides: {}}
   - {source_seed_case_id: F04-001, variant_index: 2, seed: 4002, metric_date: '2026-01-29', injection_overrides: {}}
   - {source_seed_case_id: F04-001, variant_index: 3, seed: 4003, metric_date: '2026-01-28', injection_overrides: {ratio: 0.80}}
   - {source_seed_case_id: F04-001, variant_index: 4, seed: 4004, metric_date: '2026-01-27', injection_overrides: {ratio: 0.45}}
-  - {source_seed_case_id: F04-001, variant_index: 5, seed: 4005, metric_date: '2026-01-26', injection_overrides: {device_type: ios, ratio: 0.60}}
+  - {source_seed_case_id: F04-001, variant_index: 5, seed: 4005, metric_date: '2026-01-26', injection_overrides: {ratio: 0.60}}
 
   - {source_seed_case_id: F05-001, variant_index: 1, seed: 5001, metric_date: '2026-01-30', injection_overrides: {}}
   - {source_seed_case_id: F05-001, variant_index: 2, seed: 5002, metric_date: '2026-01-29', injection_overrides: {}}
   - {source_seed_case_id: F05-001, variant_index: 3, seed: 5003, metric_date: '2026-01-28', injection_overrides: {shift_hours: 6}}
-  - {source_seed_case_id: F05-001, variant_index: 4, seed: 5004, metric_date: '2026-01-27', injection_overrides: {region: US}}
+  - {source_seed_case_id: F05-001, variant_index: 4, seed: 5004, metric_date: '2026-01-27', injection_overrides: {shift_hours: 7}}
   - {source_seed_case_id: F05-001, variant_index: 5, seed: 5005, metric_date: '2026-01-26', injection_overrides: {shift_hours: 9}}
 
   - {source_seed_case_id: F06-001, variant_index: 1, seed: 6001, metric_date: '2026-01-30', injection_overrides: {}}

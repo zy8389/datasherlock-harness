@@ -19,20 +19,20 @@ affected_assets:
 injection:
   strategy: remove_android_partition
   metric_date: '2026-01-27'
-  device_type: ios
+  device_type: android
 original_alert:
   incident_id: INC-F01-004
   metric: daily_active_users
   observed_at: '2026-01-27'
   expected_value: 103.0
-  observed_value: 80.0
-  change_rate: -0.22330097
+  observed_value: 74.0
+  change_rate: -0.2815534
   severity: high
 expected_direction: decrease
 effect_size_type: relative
 minimum_effect_size: 0.2
-actual_effect: -0.22330097
-affected_row_count: 75
+actual_effect: -0.2815534
+affected_row_count: 106
 severity: high
 expected_evidence:
 - target-date Android business events are absent

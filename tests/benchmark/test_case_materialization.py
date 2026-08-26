@@ -6,11 +6,20 @@ import pandas as pd
 import pytest
 
 from agents.planner import Alert
-from benchmark.case_generator import load_case_manifests, materialize_case
+from benchmark.case_generator import (
+    generate_case_manifest,
+    load_case_manifests,
+    load_variant_config,
+    materialize_case,
+)
 from benchmark.cases import concrete_case_from_manifest
 from benchmark.evaluation import validate_effect
 from benchmark.fault_injector import validate_expected_evidence
-from config.faults import INDEPENDENT_METADATA_EVIDENCE_FAULT_IDS
+from config.faults import (
+    INDEPENDENT_METADATA_EVIDENCE_FAULT_IDS,
+    load_fault_catalog,
+    load_ground_truth_cases,
+)
 from data.generator import generate_dataset
 
 ROOT = Path(__file__).parents[2]
@@ -124,12 +133,36 @@ def test_repeated_materialization_is_stable(
     baseline: dict[str, pd.DataFrame],
 ) -> None:
     manifest = next(item for item in manifests if item.case_id == case_id)
-    first = materialize_case(manifest, baseline_tables=baseline)
-    second = materialize_case(manifest, baseline_tables=baseline)
+    config = load_variant_config(CASES_DIRECTORY / "variants.yaml")
+    seed_cases = {
+        case.case_id: case
+        for case in load_ground_truth_cases(ROOT / "benchmark" / "ground_truth")
+    }
+    variant = next(item for item in config.variants if item.case_id == case_id)
+    seed_case = seed_cases[manifest.source_seed_case_id]
+    first_manifest = generate_case_manifest(
+        seed_case,
+        variant,
+        baseline_config=config.baseline,
+        baseline_tables=baseline,
+        catalog=load_fault_catalog(),
+    )
+    second_manifest = generate_case_manifest(
+        seed_case,
+        variant,
+        baseline_config=config.baseline,
+        baseline_tables=baseline,
+        catalog=load_fault_catalog(),
+    )
+
+    assert first_manifest.original_alert == second_manifest.original_alert
+    assert first_manifest.actual_effect == second_manifest.actual_effect
+    assert first_manifest.affected_row_count == second_manifest.affected_row_count
+    assert first_manifest.case_id == second_manifest.case_id == case_id
+
+    first = materialize_case(first_manifest, baseline_tables=baseline)
+    second = materialize_case(second_manifest, baseline_tables=baseline)
 
     assert _tables_digest(first.tables) == _tables_digest(second.tables)
     assert first.actual_effect == second.actual_effect
     assert first.case_id == second.case_id == case_id
-    assert manifest.original_alert.model_dump(mode="json") == manifest.original_alert.model_dump(
-        mode="json"
-    )
