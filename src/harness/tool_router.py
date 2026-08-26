@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from harness.root_cause import DiagnosticEvidenceBinding
 from harness.sql_investigation import ValidatedSqlExecution, execute_validated_sql
 from harness.state import IncidentState
 from tools.registry import ToolRegistry, build_default_tool_registry
@@ -28,6 +29,7 @@ class InvestigationToolRouter:
         metric_id: str | None = None,
         expectation: SqlResultExpectation | None = None,
         finding: str | None = None,
+        diagnostic_binding: DiagnosticEvidenceBinding | None = None,
         incident_id: str | None = None,
         trace_id: str | None = None,
         audit_path: str | Path | None = None,
@@ -55,6 +57,7 @@ class InvestigationToolRouter:
             metric_id=metric_id,
             expectation=expectation,
             finding=finding,
+            diagnostic_binding=diagnostic_binding,
             incident_id=incident_id,
             trace_id=trace_id,
             audit_path=audit_path,

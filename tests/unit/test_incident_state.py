@@ -42,8 +42,6 @@ def test_incident_state_json_round_trip_preserves_checkpoint() -> None:
             "affected_asset": "events_mobile_20260812",
             "confidence": 0.94,
         },
-        approval={"status": "approved", "reviewer": "data-engineer"},
-        repair_result={"action": "rerun_partition", "status": "succeeded"},
         status=IncidentStatus.RESOLVED,
         final_status=IncidentStatus.RESOLVED,
         rejected_hypotheses=[{"hypothesis_id": "H02", "reason": "data is fresh"}],

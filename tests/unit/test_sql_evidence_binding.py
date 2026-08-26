@@ -1,6 +1,7 @@
 import pytest
 
 from harness.evidence import bind_sql_validation_to_incident
+from harness.root_cause import DiagnosticEvidenceBinding
 from harness.state import IncidentState
 from tools.sql_runner import SqlExecutionResponse
 from validators.sql_result import SqlResultExpectation, validate_sql_result
@@ -69,6 +70,29 @@ def test_unusable_sql_result_is_traced_but_not_promoted_to_evidence() -> None:
     assert len(state.tool_trace) == 1
     assert state.tool_trace[0]["validation"]["reason"] == "empty_result"
     assert state.evidence == []
+
+
+def test_diagnostic_binding_is_persisted_with_its_validated_tool_output() -> None:
+    state = IncidentState()
+    response = _response()
+    validation = validate_sql_result(response)
+
+    bind_sql_validation_to_incident(
+        state,
+        response,
+        validation,
+        diagnostic_binding=DiagnosticEvidenceBinding(
+            root_cause_type="missing_partition",
+            source_type="business_data",
+            asset="events",
+            repair_context={"partition_value": "android"},
+        ),
+    )
+
+    assert state.evidence[0]["query_id"] == response.query_id
+    assert state.evidence[0]["tool_trace_id"] == "sql:query-123"
+    assert state.evidence[0]["root_cause_type"] == "missing_partition"
+    assert state.evidence[0]["source_type"] == "business_data"
 
 
 def test_binding_same_query_is_idempotent_after_incident_replay() -> None:

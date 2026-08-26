@@ -12,6 +12,7 @@ from config.metrics import (
     load_metrics_config,
 )
 from harness.evidence import bind_sql_validation_to_incident
+from harness.root_cause import DiagnosticEvidenceBinding
 from harness.state import IncidentState
 from tools.sql_runner import SqlExecutionResponse, execute_readonly_sql
 from validators.sql_result import (
@@ -88,6 +89,7 @@ def execute_validated_sql(
     metrics_path: str | Path = DEFAULT_METRICS_PATH,
     expectation: SqlResultExpectation | None = None,
     finding: str | None = None,
+    diagnostic_binding: DiagnosticEvidenceBinding | None = None,
     incident_id: str | None = None,
     trace_id: str | None = None,
     audit_path: str | Path | None = None,
@@ -131,7 +133,13 @@ def execute_validated_sql(
             audit_path=audit_path,
             timeout_seconds=timeout_seconds,
         )
-    bind_sql_validation_to_incident(state, response, validation, finding=finding)
+    bind_sql_validation_to_incident(
+        state,
+        response,
+        validation,
+        finding=finding,
+        diagnostic_binding=diagnostic_binding,
+    )
     return ValidatedSqlExecution(response=response, validation=validation)
 
 

@@ -8,8 +8,10 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from api.health import _check_duckdb
+from api.incidents import create_incident_router
 
 app = FastAPI(title="DataSherlock Harness API", version="0.1.0")
+app.include_router(create_incident_router())
 
 
 def _check_postgres() -> str:

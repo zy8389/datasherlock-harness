@@ -20,6 +20,8 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-datasherlock}
       POSTGRES_USER: ${POSTGRES_USER:-datasherlock}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      INCIDENT_CHECKPOINT_BACKEND: ${INCIDENT_CHECKPOINT_BACKEND:-postgres}
+      INCIDENT_AUDIT_RETENTION_DAYS: ${INCIDENT_AUDIT_RETENTION_DAYS:-365}
     ports:
       - "${API_PORT:-8000}:8000"
     volumes:
@@ -46,11 +48,63 @@ services:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
+
+  postgres-backup:
+    image: postgres:16-alpine
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB:-datasherlock}
+      PGUSER: ${POSTGRES_USER:-datasherlock}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      BACKUP_RETENTION_DAYS: ${POSTGRES_BACKUP_RETENTION_DAYS:-30}
+      BACKUP_INTERVAL_SECONDS: ${POSTGRES_BACKUP_INTERVAL_SECONDS:-86400}
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        while true; do
+          timestamp=$$(date -u +%Y%m%dT%H%M%SZ)
+          pg_dump --format=custom --file=/backups/datasherlock-$$timestamp.dump
+          find /backups -type f -name '*.dump' -mtime +$$BACKUP_RETENTION_DAYS -delete
+          sleep $$BACKUP_INTERVAL_SECONDS
+        done
+    volumes:
+      - postgres_backups:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  audit-retention:
+    image: postgres:16-alpine
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB:-datasherlock}
+      PGUSER: ${POSTGRES_USER:-datasherlock}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      INCIDENT_AUDIT_RETENTION_DAYS: ${INCIDENT_AUDIT_RETENTION_DAYS:-365}
+      AUDIT_RETENTION_INTERVAL_SECONDS: ${AUDIT_RETENTION_INTERVAL_SECONDS:-86400}
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        while true; do
+          psql --set=ON_ERROR_STOP=1 --command \
+            "DELETE FROM incident_audit_events WHERE occurred_at < NOW() - make_interval(days => $$INCIDENT_AUDIT_RETENTION_DAYS::integer)"
+          sleep $$AUDIT_RETENTION_INTERVAL_SECONDS
+        done
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
 
   frontend:
     build:
@@ -74,3 +128,4 @@ services:
 volumes:
   duckdb_data:
   postgres_data:
+  postgres_backups:

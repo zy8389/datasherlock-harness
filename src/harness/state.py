@@ -7,6 +7,13 @@ from typing import Final, TypeAlias, cast
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from harness.repair import (
+    ApprovalDecision,
+    PostValidationResult,
+    RepairProposal,
+    SandboxRun,
+)
+
 JsonObject: TypeAlias = dict[str, JsonValue]
 
 
@@ -57,8 +64,10 @@ class IncidentState(BaseModel):
     evidence: list[JsonObject] = Field(default_factory=list)
     tool_trace: list[JsonObject] = Field(default_factory=list)
     root_cause: JsonObject | None = None
-    approval: JsonObject | None = None
-    repair_result: JsonObject | None = None
+    repair_proposal: RepairProposal | None = None
+    approval: ApprovalDecision | None = None
+    sandbox_run: SandboxRun | None = None
+    repair_result: PostValidationResult | None = None
     status: IncidentStatus = IncidentStatus.RECEIVED
     final_status: IncidentStatus | None = None
     rejected_hypotheses: list[JsonObject] = Field(default_factory=list)

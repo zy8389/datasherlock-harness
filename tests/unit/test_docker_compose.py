@@ -17,6 +17,20 @@ def test_compose_initializes_data_before_starting_api() -> None:
     assert "duckdb_data:/workspace/data" in api["volumes"]
 
 
+def test_compose_configures_postgres_checkpoint_backup_and_audit_retention() -> None:
+    compose_path = Path(__file__).parents[2] / "docker-compose.yml"
+    with compose_path.open(encoding="utf-8") as file:
+        services = yaml.safe_load(file)["services"]
+
+    assert services["api"]["environment"]["INCIDENT_CHECKPOINT_BACKEND"].endswith(
+        ":-postgres}"
+    )
+    assert "postgres-backup" in services
+    assert "audit-retention" in services
+    assert "pg_dump" in services["postgres-backup"]["command"][2]
+    assert "incident_audit_events" in services["audit-retention"]["command"][2]
+
+
 def test_docker_image_includes_canonical_config() -> None:
     project_root = Path(__file__).parents[2]
     dockerfile = (project_root / "Dockerfile").read_text(encoding="utf-8")

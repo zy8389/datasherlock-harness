@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from harness.root_cause import DiagnosticEvidenceBinding
 from harness.state import IncidentState
 from tools.sql_runner import SqlExecutionResponse
 from validators.sql_result import SqlResultValidation
@@ -13,6 +14,7 @@ def bind_sql_validation_to_incident(
     validation: SqlResultValidation,
     *,
     finding: str | None = None,
+    diagnostic_binding: DiagnosticEvidenceBinding | None = None,
 ) -> IncidentState:
     """Record a SQL validation and promote only usable results to evidence.
 
@@ -39,18 +41,26 @@ def bind_sql_validation_to_incident(
     if validation.evidence.usable and not any(
         entry.get("evidence_id") == evidence_id for entry in state.evidence
     ):
-        state.evidence.append(
-            {
-                "evidence_id": evidence_id,
-                "source_type": "sql_query",
-                "query_id": response.query_id,
-                "tool_trace_id": trace_id,
-                "finding": finding
-                or (
-                    f"SQL result {response.query_id} passed validation with "
-                    f"{response.row_count} returned row(s)."
-                ),
-                "validation": validation.evidence.model_dump(mode="json"),
-            }
-        )
+        evidence = {
+            "evidence_id": evidence_id,
+            "source_type": "sql_query",
+            "query_id": response.query_id,
+            "tool_trace_id": trace_id,
+            "finding": finding
+            or (
+                f"SQL result {response.query_id} passed validation with "
+                f"{response.row_count} returned row(s)."
+            ),
+            "validation": validation.evidence.model_dump(mode="json"),
+        }
+        if diagnostic_binding is not None:
+            evidence.update(
+                {
+                    "root_cause_type": diagnostic_binding.root_cause_type,
+                    "source_type": diagnostic_binding.source_type.value,
+                    "asset": diagnostic_binding.asset,
+                    "repair_context": diagnostic_binding.repair_context,
+                }
+            )
+        state.evidence.append(evidence)
     return state
