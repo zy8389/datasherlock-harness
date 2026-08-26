@@ -1,0 +1,46 @@
+schema_version: 1
+case_id: F01-003
+fault_id: F01
+source_seed_case_id: F01-001
+variant_index: 3
+seed: 1003
+baseline_seed: 2
+baseline_start_date: '2026-01-01'
+baseline_days: 31
+baseline_user_count: 500
+baseline_event_count: 10000
+metric_date: '2026-01-28'
+root_cause_type: missing_partition
+affected_metric: daily_active_users
+affected_assets:
+- events
+- partition_metadata
+- pipeline_runs
+injection:
+  strategy: remove_android_partition
+  metric_date: '2026-01-28'
+  device_type: android
+original_alert:
+  incident_id: INC-F01-003
+  metric: daily_active_users
+  observed_at: '2026-01-28'
+  expected_value: 104.0
+  observed_value: 68.0
+  change_rate: -0.34615385
+  severity: high
+expected_direction: decrease
+effect_size_type: relative
+minimum_effect_size: 0.2
+actual_effect: -0.34615385
+affected_row_count: 121
+severity: high
+expected_evidence:
+- target-date Android business events are absent
+- partition_metadata reports target Android partition row_count is zero
+evidence_paths:
+- source_type: business_data
+  asset: events
+  signal: target-date Android events are absent or materially reduced
+- source_type: operational_metadata
+  asset: partition_metadata
+  signal: target Android partition row_count is zero and status is missing

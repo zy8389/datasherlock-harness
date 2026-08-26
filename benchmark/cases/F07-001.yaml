@@ -1,0 +1,39 @@
+schema_version: 1
+case_id: F07-001
+fault_id: F07
+source_seed_case_id: F07-001
+variant_index: 1
+seed: 7001
+baseline_seed: 2
+baseline_start_date: '2026-01-01'
+baseline_days: 31
+baseline_user_count: 500
+baseline_event_count: 10000
+metric_date: '2026-01-30'
+root_cause_type: join_filter
+affected_metric: daily_active_users
+affected_assets:
+- events
+- subscriptions
+- metric_versions
+injection:
+  strategy: add_subscription_inner_join_to_dau
+  metric_date: '2026-01-30'
+original_alert:
+  incident_id: INC-F07-001
+  metric: daily_active_users
+  observed_at: '2026-01-30'
+  expected_value: 111.0
+  observed_value: 26.0
+  change_rate: -0.76576577
+  severity: critical
+expected_direction: decrease
+effect_size_type: relative
+minimum_effect_size: 0.01
+actual_effect: -0.76576577
+affected_row_count: 1
+severity: critical
+expected_evidence:
+- joined distinct users decrease
+- free users are disproportionately removed
+evidence_paths: []

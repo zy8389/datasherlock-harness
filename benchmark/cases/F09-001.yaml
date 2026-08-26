@@ -1,0 +1,41 @@
+schema_version: 1
+case_id: F09-001
+fault_id: F09
+source_seed_case_id: F09-001
+variant_index: 1
+seed: 9001
+baseline_seed: 2
+baseline_start_date: '2026-01-01'
+baseline_days: 31
+baseline_user_count: 500
+baseline_event_count: 10000
+metric_date: '2026-01-30'
+root_cause_type: field_drift
+affected_metric: ai_task_count
+affected_assets:
+- events
+- schema_snapshots
+injection:
+  strategy: rename_event_value
+  metric_date: '2026-01-30'
+  ratio: 0.7
+  from_value: run_ai_task
+  to_value: execute_ai_task
+original_alert:
+  incident_id: INC-F09-001
+  metric: ai_task_count
+  observed_at: '2026-01-30'
+  expected_value: 90.0
+  observed_value: 27.0
+  change_rate: -0.7
+  severity: critical
+expected_direction: decrease
+effect_size_type: relative
+minimum_effect_size: 0.1
+actual_effect: -0.7
+affected_row_count: 63
+severity: critical
+expected_evidence:
+- run_ai_task frequency decreases
+- execute_ai_task appears
+evidence_paths: []
