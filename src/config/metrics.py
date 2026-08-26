@@ -24,6 +24,54 @@ def _resolve_config_path(filename: str) -> Path:
 DEFAULT_METRICS_PATH = _resolve_config_path("metrics.yaml")
 
 
+class MetricNumericRange(BaseModel):
+    """Inclusive allowed range for a numeric metric result."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    minimum: float | None = None
+    maximum: float | None = None
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> MetricNumericRange:
+        if self.minimum is None and self.maximum is None:
+            raise ValueError("numeric range must define a minimum or maximum")
+        if (
+            self.minimum is not None
+            and self.maximum is not None
+            and self.minimum > self.maximum
+        ):
+            raise ValueError("numeric range minimum must not exceed maximum")
+        return self
+
+
+class MetricValidationPolicy(BaseModel):
+    """Result contract applied when a metric SQL query is investigated."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    expected_column_types: dict[str, str] = Field(min_length=1)
+    numeric_ranges: dict[str, MetricNumericRange] = Field(default_factory=dict)
+    max_result_rows: int = Field(gt=0)
+
+    @field_validator("expected_column_types")
+    @classmethod
+    def validate_column_types(cls, column_types: dict[str, str]) -> dict[str, str]:
+        if any(not column or not data_type for column, data_type in column_types.items()):
+            raise ValueError("expected column types must not contain blank values")
+        return column_types
+
+    @model_validator(mode="after")
+    def validate_numeric_columns(self) -> MetricValidationPolicy:
+        unknown_columns = sorted(set(self.numeric_ranges) - set(self.expected_column_types))
+        if unknown_columns:
+            raise ValueError(
+                "numeric ranges reference undeclared output column(s): "
+                + ", ".join(unknown_columns)
+            )
+        return self
+
+
 class MetricDefinition(BaseModel):
     """Validated executable definition for one metric."""
 
@@ -34,6 +82,7 @@ class MetricDefinition(BaseModel):
     description: str = Field(min_length=1)
     aggregation: str = Field(min_length=1)
     query: str = Field(min_length=1)
+    validation: MetricValidationPolicy
     unit: str = Field(min_length=1)
     formula: str | None = None
     validity: dict[str, Any] = Field(default_factory=dict)
@@ -66,6 +115,17 @@ class MetricDefinition(BaseModel):
         if len(values) != len(set(values)):
             raise ValueError("metric list values must be unique")
         return values
+
+    @model_validator(mode="after")
+    def validate_result_policy(self) -> MetricDefinition:
+        column_types = self.validation.expected_column_types
+        if "metric_date" not in column_types:
+            raise ValueError("validation must define the metric_date output column")
+        if self.id not in column_types:
+            raise ValueError("validation must define the metric output column")
+        if self.id not in self.validation.numeric_ranges:
+            raise ValueError("validation must define a numeric range for the metric")
+        return self
 
 
 class MetricsConfig(BaseModel):

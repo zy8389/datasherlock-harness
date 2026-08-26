@@ -80,6 +80,7 @@ def test_runner_returns_bounded_rows_and_query_id(database_path: Path) -> None:
     assert result.query_id
     assert result.statement_type == "SELECT"
     assert result.columns == ["value"]
+    assert result.column_types == ["BIGINT"]
     assert result.rows == [[0], [1], [2]]
     assert result.row_count == 3
     assert result.truncated is True

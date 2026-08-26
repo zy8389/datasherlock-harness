@@ -11,6 +11,14 @@ metrics:
     entity_column: user_id
     aggregation: count_distinct
     formula: COUNT(DISTINCT user_id)
+    validation:
+      expected_column_types:
+        metric_date: DATE
+        daily_active_users: BIGINT
+      numeric_ranges:
+        daily_active_users:
+          minimum: 0
+      max_result_rows: 366
     query: >-
       SELECT CAST(event_time AS DATE) AS metric_date,
       COUNT(DISTINCT user_id) AS daily_active_users
@@ -36,6 +44,14 @@ metrics:
     entity_column: user_id
     aggregation: count_distinct
     formula: COUNT(DISTINCT user_id)
+    validation:
+      expected_column_types:
+        metric_date: DATE
+        new_users: BIGINT
+      numeric_ranges:
+        new_users:
+          minimum: 0
+      max_result_rows: 366
     query: >-
       SELECT CAST(register_time AS DATE) AS metric_date,
       COUNT(DISTINCT user_id) AS new_users
@@ -76,6 +92,14 @@ metrics:
       AND subscription_status IN ('active', 'cancelled')
       AND (subscription_status != 'cancelled' OR end_time IS NOT NULL)
       AND (end_time IS NULL OR end_time > metric_date)
+    validation:
+      expected_column_types:
+        metric_date: DATE
+        paid_users: BIGINT
+      numeric_ranges:
+        paid_users:
+          minimum: 0
+      max_result_rows: 366
     query: >-
       SELECT dates.metric_date,
       COUNT(DISTINCT subscriptions.user_id) AS paid_users
@@ -110,6 +134,14 @@ metrics:
     filters:
       event_name: run_ai_task
     formula: COUNT(event_id) WHERE event_name = 'run_ai_task'
+    validation:
+      expected_column_types:
+        metric_date: DATE
+        ai_task_count: BIGINT
+      numeric_ranges:
+        ai_task_count:
+          minimum: 0
+      max_result_rows: 366
     query: >-
       SELECT CAST(event_time AS DATE) AS metric_date,
       COUNT(event_id) AS ai_task_count
@@ -138,6 +170,14 @@ metrics:
       - session_id
     aggregation: average_after_group_sum
     formula: AVG(SUM(duration_seconds) GROUP BY user_id, session_id)
+    validation:
+      expected_column_types:
+        metric_date: DATE
+        average_session_duration: DOUBLE
+      numeric_ranges:
+        average_session_duration:
+          minimum: 0
+      max_result_rows: 366
     query: >-
       SELECT metric_date,
       AVG(session_duration) AS average_session_duration
@@ -178,6 +218,15 @@ metrics:
       AND subscriptions.user_id IN (
       SELECT user_id FROM events WHERE DATE(event_time) = metric_date))
       / COUNT(DISTINCT events.user_id)
+    validation:
+      expected_column_types:
+        metric_date: DATE
+        conversion_rate: DOUBLE
+      numeric_ranges:
+        conversion_rate:
+          minimum: 0
+          maximum: 1
+      max_result_rows: 366
     query: >-
       WITH active_users AS (
       SELECT DISTINCT CAST(event_time AS DATE) AS metric_date, user_id

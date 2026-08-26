@@ -48,6 +48,7 @@ class SqlQueryResult(BaseModel):
     query_id: str
     statement_type: StatementType
     columns: list[str]
+    column_types: list[str]
     rows: list[list[Any]]
     row_count: int = Field(ge=0)
     truncated: bool
@@ -77,6 +78,7 @@ class SqlExecutionResponse(BaseModel):
     status: QueryStatus
     statement_type: StatementType | None = None
     columns: list[str] = Field(default_factory=list)
+    column_types: list[str] = Field(default_factory=list)
     rows: list[list[Any]] = Field(default_factory=list)
     row_count: int = Field(default=0, ge=0)
     truncated: bool = False
@@ -269,19 +271,24 @@ def run_readonly_sql(
             f"could not open DuckDB database: {exc}", query_id
         ) from exc
 
-    def execute() -> tuple[list[str], list[list[Any]], bool]:
+    def execute() -> tuple[list[str], list[str], list[list[Any]], bool]:
         cursor = connection.execute(sql)
         columns = [description[0] for description in cursor.description or []]
+        column_types = [
+            str(description[1]) for description in cursor.description or []
+        ]
         fetched = cursor.fetchmany(max_rows + 1)
         truncated = len(fetched) > max_rows
         rows = [list(row) for row in fetched[:max_rows]]
-        return columns, rows, truncated
+        return columns, column_types, rows, truncated
 
     try:
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(execute)
             try:
-                columns, rows, truncated = future.result(timeout=timeout_seconds)
+                columns, column_types, rows, truncated = future.result(
+                    timeout=timeout_seconds
+                )
             except FutureTimeoutError as exc:
                 connection.interrupt()
                 try:
@@ -303,6 +310,7 @@ def run_readonly_sql(
         query_id=query_id,
         statement_type=statement_type,
         columns=columns,
+        column_types=column_types,
         rows=rows,
         row_count=len(rows),
         truncated=truncated,
@@ -352,6 +360,7 @@ def execute_readonly_sql(
             status="success",
             statement_type=result.statement_type,
             columns=result.columns,
+            column_types=result.column_types,
             rows=result.rows,
             row_count=result.row_count,
             truncated=result.truncated,
