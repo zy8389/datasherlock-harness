@@ -8,10 +8,12 @@ from agents.planner import (
     Planner,
     PlannerFallbackReason,
     PlannerInput,
+    PlannerValidationError,
     _sql_for_root_cause,
     build_fallback_plan,
     build_planner_prompt,
     load_metric_context,
+    validate_plan_tools,
 )
 from config.faults import load_fault_catalog
 from config.metrics import load_metrics_config
@@ -161,7 +163,7 @@ def test_prompt_input_mapping_accepts_metric_id_alias_from_metrics_config() -> N
     assert "daily_active_users" in prompt
 
 
-def test_planner_prompt_only_advertises_registry_tools_and_omits_formal_schema() -> None:
+def test_planner_prompt_advertises_registry_tools_and_omits_formal_schema() -> None:
     alert, metric_context = _request_for(dict(PLANNER_ALERT_EXAMPLES[0]))
     prompt = build_planner_prompt(alert, metric_context)
 
@@ -170,13 +172,14 @@ def test_planner_prompt_only_advertises_registry_tools_and_omits_formal_schema()
     assert "Legacy JSON Schema" not in prompt
     assert "target Android partition row_count is zero" not in prompt
     assert "closed-set candidate labels" in prompt
-    for unavailable in (
+    for available in (
         "check_freshness",
-        "get_partition_status",
         "check_null_rate",
         "detect_schema_drift",
+        "detect_distribution_drift",
+        "check_duplicate_rate",
     ):
-        assert f"Tool: {unavailable}" not in prompt
+        assert f"Tool: {available}" in prompt
 
 
 def test_fallback_plan_uses_registered_readonly_sql_tool_only() -> None:
@@ -196,6 +199,35 @@ def test_fallback_plan_uses_registered_readonly_sql_tool_only() -> None:
                 "DESCRIBE",
                 "EXPLAIN",
             }
+
+
+def test_planner_semantics_validate_a_data_quality_tool_against_registry() -> None:
+    alert, metric_context = _request_for(dict(PLANNER_ALERT_EXAMPLES[0]))
+    fallback = build_fallback_plan(
+        PlannerInput(alert=alert, metric_context=metric_context)
+    )
+    step = fallback.steps[0].model_copy(
+        update={
+            "tool": "check_null_rate",
+            "arguments": {
+                "table": "events",
+                "column": "user_id",
+                "threshold": 0.01,
+            },
+        }
+    )
+    plan = fallback.model_copy(update={"steps": [step]})
+
+    validate_plan_tools(plan, build_default_tool_registry())
+
+    invalid_step = step.model_copy(
+        update={"arguments": {**step.arguments, "threshold": 2.0}}
+    )
+    with pytest.raises(PlannerValidationError, match="less than or equal to 1"):
+        validate_plan_tools(
+            fallback.model_copy(update={"steps": [invalid_step]}),
+            build_default_tool_registry(),
+        )
 
 
 def test_semantic_unknown_tool_is_repaired_then_accepted() -> None:

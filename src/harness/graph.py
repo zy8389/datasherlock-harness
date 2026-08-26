@@ -274,8 +274,8 @@ class HarnessGraph:
         result_payload = cast(dict[str, JsonValue], result.model_dump(mode="json"))
         state.tool_trace.append(result_payload)
         state.evidence.append(_tool_observation(result_payload, len(state.tool_trace)))
-        if result.evidence:
-            state.evidence.extend(result.evidence)
+        for reference in result.evidence:
+            self.register_evidence(state, reference)
         target = IncidentStatus.VALIDATING if result.success else IncidentStatus.TOOL_FAILED
         return self.transition(state, target)
 

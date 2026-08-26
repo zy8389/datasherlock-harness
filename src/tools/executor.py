@@ -9,15 +9,29 @@ layers.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import hashlib
+import json
+from collections.abc import Callable, Mapping
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from agents.planner import InvestigationStep
+from config.faults import EvidenceSourceType
+from harness.hypothesis import EvidenceReference
+from tools.data_quality import (
+    DataQualityCheckResult,
+    DataQualityEvidence,
+    DataQualityScope,
+    check_duplicate_rate,
+    check_freshness,
+    check_null_rate,
+    detect_distribution_drift,
+    detect_schema_drift,
+)
 from tools.registry import (
-    ToolArgumentsError,
     ToolRegistry,
     ToolRegistryError,
     build_default_tool_registry,
@@ -41,6 +55,18 @@ class SqlExecutionPort(Protocol):
     ) -> SqlExecutionResponse: ...
 
 
+DataQualityExecutionPort = Callable[..., DataQualityCheckResult]
+
+
+DEFAULT_DATA_QUALITY_EXECUTORS: dict[str, DataQualityExecutionPort] = {
+    "check_null_rate": check_null_rate,
+    "check_duplicate_rate": check_duplicate_rate,
+    "check_freshness": check_freshness,
+    "detect_schema_drift": detect_schema_drift,
+    "detect_distribution_drift": detect_distribution_drift,
+}
+
+
 class ToolExecutionResult(BaseModel):
     """Stable, JSON-serializable envelope for one planned tool step."""
 
@@ -53,7 +79,7 @@ class ToolExecutionResult(BaseModel):
     error: dict[str, str] | None = None
     # Evidence is opt-in.  A successful SQL response is a result, not proof
     # of a root cause, so the default adapter deliberately returns no entries.
-    evidence: list[dict[str, JsonValue]] = Field(default_factory=list)
+    evidence: list[EvidenceReference] = Field(default_factory=list)
 
 
 class ToolExecutor:
@@ -65,11 +91,17 @@ class ToolExecutor:
         *,
         registry: ToolRegistry | None = None,
         sql_execution: SqlExecutionPort = execute_readonly_sql,
+        data_quality_execution: Mapping[str, DataQualityExecutionPort] | None = None,
         audit_path: str | Path | None = None,
     ) -> None:
         self.database_path = database_path
         self.registry = registry or build_default_tool_registry()
         self.sql_execution = sql_execution
+        self.data_quality_execution = dict(
+            DEFAULT_DATA_QUALITY_EXECUTORS
+            if data_quality_execution is None
+            else data_quality_execution
+        )
         self.audit_path = audit_path
 
     def execute_step(
@@ -82,9 +114,8 @@ class ToolExecutor:
         """Validate and execute one plan step.
 
         Registry and argument failures are returned as normalized failures and
-        never reach a tool adapter.  The current registry has one executable
-        tool, ``sql_query``; adding a new tool requires an explicit adapter
-        here rather than silently accepting a registry entry.
+        never reach a tool adapter. Data Quality checks are explicit adapters
+        and use the same read-only SQL Runner internally as their direct APIs.
         """
 
         try:
@@ -101,7 +132,7 @@ class ToolExecutor:
         try:
             definition = self.registry.get(tool_name)
             self.registry.validate_arguments(tool_name, normalized_step.arguments)
-        except (ToolRegistryError, ToolArgumentsError) as exc:
+        except ToolRegistryError as exc:
             return self._failure(tool_name, "tool_contract", str(exc))
 
         if not definition.read_only:
@@ -112,6 +143,13 @@ class ToolExecutor:
             )
 
         if tool_name != "sql_query":
+            if tool_name in self.data_quality_execution:
+                return self._execute_data_quality(
+                    tool_name,
+                    normalized_step.arguments,
+                    incident_id=incident_id,
+                    trace_id=trace_id,
+                )
             return self._failure(
                 tool_name,
                 "unsupported_tool",
@@ -165,6 +203,72 @@ class ToolExecutor:
             or {"type": "execution", "message": "SQL execution failed"},
         )
 
+    def _execute_data_quality(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, JsonValue],
+        *,
+        incident_id: str | None,
+        trace_id: str | None,
+    ) -> ToolExecutionResult:
+        adapter = self.data_quality_execution.get(tool_name)
+        if adapter is None:
+            return self._failure(
+                tool_name,
+                "unsupported_tool",
+                f"no execution adapter is registered for tool: {tool_name}",
+            )
+
+        try:
+            call_arguments = _normalize_data_quality_arguments(tool_name, arguments)
+        except (TypeError, ValueError, OverflowError) as exc:
+            return self._failure(tool_name, "tool_contract", str(exc))
+
+        try:
+            raw_result = adapter(
+                self.database_path,
+                **call_arguments,
+                incident_id=incident_id,
+                trace_id=trace_id,
+                audit_path=self.audit_path,
+            )
+            result = (
+                raw_result
+                if isinstance(raw_result, DataQualityCheckResult)
+                else DataQualityCheckResult.model_validate(raw_result)
+            )
+        except Exception as exc:  # noqa: BLE001 - normalize injected tool failures
+            return self._failure(tool_name, "execution", str(exc))
+
+        result_payload = cast(dict[str, JsonValue], result.model_dump(mode="json"))
+        if result.status == "error":
+            return ToolExecutionResult(
+                tool_name=tool_name,
+                success=False,
+                query_id=result.query_id,
+                result=result_payload,
+                error=result.error
+                or {"type": "execution", "message": "data quality check failed"},
+            )
+
+        evidence = [
+            data_quality_evidence_to_reference(
+                evidence_item,
+                result=result,
+                tool_name=tool_name,
+                incident_id=incident_id,
+                sequence=index,
+            )
+            for index, evidence_item in enumerate(result.evidence, start=1)
+        ]
+        return ToolExecutionResult(
+            tool_name=tool_name,
+            success=True,
+            query_id=result.query_id,
+            result=result_payload,
+            evidence=evidence,
+        )
+
     @staticmethod
     def _failure(
         tool_name: str,
@@ -189,4 +293,111 @@ def _tool_name_from_payload(step: object) -> str:
     return "invalid"
 
 
-__all__ = ["SqlExecutionPort", "ToolExecutionResult", "ToolExecutor"]
+def _parse_datetime(value: object, *, name: str) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise TypeError(f"arguments.{name} must be an ISO-8601 string")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"arguments.{name} must be a valid ISO-8601 datetime") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"arguments.{name} must include a timezone")
+    return parsed
+
+
+def _normalize_data_quality_arguments(
+    tool_name: str,
+    arguments: Mapping[str, JsonValue],
+) -> dict[str, Any]:
+    """Map JSON planner values to the real typed Data Quality contracts."""
+
+    normalized = dict(arguments)
+    if tool_name in {"check_null_rate", "check_freshness"}:
+        scope = normalized.get("scope")
+        if scope is not None:
+            if not isinstance(scope, Mapping):
+                raise TypeError("arguments.scope must be an object")
+            scope_payload = dict(scope)
+            for name in ("start", "end"):
+                if name in scope_payload:
+                    scope_payload[name] = _parse_datetime(
+                        scope_payload[name], name=f"scope.{name}"
+                    )
+            normalized["scope"] = DataQualityScope.model_validate(scope_payload)
+    if tool_name == "check_freshness":
+        normalized["reference_time"] = _parse_datetime(
+            normalized.get("reference_time"), name="reference_time"
+        )
+        max_age = normalized.get("max_age")
+        if isinstance(max_age, bool) or not isinstance(max_age, (int, float)):
+            raise TypeError("arguments.max_age must be a number of seconds")
+        normalized["max_age"] = timedelta(seconds=float(max_age))
+    if tool_name == "detect_distribution_drift":
+        for name in (
+            "baseline_start",
+            "baseline_end",
+            "current_start",
+            "current_end",
+        ):
+            normalized[name] = _parse_datetime(normalized.get(name), name=name)
+    return normalized
+
+
+def data_quality_evidence_to_reference(
+    evidence: DataQualityEvidence,
+    *,
+    result: DataQualityCheckResult,
+    tool_name: str,
+    incident_id: str | None,
+    sequence: int,
+) -> EvidenceReference:
+    """Convert a real Data Quality finding to the shared Harness evidence model."""
+
+    if tool_name == "detect_schema_drift":
+        source_type = EvidenceSourceType.SCHEMA_METADATA.value
+    elif result.table in {"partition_metadata", "pipeline_runs"}:
+        source_type = EvidenceSourceType.OPERATIONAL_METADATA.value
+    elif result.table == "metric_versions":
+        source_type = EvidenceSourceType.METRIC_VERSION.value
+    elif result.table == "experiment_configs":
+        source_type = EvidenceSourceType.EXPERIMENT_CONFIG.value
+    else:
+        source_type = EvidenceSourceType.BUSINESS_DATA.value
+    observation = {
+        "check_name": result.check_name,
+        "status": result.status,
+        "passed": result.passed,
+        "table": result.table,
+        "column": result.column,
+        "columns": result.columns,
+        "observed_value": result.observed_value,
+        "threshold": result.threshold,
+        "details": evidence.details,
+    }
+    identity = {
+        "incident_id": incident_id or "unknown",
+        "tool_name": tool_name,
+        "query_id": evidence.query_id,
+        "scope": evidence.details.get("scope"),
+        "sequence": sequence,
+    }
+    evidence_id = "dq-" + hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:24]
+    return EvidenceReference(
+        evidence_id=evidence_id,
+        source_type=source_type,
+        description=evidence.finding,
+        query_id=evidence.query_id,
+        observation=cast(dict[str, JsonValue], observation),
+    )
+
+
+__all__ = [
+    "DEFAULT_DATA_QUALITY_EXECUTORS",
+    "DataQualityExecutionPort",
+    "SqlExecutionPort",
+    "ToolExecutionResult",
+    "ToolExecutor",
+    "data_quality_evidence_to_reference",
+]

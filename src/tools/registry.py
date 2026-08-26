@@ -137,6 +137,10 @@ def _validate_json_schema(value: object, schema: Mapping[str, Any], *, path: str
         if isinstance(item_schema, Mapping):
             for index, item in enumerate(value):
                 _validate_json_schema(item, item_schema, path=f"{path}[{index}]")
+        if schema.get("uniqueItems") is True:
+            for index, item in enumerate(value):
+                if any(item == previous for previous in value[:index]):
+                    raise ToolArgumentsError(f"{path} must contain unique item(s)")
         return
 
     if expected_type == "boolean":
@@ -147,15 +151,34 @@ def _validate_json_schema(value: object, schema: Mapping[str, Any], *, path: str
     if expected_type == "number":
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             raise ToolArgumentsError(f"{path} must be a number")
+        _validate_numeric_constraints(value, schema, path=path)
         return
 
     if expected_type == "integer":
         if not isinstance(value, int) or isinstance(value, bool):
             raise ToolArgumentsError(f"{path} must be an integer")
+        _validate_numeric_constraints(value, schema, path=path)
         return
 
     if expected_type == "null" and value is not None:
         raise ToolArgumentsError(f"{path} must be null")
+
+
+def _validate_numeric_constraints(
+    value: float,
+    schema: Mapping[str, Any],
+    *,
+    path: str,
+) -> None:
+    minimum = schema.get("minimum")
+    if isinstance(minimum, (int, float)) and value < minimum:
+        raise ToolArgumentsError(f"{path} must be greater than or equal to {minimum}")
+    maximum = schema.get("maximum")
+    if isinstance(maximum, (int, float)) and value > maximum:
+        raise ToolArgumentsError(f"{path} must be less than or equal to {maximum}")
+    exclusive_minimum = schema.get("exclusiveMinimum")
+    if isinstance(exclusive_minimum, (int, float)) and value <= exclusive_minimum:
+        raise ToolArgumentsError(f"{path} must be greater than {exclusive_minimum}")
 
 
 SQL_QUERY_TOOL = ToolDefinition(
@@ -180,13 +203,195 @@ SQL_QUERY_TOOL = ToolDefinition(
 )
 
 
+_SCOPE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "equals": {
+            "type": "object",
+            "description": "Equality filters, with scalar or list values.",
+        },
+        "time_column": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Timestamp column for a half-open time window.",
+        },
+        "start": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Timezone-aware ISO-8601 start timestamp.",
+        },
+        "end": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Timezone-aware ISO-8601 end timestamp.",
+        },
+    },
+    "additionalProperties": False,
+}
+
+
+CHECK_NULL_RATE_TOOL = ToolDefinition(
+    name="check_null_rate",
+    description=(
+        "Measure the null rate of one read-only table column, optionally within "
+        "a dimension and time scope."
+    ),
+    argument_schema={
+        "type": "object",
+        "properties": {
+            "table": {"type": "string", "minLength": 1},
+            "column": {"type": "string", "minLength": 1},
+            "threshold": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "description": "Maximum allowed null proportion from 0 to 1.",
+            },
+            "scope": _SCOPE_SCHEMA,
+        },
+        "required": ["table", "column"],
+        "additionalProperties": False,
+    },
+    read_only=True,
+)
+
+
+CHECK_DUPLICATE_RATE_TOOL = ToolDefinition(
+    name="check_duplicate_rate",
+    description=(
+        "Measure the proportion of duplicate rows for one or more key columns "
+        "through the read-only SQL Runner."
+    ),
+    argument_schema={
+        "type": "object",
+        "properties": {
+            "table": {"type": "string", "minLength": 1},
+            "keys": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1},
+            },
+            "threshold": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "description": "Maximum allowed duplicate proportion from 0 to 1.",
+            },
+        },
+        "required": ["table", "keys"],
+        "additionalProperties": False,
+    },
+    read_only=True,
+)
+
+
+CHECK_FRESHNESS_TOOL = ToolDefinition(
+    name="check_freshness",
+    description=(
+        "Check whether the latest timestamp in a table is within a fixed age "
+        "allowance relative to an explicit UTC reference time."
+    ),
+    argument_schema={
+        "type": "object",
+        "properties": {
+            "table": {"type": "string", "minLength": 1},
+            "timestamp_column": {"type": "string", "minLength": 1},
+            "reference_time": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Timezone-aware ISO-8601 reference timestamp.",
+            },
+            "max_age": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "description": "Positive freshness allowance in seconds.",
+            },
+            "scope": _SCOPE_SCHEMA,
+        },
+        "required": ["table", "timestamp_column", "reference_time", "max_age"],
+        "additionalProperties": False,
+    },
+    read_only=True,
+)
+
+
+DETECT_SCHEMA_DRIFT_TOOL = ToolDefinition(
+    name="detect_schema_drift",
+    description=(
+        "Compare the two latest schema snapshots for a table and report added, "
+        "removed, or type-changed fields."
+    ),
+    argument_schema={
+        "type": "object",
+        "properties": {"table": {"type": "string", "minLength": 1}},
+        "required": ["table"],
+        "additionalProperties": False,
+    },
+    read_only=True,
+)
+
+
+DETECT_DISTRIBUTION_DRIFT_TOOL = ToolDefinition(
+    name="detect_distribution_drift",
+    description=(
+        "Compare categorical distributions in two explicit time windows using "
+        "total variation distance."
+    ),
+    argument_schema={
+        "type": "object",
+        "properties": {
+            "table": {"type": "string", "minLength": 1},
+            "column": {"type": "string", "minLength": 1},
+            "time_column": {"type": "string", "minLength": 1},
+            "baseline_start": {"type": "string", "minLength": 1},
+            "baseline_end": {"type": "string", "minLength": 1},
+            "current_start": {"type": "string", "minLength": 1},
+            "current_end": {"type": "string", "minLength": 1},
+            "threshold": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "description": "Maximum allowed total variation distance from 0 to 1.",
+            },
+        },
+        "required": [
+            "table",
+            "column",
+            "time_column",
+            "baseline_start",
+            "baseline_end",
+            "current_start",
+            "current_end",
+        ],
+        "additionalProperties": False,
+    },
+    read_only=True,
+)
+
+
+DATA_QUALITY_TOOLS = (
+    CHECK_NULL_RATE_TOOL,
+    CHECK_DUPLICATE_RATE_TOOL,
+    CHECK_FRESHNESS_TOOL,
+    DETECT_SCHEMA_DRIFT_TOOL,
+    DETECT_DISTRIBUTION_DRIFT_TOOL,
+)
+
+
 def build_default_tool_registry() -> ToolRegistry:
     """Create a fresh registry containing the tools implemented today."""
 
-    return ToolRegistry((SQL_QUERY_TOOL,))
+    return ToolRegistry((SQL_QUERY_TOOL, *DATA_QUALITY_TOOLS))
 
 
 __all__ = [
+    "CHECK_DUPLICATE_RATE_TOOL",
+    "CHECK_FRESHNESS_TOOL",
+    "CHECK_NULL_RATE_TOOL",
+    "DATA_QUALITY_TOOLS",
+    "DETECT_DISTRIBUTION_DRIFT_TOOL",
+    "DETECT_SCHEMA_DRIFT_TOOL",
     "SQL_QUERY_TOOL",
     "ToolArgumentsError",
     "ToolDefinition",
