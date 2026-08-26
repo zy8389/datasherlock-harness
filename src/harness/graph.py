@@ -20,11 +20,26 @@ from agents.planner import (
     Planner,
     PlannerRunResult,
 )
+from harness.checkpoint import (
+    CheckpointEnvelope,
+    CheckpointError,
+    CheckpointManager,
+    RestoredCheckpoint,
+    ResumeError,
+    ResumeIntegrityError,
+    ResumeMetadata,
+    ResumePlan,
+    build_resume_plan,
+    deterministic_tool_call_id,
+    resume_action_for_status,
+    validate_resume_metadata,
+)
 from harness.guardrails import (
     GuardrailDecision,
     GuardrailEventType,
     GuardrailPolicy,
     GuardrailRuntime,
+    fingerprint_step,
 )
 from harness.hypothesis import (
     EvidenceReference,
@@ -146,6 +161,7 @@ class HarnessGraph:
         root_cause_validator: RootCauseValidator | None = None,
         guardrail_runtime: GuardrailRuntime | None = None,
         guardrail_policy: GuardrailPolicy | None = None,
+        checkpoint_manager: CheckpointManager | None = None,
     ) -> None:
         if guardrail_runtime is not None and guardrail_policy is not None:
             raise ValueError("provide guardrail_runtime or guardrail_policy, not both")
@@ -157,6 +173,8 @@ class HarnessGraph:
             policy=guardrail_policy,
             registry=getattr(tool_executor, "registry", None),
         )
+        self.checkpoint_manager = checkpoint_manager
+        self._resume_metadata: dict[str, ResumeMetadata] = {}
 
     # ------------------------------------------------------------------
     # State nodes and runtime orchestration
@@ -224,6 +242,7 @@ class HarnessGraph:
                 exclude={"plan", "model_result"},
             ),
         )
+        self._save_checkpoint(state, reason="plan_prepared")
         return run_result
 
     def plan_incident(
@@ -240,6 +259,90 @@ class HarnessGraph:
         return self.transition(state, IncidentStatus.EXECUTING, reason=reason)
 
     plan = plan_incident
+
+    def restore_runtime(
+        self,
+        state: IncidentState,
+        resume: ResumeMetadata | None = None,
+    ) -> ResumePlan:
+        """Rehydrate live hypothesis/evidence registries without executing work."""
+
+        self._ensure_incident_state(state)
+        metadata = resume or ResumeMetadata(
+            resume_action=resume_action_for_status(
+                state.status,
+                plan_persisted=bool(state.plan),
+            )
+        )
+        try:
+            validate_resume_metadata(state, metadata)
+            restored_hypotheses = [
+                HypothesisState.model_validate(payload) for payload in state.hypotheses
+            ]
+            restored_evidence = [
+                EvidenceReference.model_validate(payload)
+                for payload in state.evidence
+                if _is_evidence_reference_payload(payload)
+            ]
+            self.hypothesis_manager.restore_snapshot(
+                restored_hypotheses,
+                restored_evidence,
+            )
+        except (ValueError, TypeError, HypothesisStateError) as exc:
+            if isinstance(exc, ResumeIntegrityError):
+                raise
+            raise ResumeIntegrityError("checkpoint runtime state could not be rehydrated") from exc
+        incident_id = _incident_id(state)
+        if incident_id is None:
+            raise CheckpointError("restored state is missing alert.incident_id")
+        self._resume_metadata[incident_id] = metadata.model_copy(deep=True)
+        return build_resume_plan(state, metadata)
+
+    def resume_from_checkpoint(
+        self,
+        checkpoint: CheckpointEnvelope | RestoredCheckpoint,
+    ) -> ResumePlan:
+        """Restore a checkpoint envelope and return an inspectable resume action."""
+
+        if isinstance(checkpoint, CheckpointEnvelope):
+            if self.checkpoint_manager is None:
+                raise CheckpointError("a CheckpointManager is required to restore an envelope")
+            restored = self.checkpoint_manager.restore(checkpoint)
+        elif isinstance(checkpoint, RestoredCheckpoint):
+            restored = checkpoint
+        else:
+            raise CheckpointError("checkpoint must be a CheckpointEnvelope or RestoredCheckpoint")
+        return self.restore_runtime(restored.state, restored.resume)
+
+    def resume_latest(self, incident_id: str) -> tuple[IncidentState, ResumePlan]:
+        """Load the latest valid checkpoint, rehydrate, and return its action."""
+
+        if self.checkpoint_manager is None:
+            raise CheckpointError("a CheckpointManager is required to resume a checkpoint")
+        restored = self.checkpoint_manager.restore_latest(incident_id)
+        plan = self.restore_runtime(restored.state, restored.resume)
+        return restored.state, plan
+
+    def resume_plan(self, state: IncidentState) -> ResumePlan:
+        """Return the next legal recovery action without executing it."""
+
+        metadata = self._resume_metadata_for(state)
+        return build_resume_plan(state, metadata)
+
+    def next_pending_step(
+        self,
+        state: IncidentState,
+    ) -> Mapping[str, JsonValue] | None:
+        """Select the next plan step using the restored cursor, not trace length."""
+
+        metadata = self._resume_metadata_for(state)
+        plan = build_resume_plan(state, metadata)
+        if plan.action.value != "EXECUTE_NEXT_TOOL" or plan.next_step_id is None:
+            return None
+        for raw_step in state.plan:
+            if raw_step.get("step_id") == plan.next_step_id:
+                return raw_step
+        raise ResumeIntegrityError(f"resume step is absent from plan: {plan.next_step_id}")
 
     def execute_next_step(
         self,
@@ -259,9 +362,16 @@ class HarnessGraph:
                 IncidentStatus.EXECUTING,
                 "tool execution requires EXECUTING as the current state",
             )
-        selected = step if step is not None else _first_plan_step(state.plan)
+        selected = (
+            step
+            if step is not None
+            else self.next_pending_step(state)
+        )
         if selected is None:
-            raise HarnessPlanningError("EXECUTING requires at least one planned step")
+            raise ResumeError("no pending executable step exists for the current checkpoint")
+
+        if self.checkpoint_manager is not None:
+            self._validate_execution_step(state, selected)
 
         executor = tool_executor if tool_executor is not None else self.tool_executor
         if executor is None:
@@ -338,6 +448,8 @@ class HarnessGraph:
         state.evidence.append(_tool_observation(result_payload, len(state.tool_trace)))
         for reference in result.evidence:
             self.register_evidence(state, reference)
+        if result.success and self.checkpoint_manager is not None:
+            self._mark_step_completed(state, selected)
         target = IncidentStatus.VALIDATING if result.success else IncidentStatus.TOOL_FAILED
         return self.transition(state, target)
 
@@ -412,6 +524,7 @@ class HarnessGraph:
         )
         if not result.validated:
             self._sync_hypotheses(state)
+            self._save_checkpoint(state, reason="hypothesis_validation_failed")
         return transition_result
 
     def request_more_evidence(
@@ -422,11 +535,20 @@ class HarnessGraph:
     ) -> HarnessTransitionResult:
         """Explicitly consume one retry and return to EXECUTING."""
 
+        def before_commit() -> None:
+            state.retry_count += 1
+            if self.checkpoint_manager is not None:
+                metadata = self._resume_metadata_for(state)
+                metadata.replay_step_id = metadata.last_completed_step_id
+                metadata.resume_action = resume_action_for_status(
+                    IncidentStatus.EXECUTING
+                )
+
         return self._transition(
             state,
             IncidentStatus.EXECUTING,
             reason=reason,
-            before_commit=lambda: setattr(state, "retry_count", state.retry_count + 1),
+            before_commit=before_commit,
         )
 
     def apply_root_cause_validation(
@@ -548,8 +670,12 @@ class HarnessGraph:
 
         if not isinstance(proposal, Mapping) or not proposal:
             raise self._error(state, IncidentStatus.FIX_PROPOSED, "fix proposal must be a non-empty mapping")
-        self.transition(state, IncidentStatus.FIX_PROPOSED, reason=reason)
-        state.fix_proposal = dict(proposal)
+        self._transition(
+            state,
+            IncidentStatus.FIX_PROPOSED,
+            reason=reason,
+            before_commit=lambda: setattr(state, "fix_proposal", dict(proposal)),
+        )
         return self.transition(state, IncidentStatus.AWAITING_APPROVAL, reason=reason)
 
     def record_approval(
@@ -719,7 +845,7 @@ class HarnessGraph:
         state.status = target
         if target.is_terminal:
             state.final_status = target
-        return HarnessTransitionResult(
+        result = HarnessTransitionResult(
             from_status=current,
             to_status=target,
             changed=current is not target,
@@ -727,6 +853,11 @@ class HarnessGraph:
             terminal=target.is_terminal,
             reason=reason,
         )
+        self._save_checkpoint(
+            state,
+            reason=reason or f"transition:{current.value}->{target.value}",
+        )
+        return result
 
     @staticmethod
     def _ensure_incident_state(state: IncidentState) -> None:
@@ -828,6 +959,109 @@ class HarnessGraph:
         ):
             raise cls._error(state, target, "POST_VALIDATION -> RESOLVED requires repair_result")
 
+    def _resume_metadata_for(self, state: IncidentState) -> ResumeMetadata:
+        incident_id = _incident_id(state)
+        if incident_id is None:
+            if self.checkpoint_manager is not None:
+                raise CheckpointError(
+                    "checkpoint-enabled graph requires alert.incident_id"
+                )
+            return ResumeMetadata(
+                resume_action=resume_action_for_status(
+                    state.status,
+                    plan_persisted=bool(state.plan),
+                )
+            )
+        existing = self._resume_metadata.get(incident_id)
+        if existing is None:
+            existing = ResumeMetadata(
+                resume_action=resume_action_for_status(
+                    state.status,
+                    plan_persisted=bool(state.plan),
+                )
+            )
+            self._resume_metadata[incident_id] = existing
+        return existing
+
+    def _save_checkpoint(self, state: IncidentState, *, reason: str) -> None:
+        if self.checkpoint_manager is None:
+            return
+        metadata = self._resume_metadata_for(state)
+        metadata.resume_action = resume_action_for_status(
+            state.status,
+            plan_persisted=bool(state.plan),
+        )
+        self.checkpoint_manager.save(state, reason=reason, resume=metadata)
+
+    def _validate_execution_step(
+        self,
+        state: IncidentState,
+        selected: InvestigationStep | Mapping[str, JsonValue],
+    ) -> None:
+        metadata = self._resume_metadata_for(state)
+        validate_resume_metadata(state, metadata)
+        try:
+            normalized = (
+                selected
+                if isinstance(selected, InvestigationStep)
+                else InvestigationStep.model_validate(selected)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ResumeIntegrityError("selected resume step is malformed") from exc
+        fingerprint = fingerprint_step(normalized)
+        stored_fingerprint = metadata.completed_step_fingerprints.get(
+            normalized.step_id
+        )
+        if stored_fingerprint is not None and stored_fingerprint != fingerprint:
+            raise ResumeIntegrityError(
+                f"selected step arguments changed after completion: {normalized.step_id}"
+            )
+        if (
+            normalized.step_id in metadata.completed_step_ids
+            and metadata.replay_step_id != normalized.step_id
+        ):
+            raise ResumeError(
+                f"step was already completed and cannot be replayed: {normalized.step_id}"
+            )
+
+    def _mark_step_completed(
+        self,
+        state: IncidentState,
+        selected: InvestigationStep | Mapping[str, JsonValue],
+    ) -> None:
+        metadata = self._resume_metadata_for(state)
+        normalized = (
+            selected
+            if isinstance(selected, InvestigationStep)
+            else InvestigationStep.model_validate(selected)
+        )
+        fingerprint = fingerprint_step(normalized)
+        previous = metadata.completed_step_fingerprints.get(normalized.step_id)
+        if previous is not None and previous != fingerprint:
+            raise ResumeIntegrityError(
+                f"completed step arguments changed: {normalized.step_id}"
+            )
+        if normalized.step_id not in metadata.completed_step_ids:
+            metadata.completed_step_ids.append(normalized.step_id)
+        if fingerprint not in metadata.completed_tool_fingerprints:
+            metadata.completed_tool_fingerprints.append(fingerprint)
+        metadata.completed_step_fingerprints[normalized.step_id] = fingerprint
+        incident_id = _incident_id(state)
+        if incident_id is None:
+            raise CheckpointError("completed tool call requires alert.incident_id")
+        metadata.completed_tool_call_ids[normalized.step_id] = deterministic_tool_call_id(
+            incident_id,
+            normalized.step_id,
+            fingerprint,
+        )
+        metadata.last_completed_step_id = normalized.step_id
+        metadata.replay_step_id = None
+        metadata.next_step_index = _next_pending_index(
+            state.plan,
+            metadata.completed_step_ids,
+        )
+        metadata.resume_action = resume_action_for_status(IncidentStatus.VALIDATING)
+
     @staticmethod
     def _error(
         state: IncidentState,
@@ -897,6 +1131,28 @@ def _validate_mvp_scope(alert: Mapping[str, JsonValue]) -> None:
 
 def _has_text(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
+
+
+def _is_evidence_reference_payload(payload: Mapping[str, JsonValue]) -> bool:
+    """Recognize shared evidence snapshots without promoting tool observations."""
+
+    return (
+        payload.get("evidence_type") != "tool_result"
+        and isinstance(payload.get("evidence_id"), str)
+        and isinstance(payload.get("source_type"), str)
+        and isinstance(payload.get("description"), str)
+    )
+
+
+def _next_pending_index(
+    plan: Sequence[Mapping[str, JsonValue]],
+    completed_step_ids: Sequence[str],
+) -> int:
+    completed = set(completed_step_ids)
+    for index, raw_step in enumerate(plan):
+        if raw_step.get("step_id") not in completed:
+            return index
+    return len(plan)
 
 
 def _coerce_planner_result(raw_result: object) -> PlannerRunResult:

@@ -7,6 +7,7 @@ cause.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Final
@@ -129,6 +130,51 @@ class HypothesisManager:
         """Return managed states in creation order."""
 
         return tuple(self._hypotheses.values())
+
+    def restore_snapshot(
+        self,
+        hypotheses: Iterable[HypothesisState],
+        evidence: Iterable[EvidenceReference],
+    ) -> None:
+        """Replace live registries with validated checkpoint snapshots."""
+
+        restored_hypotheses: dict[str, HypothesisState] = {}
+        for item in hypotheses:
+            state = (
+                item
+                if isinstance(item, HypothesisState)
+                else HypothesisState.model_validate(item)
+            )
+            if state.hypothesis_id in restored_hypotheses:
+                raise HypothesisStateError(
+                    f"duplicate hypothesis in restored snapshot: {state.hypothesis_id}"
+                )
+            restored_hypotheses[state.hypothesis_id] = state.model_copy(deep=True)
+
+        restored_evidence: dict[str, EvidenceReference] = {}
+        for item in evidence:
+            reference = (
+                item
+                if isinstance(item, EvidenceReference)
+                else EvidenceReference.model_validate(item)
+            )
+            existing = restored_evidence.get(reference.evidence_id)
+            if existing is not None and existing != reference:
+                raise HypothesisStateError(
+                    "duplicate evidence id has different metadata: "
+                    f"{reference.evidence_id}"
+                )
+            restored_evidence[reference.evidence_id] = reference.model_copy(deep=True)
+
+        for hypothesis in restored_hypotheses.values():
+            missing_evidence = set(hypothesis.evidence_ids) - set(restored_evidence)
+            if missing_evidence:
+                raise HypothesisStateError(
+                    "restored hypothesis references missing evidence: "
+                    + ", ".join(sorted(missing_evidence))
+                )
+        self._hypotheses = restored_hypotheses
+        self._evidence = restored_evidence
 
     def evidence(self) -> tuple[EvidenceReference, ...]:
         """Return registered evidence in registration order."""
