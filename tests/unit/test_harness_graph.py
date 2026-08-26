@@ -16,6 +16,7 @@ from harness.graph import (
     HarnessGraph,
     HarnessTransitionError,
 )
+from harness.guardrails import GuardrailPolicy
 from harness.hypothesis import EvidenceReference, HypothesisStatus
 from harness.state import IncidentState, IncidentStatus
 from tools.executor import ToolExecutionResult, ToolExecutor
@@ -207,6 +208,142 @@ def test_execution_result_becomes_unvalidated_observation() -> None:
     assert state.evidence[0]["evidence_id"] == "Q01"
     assert state.evidence[0]["evidence_type"] == "tool_result"
     assert state.evidence[0]["root_cause_validated"] is False
+
+
+def _guardrail_step(
+    step_id: str,
+    tool: str,
+    arguments: dict[str, object],
+) -> InvestigationStep:
+    return InvestigationStep(
+        step_id=step_id,
+        purpose=f"Run {tool} within the investigation budget.",
+        hypothesis_id="H01",
+        tool=tool,
+        arguments=arguments,
+        expected_evidence=["the structured result"],
+        stop_condition="retain the result",
+    )
+
+
+class _CountingExecutor:
+    def __init__(self, *, result: ToolExecutionResult | None = None) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.result = result or ToolExecutionResult(
+            tool_name="sql_query",
+            success=True,
+            query_id="Q-GUARDRAIL-001",
+            result={"status": "success", "rows": [[1]]},
+        )
+
+    def execute_step(self, step: object, **kwargs: object) -> ToolExecutionResult:
+        self.calls.append({"step": step, **kwargs})
+        return self.result
+
+
+def _execute_two_steps(
+    graph: HarnessGraph,
+    state: IncidentState,
+    first: InvestigationStep,
+    second: InvestigationStep,
+) -> None:
+    graph.execute_next_step(state, first)
+    graph.enter_hypothesis_testing(state)
+    graph.request_more_evidence(state)
+    graph.execute_next_step(state, second)
+
+
+def test_graph_budget_blocks_second_sql_before_adapter_and_preserves_evidence() -> None:
+    executor = _CountingExecutor()
+    graph = HarnessGraph(
+        tool_executor=executor,
+        guardrail_policy=GuardrailPolicy(max_sql_calls=1),
+    )
+    state = IncidentState(status=IncidentStatus.EXECUTING)
+    first = _guardrail_step("S01", "sql_query", {"sql": "SELECT 1"})
+    second = _guardrail_step("S02", "sql_query", {"sql": "SELECT 2"})
+
+    _execute_two_steps(graph, state, first, second)
+
+    assert state.status is IncidentStatus.BUDGET_EXCEEDED
+    assert state.root_cause is None
+    assert len(executor.calls) == 1
+    assert len(state.tool_trace) == 1
+    assert len(state.evidence) == 1
+    assert state.guardrail_usage.agent_rounds == 1
+    assert state.guardrail_usage.tool_calls == 1
+    assert state.guardrail_usage.sql_calls == 1
+    assert state.guardrail_usage.blocked_calls == 1
+    assert state.guardrail_events[-1].reason == "sql_call_budget_exceeded"
+    assert state.guardrail_events[-1].allowed is False
+
+
+def test_graph_duplicate_cross_step_is_blocked_without_fake_evidence() -> None:
+    executor = _CountingExecutor(
+        result=ToolExecutionResult(
+            tool_name="check_null_rate",
+            success=True,
+            query_id="Q-DUPLICATE-001",
+            result={"check_name": "check_null_rate", "status": "success"},
+        )
+    )
+    graph = HarnessGraph(tool_executor=executor)
+    state = IncidentState(status=IncidentStatus.EXECUTING)
+    first = _guardrail_step(
+        "S01",
+        "check_null_rate",
+        {"table": "events", "column": "user_id"},
+    )
+    second = _guardrail_step(
+        "S02",
+        "check_null_rate",
+        {"table": "events", "column": "user_id"},
+    )
+
+    _execute_two_steps(graph, state, first, second)
+
+    assert state.status is IncidentStatus.TOOL_FAILED
+    assert len(executor.calls) == 1
+    assert len(state.tool_trace) == 1
+    assert len(state.evidence) == 1
+    assert state.guardrail_usage.blocked_calls == 1
+    assert state.guardrail_events[-1].reason == "duplicate_tool_call"
+    assert state.guardrail_events[-1].allowed is False
+
+
+def test_graph_unsafe_sql_is_blocked_before_sql_adapter() -> None:
+    executor = _CountingExecutor()
+    graph = HarnessGraph(tool_executor=executor)
+    state = IncidentState(status=IncidentStatus.EXECUTING)
+    unsafe = _guardrail_step("S01", "sql_query", {"sql": "DELETE FROM events"})
+
+    graph.execute_next_step(state, unsafe)
+
+    assert state.status is IncidentStatus.TOOL_FAILED
+    assert state.root_cause is None
+    assert executor.calls == []
+    assert state.tool_trace == []
+    assert state.evidence == []
+    assert state.guardrail_usage.blocked_calls == 1
+    assert state.guardrail_events[0].reason == "unsafe_sql"
+
+
+def test_graph_passes_guardrail_limits_to_tool_executor() -> None:
+    executor = _CountingExecutor()
+    graph = HarnessGraph(
+        tool_executor=executor,
+        guardrail_policy=GuardrailPolicy(
+            tool_timeout_seconds=4.5,
+            max_result_rows=17,
+        ),
+    )
+    state = IncidentState(status=IncidentStatus.EXECUTING)
+    step = _guardrail_step("S01", "sql_query", {"sql": "SELECT 1"})
+
+    graph.execute_next_step(state, step)
+
+    assert executor.calls[0]["timeout_seconds"] == 4.5
+    assert executor.calls[0]["max_rows"] == 17
 
 
 def _to_hypothesis_testing(

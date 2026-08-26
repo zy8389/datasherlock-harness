@@ -20,6 +20,12 @@ from agents.planner import (
     Planner,
     PlannerRunResult,
 )
+from harness.guardrails import (
+    GuardrailDecision,
+    GuardrailEventType,
+    GuardrailPolicy,
+    GuardrailRuntime,
+)
 from harness.hypothesis import (
     EvidenceReference,
     HypothesisManager,
@@ -138,11 +144,19 @@ class HarnessGraph:
         tool_executor: ToolExecutor | Any | None = None,
         hypothesis_manager: HypothesisManager | None = None,
         root_cause_validator: RootCauseValidator | None = None,
+        guardrail_runtime: GuardrailRuntime | None = None,
+        guardrail_policy: GuardrailPolicy | None = None,
     ) -> None:
+        if guardrail_runtime is not None and guardrail_policy is not None:
+            raise ValueError("provide guardrail_runtime or guardrail_policy, not both")
         self.planner = planner
         self.tool_executor = tool_executor
         self.hypothesis_manager = hypothesis_manager or HypothesisManager()
         self.root_cause_validator = root_cause_validator or RootCauseValidator()
+        self.guardrail_runtime = guardrail_runtime or GuardrailRuntime(
+            policy=guardrail_policy,
+            registry=getattr(tool_executor, "registry", None),
+        )
 
     # ------------------------------------------------------------------
     # State nodes and runtime orchestration
@@ -245,19 +259,56 @@ class HarnessGraph:
                 IncidentStatus.EXECUTING,
                 "tool execution requires EXECUTING as the current state",
             )
-        selected = step or _first_plan_step(state.plan)
+        selected = step if step is not None else _first_plan_step(state.plan)
         if selected is None:
             raise HarnessPlanningError("EXECUTING requires at least one planned step")
 
         executor = tool_executor if tool_executor is not None else self.tool_executor
         if executor is None:
             raise HarnessPlanningError("an injected ToolExecutor or execution port is required")
+
+        decision = self.guardrail_runtime.preflight(state.guardrail_usage, selected)
+        if decision.reason == "duplicate_tool_call" and _is_explicit_retry_replay(
+            state, selected
+        ):
+            decision = self.guardrail_runtime.preflight(
+                state.guardrail_usage,
+                selected,
+                allow_duplicate=True,
+            )
+        if not decision.allowed:
+            self.guardrail_runtime.record_blocked(state.guardrail_usage)
+            self._record_guardrail_event(
+                state,
+                decision,
+                event_type="preflight",
+                trace_id=trace_id,
+                step_id=_step_id_from_step(selected),
+            )
+            if decision.reason in {
+                "agent_round_budget_exceeded",
+                "tool_call_budget_exceeded",
+                "sql_call_budget_exceeded",
+            }:
+                return self.mark_budget_exceeded(state, reason=decision.reason)
+            return self.transition(state, IncidentStatus.TOOL_FAILED, reason=decision.reason)
+
+        self.guardrail_runtime.record_allowed(state.guardrail_usage, decision)
+        self._record_guardrail_event(
+            state,
+            decision,
+            event_type="preflight",
+            trace_id=trace_id,
+            step_id=_step_id_from_step(selected),
+        )
         try:
             if hasattr(executor, "execute_step"):
                 raw_result = executor.execute_step(
                     selected,
                     incident_id=_incident_id(state),
                     trace_id=trace_id,
+                    timeout_seconds=decision.timeout_seconds,
+                    max_rows=decision.max_rows,
                 )
             elif callable(executor):
                 raw_result = executor(selected)
@@ -272,6 +323,17 @@ class HarnessGraph:
             )
 
         result_payload = cast(dict[str, JsonValue], result.model_dump(mode="json"))
+        for reason, message in self.guardrail_runtime.postflight(result_payload):
+            self._record_guardrail_event(
+                state,
+                decision,
+                event_type="postflight",
+                trace_id=trace_id,
+                step_id=_step_id_from_step(selected),
+                reason=reason,
+                message=message,
+            )
+
         state.tool_trace.append(result_payload)
         state.evidence.append(_tool_observation(result_payload, len(state.tool_trace)))
         for reference in result.evidence:
@@ -785,6 +847,30 @@ class HarnessGraph:
             for item in self.hypothesis_manager.hypotheses()
         ]
 
+    def _record_guardrail_event(
+        self,
+        state: IncidentState,
+        decision: GuardrailDecision,
+        *,
+        event_type: GuardrailEventType,
+        trace_id: str | None,
+        step_id: str | None,
+        reason: str | None = None,
+        message: str | None = None,
+    ) -> None:
+        event = self.guardrail_runtime.event(
+            state.guardrail_usage,
+            decision,
+            event_type=event_type,
+            incident_id=_incident_id(state),
+            trace_id=trace_id,
+            step_id=step_id,
+            sequence=len(state.guardrail_events) + 1,
+            reason=reason,
+            message=message,
+        )
+        state.guardrail_events.append(event)
+
 
 def _validate_minimum_alert(alert: Mapping[str, JsonValue]) -> None:
     required = ("incident_id", "metric", "observed_at")
@@ -860,6 +946,37 @@ def _tool_name_from_step(step: object) -> str:
         if isinstance(value, str):
             return value
     return "unknown"
+
+
+def _step_id_from_step(step: object) -> str | None:
+    if isinstance(step, InvestigationStep):
+        return step.step_id
+    if isinstance(step, Mapping):
+        value = step.get("step_id")
+        return value if isinstance(value, str) else None
+    return None
+
+
+def _is_explicit_retry_replay(
+    state: IncidentState,
+    step: InvestigationStep | Mapping[str, JsonValue],
+) -> bool:
+    """Allow an explicit retry to rerun its same planned step once authorized.
+
+    A new planned step with the same tool and arguments remains a duplicate.
+    This preserves the graph's existing retry semantics without weakening the
+    runtime fingerprint contract for direct or cross-step calls.
+    """
+
+    if state.retry_count <= 0:
+        return False
+    step_id = _step_id_from_step(step)
+    if step_id is None:
+        return False
+    for event in reversed(state.guardrail_events):
+        if event.event_type == "preflight":
+            return event.allowed and event.step_id == step_id
+    return False
 
 
 def _tool_observation(

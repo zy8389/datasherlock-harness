@@ -58,6 +58,79 @@ def test_executor_validates_registry_and_normalizes_sql_success() -> None:
     assert result.model_dump_json()
 
 
+def test_executor_forwards_runtime_timeout_and_row_limit_to_sql_adapter() -> None:
+    calls: list[dict[str, object]] = []
+
+    def run_sql(_: str, __: str, **kwargs: object) -> SqlExecutionResponse:
+        calls.append(kwargs)
+        return SqlExecutionResponse(
+            query_id="Q-LIMITED",
+            status="success",
+            statement_type="SELECT",
+            columns=["answer"],
+            rows=[[1]],
+            row_count=1,
+        )
+
+    result = ToolExecutor("test.duckdb", sql_execution=run_sql).execute_step(
+        _step(), timeout_seconds=2.5, max_rows=7
+    )
+
+    assert result.success is True
+    assert calls == [
+        {
+            "incident_id": None,
+            "trace_id": None,
+            "audit_path": None,
+            "timeout_seconds": 2.5,
+            "max_rows": 7,
+        }
+    ]
+
+
+def test_executor_forwards_runtime_timeout_to_data_quality_adapter() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_check_null_rate(
+        _: str,
+        table: str,
+        column: str,
+        **kwargs: object,
+    ) -> DataQualityCheckResult:
+        calls.append(kwargs)
+        return DataQualityCheckResult(
+            check_name="check_null_rate",
+            status="success",
+            passed=True,
+            table=table,
+            column=column,
+            observed_value=0.0,
+            threshold=0.01,
+            query_id="Q-DQ-LIMITED",
+        )
+
+    result = ToolExecutor(
+        "test.duckdb",
+        data_quality_execution={"check_null_rate": fake_check_null_rate},
+    ).execute_step(
+        _quality_step(
+            "check_null_rate",
+            {"table": "events", "column": "user_id"},
+        ),
+        timeout_seconds=3.5,
+    )
+
+    assert result.success is True
+    assert calls == [
+        {
+            "incident_id": None,
+            "trace_id": None,
+            "audit_path": None,
+            "timeout_seconds": 3.5,
+        }
+    ]
+
+
 def test_executor_rejects_unknown_tool_without_calling_adapter() -> None:
     calls = 0
 

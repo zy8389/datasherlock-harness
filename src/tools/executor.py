@@ -110,6 +110,8 @@ class ToolExecutor:
         *,
         incident_id: str | None = None,
         trace_id: str | None = None,
+        timeout_seconds: float | None = None,
+        max_rows: int | None = None,
     ) -> ToolExecutionResult:
         """Validate and execute one plan step.
 
@@ -149,6 +151,7 @@ class ToolExecutor:
                     normalized_step.arguments,
                     incident_id=incident_id,
                     trace_id=trace_id,
+                    timeout_seconds=timeout_seconds,
                 )
             return self._failure(
                 tool_name,
@@ -169,13 +172,16 @@ class ToolExecutor:
             return self._failure(tool_name, "tool_contract", str(exc))
 
         try:
-            response = self.sql_execution(
-                self.database_path,
-                sql,
-                incident_id=incident_id,
-                trace_id=trace_id,
-                audit_path=self.audit_path,
-            )
+            sql_kwargs: dict[str, Any] = {
+                "incident_id": incident_id,
+                "trace_id": trace_id,
+                "audit_path": self.audit_path,
+            }
+            if timeout_seconds is not None:
+                sql_kwargs["timeout_seconds"] = timeout_seconds
+            if max_rows is not None:
+                sql_kwargs["max_rows"] = max_rows
+            response = self.sql_execution(self.database_path, sql, **sql_kwargs)
             if not isinstance(response, SqlExecutionResponse):
                 response = SqlExecutionResponse.model_validate(response)
         except Exception as exc:  # noqa: BLE001 - normalize adapter failures
@@ -210,6 +216,7 @@ class ToolExecutor:
         *,
         incident_id: str | None,
         trace_id: str | None,
+        timeout_seconds: float | None,
     ) -> ToolExecutionResult:
         adapter = self.data_quality_execution.get(tool_name)
         if adapter is None:
@@ -225,12 +232,17 @@ class ToolExecutor:
             return self._failure(tool_name, "tool_contract", str(exc))
 
         try:
+            quality_kwargs: dict[str, Any] = {
+                "incident_id": incident_id,
+                "trace_id": trace_id,
+                "audit_path": self.audit_path,
+            }
+            if timeout_seconds is not None:
+                quality_kwargs["timeout_seconds"] = timeout_seconds
             raw_result = adapter(
                 self.database_path,
                 **call_arguments,
-                incident_id=incident_id,
-                trace_id=trace_id,
-                audit_path=self.audit_path,
+                **quality_kwargs,
             )
             result = (
                 raw_result
