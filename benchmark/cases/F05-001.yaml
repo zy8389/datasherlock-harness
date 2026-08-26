@@ -1,0 +1,51 @@
+schema_version: 1
+case_id: F05-001
+fault_id: F05
+source_seed_case_id: F05-001
+variant_index: 1
+seed: 5001
+baseline_seed: 2
+baseline_start_date: '2026-01-01'
+baseline_days: 31
+baseline_user_count: 500
+baseline_event_count: 10000
+metric_date: '2026-01-30'
+root_cause_type: timezone_error
+affected_metric: daily_active_users
+affected_assets:
+- events
+- metric_versions
+- pipeline_runs
+injection:
+  strategy: shift_region_boundary_events
+  metric_date: '2026-01-30'
+  region: CN
+  shift_hours: 8
+  to_value: Asia/Shanghai
+original_alert:
+  incident_id: INC-F05-001
+  metric: daily_active_users
+  observed_at: '2026-01-30'
+  expected_value: 111.0
+  observed_value: 106.0
+  change_rate: -0.04504505
+  severity: low
+expected_direction: decrease
+effect_size_type: relative
+minimum_effect_size: 0.01
+actual_effect: -0.04504505
+affected_row_count: 48
+severity: low
+expected_evidence:
+- CN hourly business-event distribution shifts near the date boundary
+- metric_versions records a timezone boundary configuration that disagrees with the
+  UTC metric baseline
+evidence_paths:
+- source_type: business_data
+  asset: events
+  signal: CN event-hour distribution shifts after the boundary event timestamps are
+    moved
+- source_type: metric_version
+  asset: metric_versions
+  signal: daily_active_users timezone changes from UTC to Asia/Shanghai at the target
+    date

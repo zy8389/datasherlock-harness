@@ -1,0 +1,40 @@
+schema_version: 1
+case_id: F08-004
+fault_id: F08
+source_seed_case_id: F08-001
+variant_index: 4
+seed: 8004
+baseline_seed: 2
+baseline_start_date: '2026-01-01'
+baseline_days: 31
+baseline_user_count: 500
+baseline_event_count: 10000
+metric_date: '2026-01-27'
+root_cause_type: join_explosion
+affected_metric: ai_task_count
+affected_assets:
+- events
+- experiment_assignments
+- metric_versions
+injection:
+  strategy: duplicate_assignments_and_join_events
+  metric_date: '2026-01-27'
+  ratio: 0.9
+original_alert:
+  incident_id: INC-F08-004
+  metric: ai_task_count
+  observed_at: '2026-01-27'
+  expected_value: 86.0
+  observed_value: 118.0
+  change_rate: 0.37209302
+  severity: high
+expected_direction: increase
+effect_size_type: relative
+minimum_effect_size: 0.2
+actual_effect: 0.37209302
+affected_row_count: 181
+severity: high
+expected_evidence:
+- assignment cardinality exceeds one
+- joined event rows inflate
+evidence_paths: []

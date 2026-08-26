@@ -1,0 +1,48 @@
+schema_version: 1
+case_id: F04-005
+fault_id: F04
+source_seed_case_id: F04-001
+variant_index: 5
+seed: 4005
+baseline_seed: 2
+baseline_start_date: '2026-01-01'
+baseline_days: 31
+baseline_user_count: 500
+baseline_event_count: 10000
+metric_date: '2026-01-26'
+root_cause_type: data_delay
+affected_metric: daily_active_users
+affected_assets:
+- events
+- partition_metadata
+- pipeline_runs
+injection:
+  strategy: delay_android_events_one_day
+  metric_date: '2026-01-26'
+  ratio: 0.6
+  device_type: ios
+  shift_days: 1
+original_alert:
+  incident_id: INC-F04-005
+  metric: daily_active_users
+  observed_at: '2026-01-26'
+  expected_value: 110.0
+  observed_value: 91.0
+  change_rate: -0.17272727
+  severity: medium
+expected_direction: decrease
+effect_size_type: relative
+minimum_effect_size: 0.1
+actual_effect: -0.17272727
+affected_row_count: 63
+severity: medium
+expected_evidence:
+- target-day Android business events decrease and following-day events rebound
+- pipeline_runs records a delayed events partition completion
+evidence_paths:
+- source_type: business_data
+  asset: events
+  signal: target-day Android events decrease and following-day events rebound
+- source_type: operational_metadata
+  asset: pipeline_runs
+  signal: events pipeline run status is delayed for the target partition

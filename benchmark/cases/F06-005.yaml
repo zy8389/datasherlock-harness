@@ -1,0 +1,40 @@
+schema_version: 1
+case_id: F06-005
+fault_id: F06
+source_seed_case_id: F06-001
+variant_index: 5
+seed: 6005
+baseline_seed: 2
+baseline_start_date: '2026-01-01'
+baseline_days: 31
+baseline_user_count: 500
+baseline_event_count: 10000
+metric_date: '2026-01-26'
+root_cause_type: unit_error
+affected_metric: average_session_duration
+affected_assets:
+- events
+- schema_snapshots
+injection:
+  strategy: multiply_duration_seconds
+  metric_date: '2026-01-26'
+  ratio: 0.4
+  multiplier: 750.0
+original_alert:
+  incident_id: INC-F06-005
+  metric: average_session_duration
+  observed_at: '2026-01-26'
+  expected_value: 745.97723577
+  observed_value: 203762.30544715
+  change_rate: 272.14815476
+  severity: critical
+expected_direction: increase
+effect_size_type: relative
+minimum_effect_size: 0.2
+actual_effect: 272.14815476
+affected_row_count: 148
+severity: critical
+expected_evidence:
+- duration_seconds has thousand-fold outliers
+- average duration increases
+evidence_paths: []

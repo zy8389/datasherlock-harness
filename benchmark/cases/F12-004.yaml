@@ -1,0 +1,47 @@
+schema_version: 1
+case_id: F12-004
+fault_id: F12
+source_seed_case_id: F12-001
+variant_index: 4
+seed: 12004
+baseline_seed: 2
+baseline_start_date: '2026-01-01'
+baseline_days: 31
+baseline_user_count: 500
+baseline_event_count: 10000
+metric_date: '2026-01-27'
+root_cause_type: ab_split_anomaly
+affected_metric: conversion_rate
+affected_assets:
+- experiment_assignments
+- experiment_configs
+- subscriptions
+injection:
+  strategy: change_experiment_split_to_20_80
+  metric_date: '2026-01-27'
+  control_ratio: 0.1
+  treatment_ratio: 0.9
+original_alert:
+  incident_id: INC-F12-004
+  metric: conversion_rate
+  observed_at: '2026-01-27'
+  expected_value: 0.05825243
+  observed_value: 0.08737864
+  change_rate: 0.49999991
+  severity: high
+expected_direction: increase
+effect_size_type: relative
+minimum_effect_size: 0.05
+actual_effect: 0.49999991
+affected_row_count: 145
+severity: high
+expected_evidence:
+- experiment assignment business data changes from a 50/50 allocation
+- experiment_configs records the anomalous 20/80 allocation and new version
+evidence_paths:
+- source_type: business_data
+  asset: experiment_assignments
+  signal: experiment assignment distribution changes from the baseline 50/50 split
+- source_type: experiment_config
+  asset: experiment_configs
+  signal: experiment configuration version changes to control 20/80 treatment allocation

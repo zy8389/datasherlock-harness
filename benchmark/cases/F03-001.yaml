@@ -1,0 +1,40 @@
+schema_version: 1
+case_id: F03-001
+fault_id: F03
+source_seed_case_id: F03-001
+variant_index: 1
+seed: 3001
+baseline_seed: 2
+baseline_start_date: '2026-01-01'
+baseline_days: 31
+baseline_user_count: 500
+baseline_event_count: 10000
+metric_date: '2026-01-30'
+root_cause_type: null_value_anomaly
+affected_metric: daily_active_users
+affected_assets:
+- events
+- pipeline_runs
+injection:
+  strategy: null_mobile_user_ids
+  metric_date: '2026-01-30'
+  ratio: 0.25
+  device_type: mobile
+original_alert:
+  incident_id: INC-F03-001
+  metric: daily_active_users
+  observed_at: '2026-01-30'
+  expected_value: 111.0
+  observed_value: 96.0
+  change_rate: -0.13513514
+  severity: medium
+expected_direction: decrease
+effect_size_type: relative
+minimum_effect_size: 0.01
+actual_effect: -0.13513514
+affected_row_count: 47
+severity: medium
+expected_evidence:
+- event user_id null rate increases
+- event row count stays stable
+evidence_paths: []
