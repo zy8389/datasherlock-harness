@@ -248,7 +248,9 @@ class ToolExecutor:
             )
 
         metric = self._metric_definition(metric_id)
-        if metric is not None and metric.id in response.columns:
+        if metric is not None and set(response.columns) == set(
+            metric.validation.expected_column_types
+        ):
             try:
                 aggregation = MetricAggregation(metric.aggregation)
             except ValueError:

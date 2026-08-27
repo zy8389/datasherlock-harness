@@ -37,17 +37,21 @@ from benchmark.case_generator import (
     validate_case_manifest,
 )
 from benchmark.cases import CASE_ID_RE, CaseManifest
+from benchmark.evidence_interpreter import (
+    EvidencePolarity,
+    RuntimeEvidenceInterpreter,
+)
 from config.model_settings import ModelSettings
 from harness.checkpoint import CheckpointManager, FileCheckpointStore
 from harness.graph import HarnessGraph
 from harness.guardrails import GuardrailRuntime
-from harness.hypothesis import EvidenceReference, HypothesisManager
+from harness.hypothesis import HypothesisManager
 from harness.state import IncidentState, IncidentStatus
 from llm.base import ModelClient
 from llm.factory import create_model_client
 from llm.mock_client import MockModelClient
 from llm.models import ModelUsage
-from tools.executor import ToolExecutor
+from tools.executor import ToolExecutionResult, ToolExecutor
 from tools.registry import build_default_tool_registry
 from validators.root_cause_validator import RootCauseValidator
 
@@ -501,9 +505,12 @@ class CurrentHarnessExecutor:
 
     @staticmethod
     def _run_graph_loop(graph: HarnessGraph, state: IncidentState) -> None:
-        """Advance through graph APIs and interpret observations generically."""
+        """Advance through graph APIs and interpret structured observations."""
 
         steps = [InvestigationStep.model_validate(step) for step in state.plan]
+        interpreter = RuntimeEvidenceInterpreter(
+            incident_id=str(state.alert.get("incident_id", "unknown-incident"))
+        )
         for index, step in enumerate(steps, start=1):
             if state.status is not IncidentStatus.EXECUTING:
                 break
@@ -515,15 +522,34 @@ class CurrentHarnessExecutor:
             if state.status is not IncidentStatus.VALIDATING:
                 break
             graph.enter_hypothesis_testing(state)
-            trace = state.tool_trace[-1]
-            evidence = _interpret_tool_observation(trace, step, index)
-            graph.register_evidence(state, evidence)
-            graph.attach_evidence(
-                state,
-                step.hypothesis_id,
-                evidence.evidence_id,
-                supports=True,
+            tool_result = ToolExecutionResult.model_validate(state.tool_trace[-1])
+            hypothesis = graph.hypothesis_manager.get_hypothesis(step.hypothesis_id)
+            interpretation = interpreter.interpret(
+                hypothesis=hypothesis,
+                step=step,
+                tool_result=tool_result,
             )
+            references = (
+                tool_result.evidence
+                if tool_result.evidence and interpretation.evidence is not None
+                else ([interpretation.evidence] if interpretation.evidence else [])
+            )
+            for evidence in references:
+                graph.register_evidence(state, evidence)
+                if interpretation.polarity is EvidencePolarity.SUPPORTS:
+                    graph.attach_evidence(
+                        state,
+                        step.hypothesis_id,
+                        evidence.evidence_id,
+                        supports=True,
+                    )
+                elif interpretation.polarity is EvidencePolarity.CONTRADICTS:
+                    graph.attach_evidence(
+                        state,
+                        step.hypothesis_id,
+                        evidence.evidence_id,
+                        supports=False,
+                    )
             validation = graph.validate_hypothesis(
                 state,
                 step.hypothesis_id,
@@ -579,42 +605,6 @@ def _cost_from_usage(
     return (
         usage.input_tokens * config.input_cost_per_token
         + usage.output_tokens * config.output_cost_per_token
-    )
-
-
-def _source_type_for_step(step: InvestigationStep) -> str:
-    sql = str(step.arguments.get("sql", "")).lower()
-    material = f"{step.purpose} {step.expected_evidence[0]} {sql}".lower()
-    if "schema_snapshot" in material or "schema drift" in material:
-        return "schema_metadata"
-    if "metric_version" in material or "definition_hash" in material:
-        return "metric_version"
-    if "experiment_config" in material or "allocation" in material:
-        return "experiment_config"
-    if "partition_metadata" in material or "pipeline_runs" in material:
-        return "operational_metadata"
-    return "business_data"
-
-
-def _interpret_tool_observation(
-    trace: Mapping[str, Any],
-    step: InvestigationStep,
-    sequence: int,
-) -> EvidenceReference:
-    """Turn a completed tool result into explicit runtime evidence metadata."""
-
-    query_id = trace.get("query_id")
-    evidence_id = f"runtime-observation-{query_id or sequence}"
-    observation = cast(
-        dict[str, JsonValue],
-        {"tool_result": cast(JsonValue, dict(trace))},
-    )
-    return EvidenceReference(
-        evidence_id=evidence_id,
-        source_type=_source_type_for_step(step),
-        description=step.expected_evidence[0],
-        query_id=str(query_id) if query_id else None,
-        observation=observation,
     )
 
 
@@ -1207,13 +1197,13 @@ def run_seed_orchestration(
     )
 
 
-def run_real_harness_smoke(
+def run_deterministic_harness_smoke(
     config: BenchmarkRunConfig,
     *,
     cases_directory: Path = Path("benchmark/cases"),
     executor: HarnessExecutor | None = None,
 ) -> BenchmarkRunSummary:
-    """Run the five-case real Harness smoke without a live model provider."""
+    """Run deterministic current-runtime wiring smoke without measuring accuracy."""
 
     smoke_config = config.model_copy(
         update={
@@ -1237,16 +1227,38 @@ def run_real_harness_smoke(
     )
 
 
+def run_real_harness_smoke(
+    config: BenchmarkRunConfig,
+    *,
+    cases_directory: Path = Path("benchmark/cases"),
+    executor: HarnessExecutor | None = None,
+) -> BenchmarkRunSummary:
+    """Compatibility wrapper for :func:`run_deterministic_harness_smoke`."""
+
+    return run_deterministic_harness_smoke(
+        config,
+        cases_directory=cases_directory,
+        executor=executor,
+    )
+
+
 def _smoke_model_client_factory(runtime_input: HarnessRuntimeInput) -> ModelClient:
     """Deterministic model behavior based only on the runtime alert semantics."""
 
     alert = runtime_input.alert
+    date_literal = alert.observed_at[:10]
     if alert.metric == "daily_active_users" and alert.change_rate <= -0.4:
         root_cause = "metric_definition_change"
-        second_sql = "SELECT definition_hash, query FROM metric_versions LIMIT 1"
+        second_sql = (
+            "SELECT version, definition_hash, query FROM metric_versions "
+            "WHERE metric_id = 'daily_active_users' ORDER BY version"
+        )
     elif alert.metric == "daily_active_users" and alert.change_rate < 0:
         root_cause = "missing_partition"
-        second_sql = "SELECT row_count, status FROM partition_metadata LIMIT 1"
+        second_sql = (
+            "SELECT partition_value, row_count, status FROM partition_metadata "
+            f"WHERE table_name = 'events' AND partition_value = '{date_literal}/android'"
+        )
     elif alert.metric == "ai_task_count" and alert.change_rate > 0:
         root_cause = "duplicate_batch"
         second_sql = "SELECT status, error_type FROM pipeline_runs LIMIT 1"
@@ -1270,10 +1282,26 @@ def _smoke_plan(alert: Alert, root_cause: str, second_sql: str) -> Investigation
         "missing_partition" if root_cause != "missing_partition" else "data_delay",
         "data_delay" if root_cause not in {"missing_partition", "data_delay"} else "null_value_anomaly",
     ]
-    first_sql = (
-        "SELECT COUNT(*) AS event_count FROM events "
-        f"WHERE CAST(event_time AS DATE) = DATE '{date_literal}'"
-    )
+    if root_cause == "missing_partition":
+        first_sql = (
+            "SELECT COUNT(*) AS android_event_count FROM events "
+            f"WHERE CAST(event_time AS DATE) = DATE '{date_literal}' "
+            "AND device_type = 'android'"
+        )
+    elif root_cause == "metric_definition_change":
+        first_sql = (
+            "SELECT COUNT(*) AS raw_event_count, "
+            "COUNT(DISTINCT user_id) AS raw_user_count, "
+            "(SELECT daily_active_users FROM daily_metrics "
+            f"WHERE metric_date = DATE '{date_literal}') AS daily_active_users "
+            "FROM events "
+            f"WHERE CAST(event_time AS DATE) = DATE '{date_literal}'"
+        )
+    else:
+        first_sql = (
+            "SELECT COUNT(*) AS event_count FROM events "
+            f"WHERE CAST(event_time AS DATE) = DATE '{date_literal}'"
+        )
     return InvestigationPlan.model_validate(
         {
             "incident_id": alert.incident_id,
@@ -1333,6 +1361,7 @@ __all__ = [
     "materialize_case_environment",
     "run_batch",
     "run_case",
+    "run_deterministic_harness_smoke",
     "run_real_harness_smoke",
     "run_seed_orchestration",
     "validate_case_manifest",

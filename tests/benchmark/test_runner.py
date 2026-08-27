@@ -19,7 +19,7 @@ from benchmark.runner import (
     execute_with_timeout,
     load_selected_cases,
     run_batch,
-    run_real_harness_smoke,
+    run_deterministic_harness_smoke,
     run_seed_orchestration,
 )
 
@@ -305,15 +305,20 @@ def test_production_adapter_selection_and_fail_closed_config(tmp_path: Path) -> 
         build_harness_executor(config.model_copy(update={"model_name": "unknown-model"}))
 
 
-def test_real_harness_smoke_uses_current_graph_and_includes_f11(tmp_path: Path) -> None:
-    summary = run_real_harness_smoke(
+def test_deterministic_harness_smoke_checks_runtime_wiring_and_includes_f11(
+    tmp_path: Path,
+) -> None:
+    summary = run_deterministic_harness_smoke(
         _config(tmp_path, "F01-001", run_id="real-smoke", timeout=60.0),
         cases_directory=CASES_DIRECTORY,
     )
 
     assert summary.attempted == summary.completed == 5
     assert summary.error_count == summary.timed_out_count == 0
-    assert summary.correct == summary.scored == 5
+    # This is deterministic current-runtime wiring smoke, not a benchmark
+    # accuracy measurement. Only the two cases with concrete interpreter rules
+    # are required to produce predictions.
+    assert summary.correct == summary.scored == 2
     assert {result.case_id for result in summary.results} == {
         "F01-001",
         "F02-001",
@@ -322,9 +327,28 @@ def test_real_harness_smoke_uses_current_graph_and_includes_f11(tmp_path: Path) 
         "F12-001",
     }
     f11 = next(result for result in summary.results if result.case_id == "F11-001")
+    f01 = next(result for result in summary.results if result.case_id == "F01-001")
+    assert f01.predicted_root_cause == "missing_partition"
+    assert f01.top1_correct is True
     assert f11.expected_root_cause == "metric_definition_change"
     assert f11.predicted_root_cause == "metric_definition_change"
     assert f11.top1_correct is True
+    for result, expected_sources in (
+        (f01, {"business_data", "operational_metadata"}),
+        (f11, {"business_data", "metric_version"}),
+    ):
+        assert result.trace_path is not None
+        state = json.loads(result.trace_path.read_text(encoding="utf-8"))["state"]
+        assert state["root_cause"] is not None
+        supporting_ids = set(state["root_cause"]["supporting_evidence_ids"])
+        references = {
+            reference["evidence_id"]: reference
+            for reference in state["evidence"]
+            if "source_type" in reference
+        }
+        assert {
+            references[evidence_id]["source_type"] for evidence_id in supporting_ids
+        } == expected_sources
     for result in summary.results:
         assert result.trace_path is not None
         trace_text = result.trace_path.read_text(encoding="utf-8")
