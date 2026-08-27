@@ -6,6 +6,7 @@ import pytest
 from tools.data_quality import DataQualityCheckResult, DataQualityEvidence
 from tools.executor import ToolExecutor, data_quality_evidence_to_reference
 from tools.sql_runner import SqlExecutionResponse
+from validators.sql_result import SqlResultFailureReason
 
 
 def _step(sql: str = "SELECT 1") -> dict[str, Any]:
@@ -42,6 +43,7 @@ def test_executor_validates_registry_and_normalizes_sql_success() -> None:
             status="success",
             statement_type="SELECT",
             columns=["answer"],
+            column_types=["INTEGER"],
             rows=[[1]],
             row_count=1,
         )
@@ -68,6 +70,7 @@ def test_executor_forwards_runtime_timeout_and_row_limit_to_sql_adapter() -> Non
             status="success",
             statement_type="SELECT",
             columns=["answer"],
+            column_types=["INTEGER"],
             rows=[[1]],
             row_count=1,
         )
@@ -86,6 +89,88 @@ def test_executor_forwards_runtime_timeout_and_row_limit_to_sql_adapter() -> Non
             "max_rows": 7,
         }
     ]
+
+
+def test_executor_attaches_pure_sql_validation_without_evidence() -> None:
+    def run_sql(_: str, __: str, **_kwargs: object) -> SqlExecutionResponse:
+        return SqlExecutionResponse(
+            query_id="Q-VALIDATED",
+            status="success",
+            statement_type="SELECT",
+            columns=["answer"],
+            column_types=["INTEGER"],
+            rows=[[1]],
+            row_count=1,
+        )
+
+    result = ToolExecutor("test.duckdb", sql_execution=run_sql).execute_step(_step())
+
+    assert result.success is True
+    assert result.sql_validation is not None
+    assert result.sql_validation.passed is True
+    assert result.evidence == []
+
+
+def test_executor_keeps_sql_success_separate_from_empty_result_validation() -> None:
+    def run_sql(_: str, __: str, **_kwargs: object) -> SqlExecutionResponse:
+        return SqlExecutionResponse(
+            query_id="Q-EMPTY",
+            status="success",
+            statement_type="SELECT",
+            columns=["answer"],
+            column_types=["INTEGER"],
+            rows=[],
+            row_count=0,
+        )
+
+    result = ToolExecutor("test.duckdb", sql_execution=run_sql).execute_step(_step())
+
+    assert result.success is True
+    assert result.sql_validation is not None
+    assert result.sql_validation.reason is SqlResultFailureReason.EMPTY_RESULT
+    assert result.evidence == []
+
+
+def test_executor_keeps_sql_execution_failure_separate_from_validation() -> None:
+    def run_sql(_: str, __: str, **_kwargs: object) -> SqlExecutionResponse:
+        return SqlExecutionResponse(
+            query_id="Q-ERROR",
+            status="error",
+            error={"type": "execution", "message": "missing table"},
+        )
+
+    result = ToolExecutor("test.duckdb", sql_execution=run_sql).execute_step(_step())
+
+    assert result.success is False
+    assert result.sql_validation is not None
+    assert result.sql_validation.reason is SqlResultFailureReason.SQL_EXECUTION_FAILED
+    assert result.evidence == []
+
+
+def test_executor_applies_metric_policy_only_when_metric_output_is_present() -> None:
+    def run_sql(_: str, __: str, **_kwargs: object) -> SqlExecutionResponse:
+        return SqlExecutionResponse(
+            query_id="Q-METRIC",
+            status="success",
+            statement_type="SELECT",
+            columns=["metric_date", "daily_active_users"],
+            column_types=["DATE", "BIGINT"],
+            rows=[["2026-08-12", 10]],
+            row_count=1,
+        )
+
+    metric_sql = (
+        "SELECT CAST('2026-08-12' AS DATE) AS metric_date, "
+        "COUNT(DISTINCT 1) AS daily_active_users"
+    )
+    result = ToolExecutor("test.duckdb", sql_execution=run_sql).execute_step(
+        _step(metric_sql), metric_id="daily_active_users"
+    )
+
+    assert result.success is True
+    assert result.sql_validation is not None
+    assert result.sql_validation.passed is True
+    assert result.sql_validation.evidence.ast_validated is True
 
 
 def test_executor_forwards_runtime_timeout_to_data_quality_adapter() -> None:

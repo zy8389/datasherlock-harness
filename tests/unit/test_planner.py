@@ -103,9 +103,14 @@ def test_metric_diagnostics_stay_out_of_planner_context_and_prompt() -> None:
     assert "common_anomalies" not in context_payload
     assert "verification_fields" not in context_payload
     assert "diagnostic_tools" not in context_payload
+    assert "validation" not in context_payload
     assert "common_anomalies" not in request_payload["metric_context"]
     assert "verification_fields" not in request_payload["metric_context"]
     assert "diagnostic_tools" not in request_payload["metric_context"]
+    assert "validation" not in request_payload["metric_context"]
+    assert "expected_column_types" not in prompt
+    assert "numeric_ranges" not in prompt
+    assert "max_result_rows" not in prompt
     for diagnostic in (
         *metric.common_anomalies,
         *metric.verification_fields,

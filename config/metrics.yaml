@@ -17,6 +17,14 @@ metrics:
       FROM events
       GROUP BY metric_date
     unit: users
+    validation:
+      expected_column_types:
+        metric_date: DATE
+        daily_active_users: BIGINT
+      numeric_ranges:
+        daily_active_users:
+          minimum: 0
+      max_result_rows: 1000
     common_anomalies:
       - sudden daily active-user decrease
       - device or region segment disappearance
@@ -42,6 +50,14 @@ metrics:
       FROM users
       GROUP BY metric_date
     unit: users
+    validation:
+      expected_column_types:
+        metric_date: DATE
+        new_users: BIGINT
+      numeric_ranges:
+        new_users:
+          minimum: 0
+      max_result_rows: 1000
     common_anomalies:
       - registrations unexpectedly reach zero
       - registration volume spikes or shifts to the wrong date
@@ -89,6 +105,14 @@ metrics:
       OR CAST(subscriptions.end_time AS DATE) > dates.metric_date)
       GROUP BY dates.metric_date
     unit: users
+    validation:
+      expected_column_types:
+        metric_date: DATE
+        paid_users: BIGINT
+      numeric_ranges:
+        paid_users:
+          minimum: 0
+      max_result_rows: 1000
     common_anomalies:
       - paid-user count drops despite active subscriptions
       - ended subscriptions remain counted
@@ -117,6 +141,14 @@ metrics:
       WHERE event_name = 'run_ai_task'
       GROUP BY metric_date
     unit: events
+    validation:
+      expected_column_types:
+        metric_date: DATE
+        ai_task_count: BIGINT
+      numeric_ranges:
+        ai_task_count:
+          minimum: 0
+      max_result_rows: 1000
     common_anomalies:
       - task count spikes from duplicate ingestion or join multiplication
       - task count drops after event-name drift
@@ -149,6 +181,14 @@ metrics:
       ) AS sessions
       GROUP BY metric_date
     unit: seconds
+    validation:
+      expected_column_types:
+        metric_date: DATE
+        average_session_duration: DOUBLE
+      numeric_ranges:
+        average_session_duration:
+          minimum: 0
+      max_result_rows: 1000
     common_anomalies:
       - average duration is amplified by a unit conversion error
       - duration distribution develops extreme outliers
@@ -195,6 +235,15 @@ metrics:
       AND newly_paid_users.user_id = active_users.user_id
       GROUP BY active_users.metric_date
     unit: ratio
+    validation:
+      expected_column_types:
+        metric_date: DATE
+        conversion_rate: DOUBLE
+      numeric_ranges:
+        conversion_rate:
+          minimum: 0
+          maximum: 1
+      max_result_rows: 1000
     common_anomalies:
       - conversion rate shifts after an experiment allocation change
       - numerator or denominator unexpectedly becomes zero

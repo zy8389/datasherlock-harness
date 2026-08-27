@@ -210,6 +210,39 @@ def test_execution_result_becomes_unvalidated_observation() -> None:
     assert state.evidence[0]["root_cause_validated"] is False
 
 
+def test_graph_persists_sql_validation_without_registering_sql_evidence() -> None:
+    def execute_sql(
+        _database_path: str,
+        _sql: str,
+        **_kwargs: object,
+    ) -> SqlExecutionResponse:
+        return SqlExecutionResponse(
+            query_id="Q-SQL-VALIDATION",
+            status="success",
+            statement_type="SELECT",
+            columns=["answer"],
+            column_types=["INTEGER"],
+            rows=[[1]],
+            row_count=1,
+        )
+
+    graph = HarnessGraph(
+        tool_executor=ToolExecutor("unused.duckdb", sql_execution=execute_sql)
+    )
+    state = IncidentState(
+        alert={"metric": "daily_active_users"},
+        status=IncidentStatus.EXECUTING,
+        plan=[_plan().steps[0].model_dump(mode="json")],
+    )
+
+    graph.execute_next_step(state)
+
+    assert state.status is IncidentStatus.VALIDATING
+    assert state.tool_trace[0]["sql_validation"]["passed"] is True
+    assert state.evidence[0]["evidence_type"] == "tool_result"
+    assert graph.hypothesis_manager.evidence() == ()
+
+
 def _guardrail_step(
     step_id: str,
     tool: str,

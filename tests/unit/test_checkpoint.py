@@ -80,6 +80,18 @@ def _state(
                 "success": True,
                 "query_id": "Q01",
                 "result": {"rows": [[1]]},
+                "sql_validation": {
+                    "passed": False,
+                    "reason": "empty_result",
+                    "evidence": {
+                        "query_id": "Q01",
+                        "columns": [],
+                        "column_types": [],
+                        "row_count": 0,
+                        "truncated": False,
+                        "usable": False,
+                    },
+                },
             }
         ],
         planner_metadata={"fallback_used": False},
@@ -152,6 +164,7 @@ def test_checkpoint_state_and_guardrail_round_trip(tmp_path) -> None:
     assert restored.resume == checkpoint.resume
     assert restored.state.guardrail_usage.sql_calls == 1
     assert restored.state.guardrail_events[0].event_id == "gr-001"
+    assert restored.state.tool_trace[0]["sql_validation"]["reason"] == "empty_result"
     assert restored.state.retry_count == 1
     assert checkpoint.model_dump_json()
 
