@@ -8,7 +8,9 @@ the graph does not duplicate their domain rules.
 
 from __future__ import annotations
 
+import hmac
 from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any, Final, cast
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
@@ -147,6 +149,24 @@ ALLOWED_TRANSITIONS: Final[
 }
 
 _BeforeCommit = Callable[[], None]
+_TYPED_PROPOSAL_TRIGGER_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "proposal_id",
+        "incident_id",
+        "root_cause_type",
+        "proposal_hash",
+        "parameters",
+        "evidence",
+        "root_cause_confidence",
+        "supporting_evidence_ids",
+        "independent_source_types",
+        "affected_assets",
+        "risk",
+        "rationale",
+        "created_at",
+        "valid_until",
+    }
+)
 
 
 class HarnessGraph:
@@ -671,11 +691,21 @@ class HarnessGraph:
 
         if not isinstance(proposal, Mapping) or not proposal:
             raise self._error(state, IncidentStatus.FIX_PROPOSED, "fix proposal must be a non-empty mapping")
+        typed_proposal = self._typed_repair_proposal(state, proposal=proposal)
+        if typed_proposal is not None:
+            self._validate_typed_proposal(
+                state, typed_proposal, require_root_cause_status=True
+            )
+            stored_proposal = cast(
+                dict[str, JsonValue], typed_proposal.model_dump(mode="json")
+            )
+        else:
+            stored_proposal = dict(proposal)
         self._transition(
             state,
             IncidentStatus.FIX_PROPOSED,
             reason=reason,
-            before_commit=lambda: setattr(state, "fix_proposal", dict(proposal)),
+            before_commit=lambda: setattr(state, "fix_proposal", stored_proposal),
         )
         return self.transition(state, IncidentStatus.AWAITING_APPROVAL, reason=reason)
 
@@ -686,12 +716,87 @@ class HarnessGraph:
         *,
         reason: str | None = None,
         metadata: Mapping[str, JsonValue] | None = None,
+        now: datetime | None = None,
         **details: JsonValue,
     ) -> HarnessTransitionResult:
         """Record an approval decision and enter repair or REJECTED."""
 
         if not isinstance(approved, bool):
             raise self._error(state, IncidentStatus.SANDBOX_REPAIR, "approved must be a boolean")
+        typed_proposal = self._typed_repair_proposal(state)
+        if typed_proposal is not None:
+            if metadata is None or not isinstance(metadata, Mapping):
+                raise self._error(
+                    state,
+                    IncidentStatus.SANDBOX_REPAIR,
+                    "typed repair approval requires ApprovalDecision metadata",
+                )
+            if details:
+                raise self._error(
+                    state,
+                    IncidentStatus.SANDBOX_REPAIR,
+                    "typed repair approval does not accept unbound details",
+                )
+            from harness.repair import ApprovalDecision, ApprovalOutcome
+
+            try:
+                decision = ApprovalDecision.model_validate(metadata)
+            except (TypeError, ValueError) as exc:
+                raise self._error(
+                    state,
+                    IncidentStatus.SANDBOX_REPAIR,
+                    "approval metadata is not a valid typed ApprovalDecision",
+                ) from exc
+            self._validate_typed_proposal(state, typed_proposal)
+            try:
+                current = _aware_utc(now or datetime.now(UTC), "now")
+            except ValueError as exc:
+                raise self._error(
+                    state,
+                    IncidentStatus.SANDBOX_REPAIR,
+                    "approval decision time must be timezone-aware",
+                ) from exc
+            if current < typed_proposal.created_at or current > typed_proposal.valid_until:
+                raise self._error(
+                    state,
+                    IncidentStatus.SANDBOX_REPAIR,
+                    "repair proposal has expired or is not yet valid",
+                )
+            if (
+                decision.incident_id != typed_proposal.incident_id
+                or decision.proposal_id != typed_proposal.proposal_id
+                or not hmac.compare_digest(
+                    decision.proposal_hash, typed_proposal.proposal_hash
+                )
+                or decision.decided_at < typed_proposal.created_at
+                or decision.decided_at > typed_proposal.valid_until
+            ):
+                raise self._error(
+                    state,
+                    IncidentStatus.SANDBOX_REPAIR,
+                    "approval decision does not bind to repair proposal",
+                )
+            expected_outcome = (
+                ApprovalOutcome.APPROVED if approved else ApprovalOutcome.REJECTED
+            )
+            if decision.outcome is not expected_outcome:
+                raise self._error(
+                    state,
+                    IncidentStatus.SANDBOX_REPAIR,
+                    "approved flag conflicts with ApprovalDecision.outcome",
+                )
+            payload = cast(dict[str, JsonValue], decision.model_dump(mode="json"))
+            payload["status"] = "approved" if approved else "rejected"
+            if reason is not None:
+                payload["reason"] = reason
+            target = IncidentStatus.SANDBOX_REPAIR if approved else IncidentStatus.REJECTED
+            return self._transition(
+                state,
+                target,
+                reason=reason,
+                approval_approved=approved,
+                before_commit=lambda: setattr(state, "approval", payload),
+            )
         payload: dict[str, JsonValue] = {"status": "approved" if approved else "rejected"}
         if reason is not None:
             payload["reason"] = reason
@@ -719,13 +824,79 @@ class HarnessGraph:
         reason: str | None = None,
         **details: JsonValue,
     ) -> HarnessTransitionResult:
-        """Record a repair outcome without implementing a repair engine."""
+        """Record a repair outcome without implementing a repair engine.
+
+        A concrete executor remains an injected collaborator.  Its typed
+        ``SandboxRun`` payload is stored here so a checkpoint after a
+        successful repair can resume at post-validation without replaying the
+        repair.
+        """
 
         if isinstance(succeeded, Mapping):
             if result is not None:
                 raise self._error(state, IncidentStatus.POST_VALIDATION, "repair result was provided more than once")
             result = succeeded
             succeeded = None
+
+        typed_proposal = self._typed_repair_proposal(state)
+        if typed_proposal is not None:
+            if result is None or not isinstance(result, Mapping):
+                raise self._error(
+                    state,
+                    IncidentStatus.POST_VALIDATION,
+                    "typed repair completion requires a SandboxRun result",
+                )
+            if details:
+                raise self._error(
+                    state,
+                    IncidentStatus.POST_VALIDATION,
+                    "typed repair result does not accept unbound details",
+                )
+            run = self._validate_typed_repair_result(state, result, typed_proposal)
+            derived_success = run.status.value == "succeeded"
+            outcome_values: list[bool] = []
+            if succeeded is not None:
+                outcome_values.append(succeeded)
+            if success is not None:
+                outcome_values.append(success)
+            if fatal is not None:
+                if not isinstance(fatal, bool):
+                    raise self._error(
+                        state,
+                        IncidentStatus.POST_VALIDATION,
+                        "fatal must be a boolean",
+                    )
+                outcome_values.append(not fatal)
+            if any(not isinstance(value, bool) for value in outcome_values):
+                raise self._error(
+                    state,
+                    IncidentStatus.POST_VALIDATION,
+                    "repair outcome must be boolean",
+                )
+            if any(value is not derived_success for value in outcome_values):
+                raise self._error(
+                    state,
+                    IncidentStatus.POST_VALIDATION,
+                    "repair outcome conflicts with SandboxRun.status",
+                )
+            payload: dict[str, JsonValue] = {
+                "status": run.status.value,
+                "sandbox_run": cast(
+                    dict[str, JsonValue], run.model_dump(mode="json")
+                ),
+            }
+            target = (
+                IncidentStatus.POST_VALIDATION
+                if derived_success
+                else IncidentStatus.TOOL_FAILED
+            )
+            return self._transition(
+                state,
+                target,
+                reason=reason,
+                repair_succeeded=derived_success,
+                before_commit=lambda: setattr(state, "repair_result", payload),
+            )
 
         outcome_values = [value for value in (succeeded, success) if value is not None]
         if fatal is not None:
@@ -767,19 +938,216 @@ class HarnessGraph:
             before_commit=lambda: setattr(state, "repair_result", payload),
         )
 
+    def record_pending_repair_run(
+        self,
+        state: IncidentState,
+        run: Mapping[str, JsonValue] | Any,
+    ) -> None:
+        """Checkpoint one approved pending run before its first write.
+
+        This is an artifact checkpoint, not an incident transition.  Keeping
+        it on ``repair_result`` preserves the current IncidentState schema and
+        gives restart logic a durable record that no handler has run yet.
+        """
+
+        self._ensure_incident_state(state)
+        self._ensure_active(state)
+        if state.status is not IncidentStatus.SANDBOX_REPAIR:
+            raise self._error(
+                state,
+                IncidentStatus.SANDBOX_REPAIR,
+                "pending repair runs require SANDBOX_REPAIR",
+            )
+        typed_proposal = self._typed_repair_proposal(state)
+        if typed_proposal is None:
+            raise self._error(
+                state,
+                IncidentStatus.SANDBOX_REPAIR,
+                "pending repair run requires a typed repair proposal",
+            )
+        self._validate_typed_proposal(state, typed_proposal)
+        decision = self._typed_approval_from_state(state, typed_proposal)
+        if decision.outcome.value != "approved":
+            raise self._error(
+                state,
+                IncidentStatus.SANDBOX_REPAIR,
+                "pending repair run requires an approved approval payload",
+            )
+        from harness.repair import SandboxRun, proposal_is_intact
+
+        try:
+            typed_run = (
+                run
+                if isinstance(run, SandboxRun)
+                else SandboxRun.model_validate(run)
+            )
+        except (TypeError, ValueError) as exc:
+            raise self._error(
+                state,
+                IncidentStatus.SANDBOX_REPAIR,
+                "pending repair run is not a valid typed artifact",
+            ) from exc
+        if typed_run.status.value != "pending":
+            raise self._error(
+                state,
+                IncidentStatus.SANDBOX_REPAIR,
+                "pending repair run must have status pending",
+            )
+        existing = state.repair_result
+        if existing is not None:
+            raise self._error(
+                state,
+                IncidentStatus.SANDBOX_REPAIR,
+                "incident already has a repair artifact",
+            )
+        incident_id = _incident_id(state)
+        if typed_run.incident_id != incident_id:
+            raise self._error(
+                state,
+                IncidentStatus.SANDBOX_REPAIR,
+                "pending repair run incident does not match state",
+            )
+        approval_id = decision.decision_id
+        if not isinstance(approval_id, str) or typed_run.approval_decision_id != approval_id:
+            raise self._error(
+                state,
+                IncidentStatus.SANDBOX_REPAIR,
+                "pending repair run approval does not match state",
+            )
+        if (
+            not proposal_is_intact(typed_proposal)
+            or typed_run.proposal_id != typed_proposal.proposal_id
+            or typed_run.action is not typed_proposal.action
+            or typed_run.proposal_hash != typed_proposal.proposal_hash
+        ):
+            raise self._error(
+                state,
+                IncidentStatus.SANDBOX_REPAIR,
+                "pending repair run does not bind to checkpointed proposal",
+            )
+        state.repair_result = {
+            "status": "pending",
+            "sandbox_run": cast(
+                dict[str, JsonValue], typed_run.model_dump(mode="json")
+            ),
+        }
+        self._save_checkpoint(state, reason="repair_run_pending")
+
     def record_post_validation_result(
         self,
         state: IncidentState,
         validated: bool,
         *,
         reason: str | None = None,
+        result: Mapping[str, JsonValue] | None = None,
     ) -> HarnessTransitionResult:
         """Resolve a repaired incident or emit terminal validation failure."""
 
         if not isinstance(validated, bool):
             raise self._error(state, IncidentStatus.RESOLVED, "validated must be a boolean")
         target = IncidentStatus.RESOLVED if validated else IncidentStatus.VALIDATION_FAILED
-        return self._transition(state, target, reason=reason, fatal=not validated)
+        typed_proposal = self._typed_repair_proposal(state)
+        if typed_proposal is not None:
+            if result is None or not isinstance(result, Mapping):
+                raise self._error(
+                    state,
+                    target,
+                    "typed post-validation requires a PostValidationResult",
+                )
+            typed = self._validate_typed_post_validation(
+                state, typed_proposal, result
+            )
+            if (typed.status.value == "passed") is not validated:
+                raise self._error(
+                    state,
+                    target,
+                    "validated flag conflicts with PostValidationResult.status",
+                )
+
+            def typed_before_commit() -> None:
+                payload = dict(state.repair_result or {})
+                payload["post_validation"] = cast(
+                    dict[str, JsonValue], typed.model_dump(mode="json")
+                )
+                state.repair_result = payload
+
+            return self._transition(
+                state,
+                target,
+                reason=reason,
+                fatal=not validated,
+                post_validation_passed=validated,
+                before_commit=typed_before_commit,
+            )
+
+        def before_commit() -> None:
+            if result is None:
+                return
+            from harness.repair import PostValidationResult
+
+            try:
+                typed = PostValidationResult.model_validate(result)
+            except (TypeError, ValueError) as exc:
+                raise self._error(
+                    state,
+                    target,
+                    "post-validation result is not a valid typed artifact",
+                ) from exc
+            try:
+                from harness.repair import (
+                    RepairProposal,
+                    SandboxRun,
+                    proposal_is_intact,
+                )
+
+                proposal = RepairProposal.model_validate(state.fix_proposal)
+                repair_payload = state.repair_result or {}
+                run_payload = repair_payload.get("sandbox_run", repair_payload)
+                typed_run = SandboxRun.model_validate(run_payload)
+            except (TypeError, ValueError) as exc:
+                raise self._error(
+                    state,
+                    target,
+                    "post-validation has no valid completed sandbox run artifact",
+                ) from exc
+            if (
+                not proposal_is_intact(proposal)
+                or typed.incident_id != _incident_id(state)
+                or typed.sandbox_run_id != typed_run.run_id
+                or typed.proposal_hash != proposal.proposal_hash
+                or typed_run.status.value != "succeeded"
+                or typed_run.proposal_hash != proposal.proposal_hash
+            ):
+                raise self._error(
+                    state,
+                    target,
+                    "post-validation result does not bind to completed repair",
+                )
+            if typed.status.value == "passed" and not validated:
+                raise self._error(
+                    state,
+                    target,
+                    "validated=False conflicts with a passing post-validation result",
+                )
+            if typed.status.value == "failed" and validated:
+                raise self._error(
+                    state,
+                    target,
+                    "validated=True conflicts with a failing post-validation result",
+                )
+            payload = dict(state.repair_result or {})
+            payload["post_validation"] = cast(
+                dict[str, JsonValue], typed.model_dump(mode="json")
+            )
+            state.repair_result = payload
+
+        return self._transition(
+            state,
+            target,
+            reason=reason,
+            fatal=not validated,
+            before_commit=before_commit,
+        )
 
     def mark_budget_exceeded(
         self,
@@ -814,6 +1182,7 @@ class HarnessGraph:
         validator_authorized: bool = False,
         approval_approved: bool | None = None,
         repair_succeeded: bool | None = None,
+        post_validation_passed: bool | None = None,
         fatal: bool = False,
         before_commit: _BeforeCommit | None = None,
     ) -> HarnessTransitionResult:
@@ -840,6 +1209,7 @@ class HarnessGraph:
             target,
             approval_approved=approval_approved,
             repair_succeeded=repair_succeeded,
+            post_validation_passed=post_validation_passed,
         )
         if before_commit is not None:
             before_commit()
@@ -899,15 +1269,15 @@ class HarnessGraph:
                 reason="unknown incident status",
             ) from exc
 
-    @classmethod
     def _check_guards(
-        cls,
+        self,
         state: IncidentState,
         current: IncidentStatus,
         target: IncidentStatus,
         *,
         approval_approved: bool | None,
         repair_succeeded: bool | None,
+        post_validation_passed: bool | None,
     ) -> None:
         if current is IncidentStatus.RECEIVED and target is IncidentStatus.TRIAGE:
             try:
@@ -925,16 +1295,24 @@ class HarnessGraph:
                 raise
         elif current is IncidentStatus.PLANNING and target is IncidentStatus.EXECUTING:
             if not state.plan:
-                raise cls._error(state, target, "PLANNING -> EXECUTING requires a non-empty plan")
+                raise self._error(state, target, "PLANNING -> EXECUTING requires a non-empty plan")
         elif current is IncidentStatus.EXECUTING and target is IncidentStatus.VALIDATING:
             if not state.tool_trace and not state.evidence:
-                raise cls._error(state, target, "EXECUTING -> VALIDATING requires tool_trace or evidence")
+                raise self._error(state, target, "EXECUTING -> VALIDATING requires tool_trace or evidence")
         elif current is IncidentStatus.ROOT_CAUSE_FOUND and target is IncidentStatus.FIX_PROPOSED:
             if state.root_cause is None:
-                raise cls._error(state, target, "ROOT_CAUSE_FOUND -> FIX_PROPOSED requires root_cause")
+                raise self._error(state, target, "ROOT_CAUSE_FOUND -> FIX_PROPOSED requires root_cause")
+            typed_proposal = self._typed_repair_proposal(state)
+            if typed_proposal is not None:
+                self._validate_typed_proposal(
+                    state, typed_proposal, require_root_cause_status=True
+                )
         elif current is IncidentStatus.FIX_PROPOSED and target is IncidentStatus.AWAITING_APPROVAL:
             if not state.fix_proposal:
-                raise cls._error(state, target, "FIX_PROPOSED -> AWAITING_APPROVAL requires fix_proposal")
+                raise self._error(state, target, "FIX_PROPOSED -> AWAITING_APPROVAL requires fix_proposal")
+            typed_proposal = self._typed_repair_proposal(state)
+            if typed_proposal is not None:
+                self._validate_typed_proposal(state, typed_proposal)
         elif current is IncidentStatus.AWAITING_APPROVAL and target is IncidentStatus.SANDBOX_REPAIR:
             approved = (
                 approval_approved
@@ -942,23 +1320,67 @@ class HarnessGraph:
                 else bool(state.approval) and state.approval.get("status") == "approved"
             )
             if not approved:
-                raise cls._error(state, target, "SANDBOX_REPAIR requires an approved approval payload")
+                raise self._error(state, target, "SANDBOX_REPAIR requires an approved approval payload")
+            typed_proposal = self._typed_repair_proposal(state)
+            if typed_proposal is not None and approval_approved is None:
+                decision = self._typed_approval_from_state(state, typed_proposal)
+                if decision.outcome.value != "approved":
+                    raise self._error(
+                        state,
+                        target,
+                        "SANDBOX_REPAIR requires an approved typed ApprovalDecision",
+                    )
         elif current is IncidentStatus.AWAITING_APPROVAL and target is IncidentStatus.REJECTED:
             rejected = (
                 approval_approved is False
                 or bool(state.approval) and state.approval.get("status") == "rejected"
             )
             if not rejected:
-                raise cls._error(state, target, "REJECTED requires an explicit rejected approval")
+                raise self._error(state, target, "REJECTED requires an explicit rejected approval")
+            typed_proposal = self._typed_repair_proposal(state)
+            if typed_proposal is not None and approval_approved is None:
+                decision = self._typed_approval_from_state(state, typed_proposal)
+                if decision.outcome.value != "rejected":
+                    raise self._error(
+                        state,
+                        target,
+                        "REJECTED requires a rejected typed ApprovalDecision",
+                    )
         elif current is IncidentStatus.SANDBOX_REPAIR and target is IncidentStatus.POST_VALIDATION:
-            if repair_succeeded is not True and not _repair_payload_succeeded(state):
-                raise cls._error(state, target, "SANDBOX_REPAIR -> POST_VALIDATION requires a successful repair result")
-        elif (
-            current is IncidentStatus.POST_VALIDATION
-            and target is IncidentStatus.RESOLVED
-            and not state.repair_result
-        ):
-            raise cls._error(state, target, "POST_VALIDATION -> RESOLVED requires repair_result")
+            typed_proposal = self._typed_repair_proposal(state)
+            if typed_proposal is not None:
+                if repair_succeeded is not True:
+                    run = self._typed_completed_run_from_state(state, typed_proposal)
+                    if run is None or run.status.value != "succeeded":
+                        raise self._error(
+                            state,
+                            target,
+                            "SANDBOX_REPAIR -> POST_VALIDATION requires a successful typed repair result",
+                        )
+            elif repair_succeeded is not True and not _repair_payload_succeeded(state):
+                raise self._error(state, target, "SANDBOX_REPAIR -> POST_VALIDATION requires a successful repair result")
+        elif current is IncidentStatus.SANDBOX_REPAIR and target is IncidentStatus.TOOL_FAILED:
+            typed_proposal = self._typed_repair_proposal(state)
+            if typed_proposal is not None and repair_succeeded is not False:
+                run = self._typed_terminal_run_from_state(state, typed_proposal)
+                if run is None or run.status.value not in {"failed", "cancelled"}:
+                    raise self._error(
+                        state,
+                        target,
+                        "SANDBOX_REPAIR -> TOOL_FAILED requires a failed typed repair result",
+                    )
+        elif current is IncidentStatus.POST_VALIDATION and target is IncidentStatus.RESOLVED:
+            if not state.repair_result:
+                raise self._error(state, target, "POST_VALIDATION -> RESOLVED requires repair_result")
+            typed_proposal = self._typed_repair_proposal(state)
+            if typed_proposal is not None and post_validation_passed is not True:
+                typed = self._typed_post_validation_from_state(state, typed_proposal)
+                if typed is None or typed.status.value != "passed" or not typed.target_met or typed.regressions:
+                    raise self._error(
+                        state,
+                        target,
+                        "POST_VALIDATION -> RESOLVED requires a passing typed post-validation result",
+                    )
 
     def _resume_metadata_for(self, state: IncidentState) -> ResumeMetadata:
         incident_id = _incident_id(state)
@@ -1081,6 +1503,389 @@ class HarnessGraph:
             cast(dict[str, JsonValue], item.model_dump(mode="json"))
             for item in self.hypothesis_manager.hypotheses()
         ]
+
+    def _typed_repair_proposal(
+        self,
+        state: IncidentState,
+        *,
+        proposal: Mapping[str, JsonValue] | None = None,
+    ) -> Any | None:
+        """Parse typed repair state without allowing malformed fallback."""
+
+        raw = state.fix_proposal if proposal is None else proposal
+        if raw is None:
+            return None
+        if not isinstance(raw, Mapping):
+            raise self._error(
+                state,
+                IncidentStatus.FIX_PROPOSED,
+                "typed repair proposal must be a mapping",
+            )
+        if not set(raw).intersection(_TYPED_PROPOSAL_TRIGGER_KEYS):
+            return None
+        from harness.repair import RepairProposal
+
+        try:
+            return RepairProposal.model_validate(raw)
+        except (TypeError, ValueError) as exc:
+            raise self._error(
+                state,
+                IncidentStatus.FIX_PROPOSED,
+                "typed repair proposal is invalid",
+            ) from exc
+
+    def _validate_typed_proposal(
+        self,
+        state: IncidentState,
+        proposal: Any,
+        *,
+        require_root_cause_status: bool = False,
+    ) -> None:
+        from harness.repair import RepairProposal, proposal_is_intact
+
+        if not isinstance(proposal, RepairProposal) or not proposal_is_intact(proposal):
+            raise self._error(
+                state,
+                IncidentStatus.FIX_PROPOSED,
+                "repair proposal content hash is invalid",
+            )
+        if require_root_cause_status and state.status is not IncidentStatus.ROOT_CAUSE_FOUND:
+            raise self._error(
+                state,
+                IncidentStatus.FIX_PROPOSED,
+                "typed repair proposals require ROOT_CAUSE_FOUND",
+            )
+        incident_id = _incident_id(state)
+        if incident_id is None or proposal.incident_id != incident_id:
+            raise self._error(
+                state,
+                IncidentStatus.FIX_PROPOSED,
+                "repair proposal incident does not match alert",
+            )
+        root_cause = state.root_cause
+        if not isinstance(root_cause, Mapping):
+            raise self._error(
+                state,
+                IncidentStatus.FIX_PROPOSED,
+                "typed repair proposal requires root_cause",
+            )
+        if proposal.root_cause_type != root_cause.get("root_cause_type"):
+            raise self._error(
+                state,
+                IncidentStatus.FIX_PROPOSED,
+                "repair proposal root cause does not match authoritative root cause",
+            )
+        root_supporting = _string_set(root_cause.get("supporting_evidence_ids"))
+        root_sources = _string_set(root_cause.get("independent_source_types"))
+        if root_supporting is None or root_sources is None:
+            raise self._error(
+                state,
+                IncidentStatus.FIX_PROPOSED,
+                "authoritative root cause evidence bindings are incomplete",
+            )
+        if set(proposal.supporting_evidence_ids) != root_supporting:
+            raise self._error(
+                state,
+                IncidentStatus.FIX_PROPOSED,
+                "repair proposal supporting evidence does not match root cause",
+            )
+        if {item.value for item in proposal.independent_source_types} != root_sources:
+            raise self._error(
+                state,
+                IncidentStatus.FIX_PROPOSED,
+                "repair proposal evidence sources do not match root cause",
+            )
+        state_evidence_ids = {
+            item.get("evidence_id")
+            for item in state.evidence
+            if isinstance(item, Mapping) and isinstance(item.get("evidence_id"), str)
+        }
+        missing = {item.evidence_id for item in proposal.evidence} - state_evidence_ids
+        if missing:
+            raise self._error(
+                state,
+                IncidentStatus.FIX_PROPOSED,
+                "repair proposal evidence is missing from incident state",
+            )
+
+    def _typed_approval_from_state(self, state: IncidentState, proposal: Any) -> Any:
+        from harness.repair import ApprovalDecision, ApprovalOutcome, proposal_is_intact
+
+        payload = state.approval
+        if not isinstance(payload, Mapping):
+            raise self._error(
+                state,
+                IncidentStatus.SANDBOX_REPAIR,
+                "typed repair requires an ApprovalDecision payload",
+            )
+        status = payload.get("status")
+        raw = dict(payload)
+        raw.pop("status", None)
+        raw.pop("reason", None)
+        try:
+            decision = ApprovalDecision.model_validate(raw)
+        except (TypeError, ValueError) as exc:
+            raise self._error(
+                state,
+                IncidentStatus.SANDBOX_REPAIR,
+                "approval payload is not a valid typed ApprovalDecision",
+            ) from exc
+        expected_status = (
+            "approved"
+            if decision.outcome is ApprovalOutcome.APPROVED
+            else "rejected"
+        )
+        if status != expected_status:
+            raise self._error(
+                state,
+                IncidentStatus.SANDBOX_REPAIR,
+                "approval status does not match ApprovalDecision.outcome",
+            )
+        if (
+            not proposal_is_intact(proposal)
+            or decision.incident_id != proposal.incident_id
+            or decision.proposal_id != proposal.proposal_id
+            or not hmac.compare_digest(decision.proposal_hash, proposal.proposal_hash)
+            or decision.decided_at < proposal.created_at
+            or decision.decided_at > proposal.valid_until
+        ):
+            raise self._error(
+                state,
+                IncidentStatus.SANDBOX_REPAIR,
+                "approval decision does not bind to repair proposal",
+            )
+        return decision
+
+    def _validate_typed_repair_result(
+        self,
+        state: IncidentState,
+        payload: Mapping[str, JsonValue],
+        proposal: Any,
+    ) -> Any:
+        """Validate a terminal SandboxRun against the pending checkpoint."""
+
+        from harness.repair import (
+            SandboxRun,
+            SandboxRunStatus,
+            proposal_is_intact,
+        )
+
+        run_payload: object = payload.get("sandbox_run", payload)
+        if not isinstance(run_payload, Mapping):
+            raise self._error(
+                state,
+                IncidentStatus.POST_VALIDATION,
+                "typed repair result requires a SandboxRun payload",
+            )
+        if "sandbox_run" in payload and set(payload) - {"sandbox_run", "status"}:
+            raise self._error(
+                state,
+                IncidentStatus.POST_VALIDATION,
+                "typed repair result contains unbound fields",
+            )
+        try:
+            run = SandboxRun.model_validate(run_payload)
+        except (TypeError, ValueError) as exc:
+            raise self._error(
+                state,
+                IncidentStatus.POST_VALIDATION,
+                "repair result is not a valid typed sandbox run",
+            ) from exc
+        if payload.get("sandbox_run") is not None and payload.get("status") not in {
+            None,
+            run.status.value,
+        }:
+            raise self._error(
+                state,
+                IncidentStatus.POST_VALIDATION,
+                "repair result status does not match SandboxRun.status",
+            )
+        if run.status not in {
+            SandboxRunStatus.SUCCEEDED,
+            SandboxRunStatus.FAILED,
+            SandboxRunStatus.CANCELLED,
+        }:
+            raise self._error(
+                state,
+                IncidentStatus.POST_VALIDATION,
+                "pending or running sandbox runs cannot be recorded as terminal",
+            )
+        self._validate_typed_proposal(state, proposal)
+        decision = self._typed_approval_from_state(state, proposal)
+        pending = self._typed_pending_run_from_state(state)
+        if pending is None or pending.status is not SandboxRunStatus.PENDING:
+            raise self._error(
+                state,
+                IncidentStatus.POST_VALIDATION,
+                "typed repair result requires a checkpointed pending SandboxRun",
+            )
+        if not isinstance(state.repair_result, Mapping) or state.repair_result.get("status") != "pending":
+            raise self._error(
+                state,
+                IncidentStatus.POST_VALIDATION,
+                "checkpointed repair artifact is not pending",
+            )
+        if (
+            not proposal_is_intact(proposal)
+            or run.run_id != pending.run_id
+            or run.incident_id != proposal.incident_id
+            or run.proposal_id != proposal.proposal_id
+            or not hmac.compare_digest(run.proposal_hash, proposal.proposal_hash)
+            or run.action is not proposal.action
+            or run.approval_decision_id != decision.decision_id
+        ):
+            raise self._error(
+                state,
+                IncidentStatus.POST_VALIDATION,
+                "repair result does not bind to the approved proposal",
+            )
+        self._validate_terminal_run_contract(state, run)
+        return run
+
+    def _validate_terminal_run_contract(self, state: IncidentState, run: Any) -> None:
+        from harness.repair import SandboxRunStatus
+
+        for field in (
+            "source_hash_before",
+            "source_hash_after",
+            "sandbox_hash_before",
+            "sandbox_hash_after",
+        ):
+            value = getattr(run, field)
+            if value is not None and not _is_sha256(value):
+                raise self._error(
+                    state,
+                    IncidentStatus.POST_VALIDATION,
+                    f"{field} must be a SHA-256 digest",
+                )
+        if run.status is SandboxRunStatus.SUCCEEDED:
+            if (
+                not _is_sha256(run.source_hash_before)
+                or not _is_sha256(run.source_hash_after)
+                or run.source_hash_before != run.source_hash_after
+                or not _is_sha256(run.sandbox_hash_before)
+                or not _is_sha256(run.sandbox_hash_after)
+                or run.finished_at is None
+                or run.error is not None
+                or run.handler_invocation_count != 1
+            ):
+                raise self._error(
+                    state,
+                    IncidentStatus.POST_VALIDATION,
+                    "successful SandboxRun is incomplete or internally inconsistent",
+                )
+        elif not run.error or run.finished_at is None:
+            raise self._error(
+                state,
+                IncidentStatus.POST_VALIDATION,
+                "failed SandboxRun requires error and finished_at",
+            )
+
+    def _typed_pending_run_from_state(self, state: IncidentState) -> Any | None:
+        from harness.repair import SandboxRun
+
+        payload = state.repair_result
+        if not isinstance(payload, Mapping):
+            return None
+        raw = payload.get("sandbox_run", payload)
+        if not isinstance(raw, Mapping):
+            return None
+        try:
+            return SandboxRun.model_validate(raw)
+        except (TypeError, ValueError):
+            return None
+
+    def _typed_completed_run_from_state(self, state: IncidentState, proposal: Any) -> Any | None:
+        from harness.repair import SandboxRunStatus
+
+        run = self._typed_terminal_run_from_state(state, proposal)
+        if run is None or run.status is not SandboxRunStatus.SUCCEEDED:
+            return None
+        return run
+
+    def _typed_terminal_run_from_state(self, state: IncidentState, proposal: Any) -> Any | None:
+        from harness.repair import SandboxRunStatus, proposal_is_intact
+
+        run = self._typed_pending_run_from_state(state)
+        if run is None or run.status not in {
+            SandboxRunStatus.SUCCEEDED,
+            SandboxRunStatus.FAILED,
+            SandboxRunStatus.CANCELLED,
+        }:
+            return None
+        self._validate_typed_proposal(state, proposal)
+        self._validate_terminal_run_contract(state, run)
+        decision = self._typed_approval_from_state(state, proposal)
+        if (
+            decision.outcome.value != "approved"
+            or not proposal_is_intact(proposal)
+            or run.incident_id != proposal.incident_id
+            or run.proposal_id != proposal.proposal_id
+            or run.proposal_hash != proposal.proposal_hash
+            or run.action is not proposal.action
+            or run.approval_decision_id != decision.decision_id
+        ):
+            raise self._error(
+                state,
+                IncidentStatus.POST_VALIDATION,
+                "completed SandboxRun does not bind to the approved proposal",
+            )
+        return run
+
+    def _validate_typed_post_validation(
+        self,
+        state: IncidentState,
+        proposal: Any,
+        payload: Mapping[str, JsonValue],
+    ) -> Any:
+        from harness.repair import PostValidationResult
+
+        if "post_validation" in payload and set(payload) - {"post_validation"}:
+            raise self._error(
+                state,
+                IncidentStatus.RESOLVED,
+                "typed post-validation result contains unbound fields",
+            )
+        raw: object = payload.get("post_validation", payload)
+        if not isinstance(raw, Mapping):
+            raise self._error(
+                state,
+                IncidentStatus.RESOLVED,
+                "typed post-validation requires a PostValidationResult payload",
+            )
+        try:
+            result = PostValidationResult.model_validate(raw)
+        except (TypeError, ValueError) as exc:
+            raise self._error(
+                state,
+                IncidentStatus.RESOLVED,
+                "post-validation result is not a valid typed artifact",
+            ) from exc
+        run = self._typed_completed_run_from_state(state, proposal)
+        if (
+            run is None
+            or result.incident_id != _incident_id(state)
+            or result.sandbox_run_id != run.run_id
+            or not hmac.compare_digest(result.proposal_hash, proposal.proposal_hash)
+        ):
+            raise self._error(
+                state,
+                IncidentStatus.RESOLVED,
+                "post-validation result does not bind to completed repair",
+            )
+        return result
+
+    def _typed_post_validation_from_state(self, state: IncidentState, proposal: Any) -> Any | None:
+        payload = state.repair_result
+        if not isinstance(payload, Mapping):
+            return None
+        raw = payload.get("post_validation")
+        if not isinstance(raw, Mapping):
+            return None
+        try:
+            return self._validate_typed_post_validation(state, proposal, raw)
+        except HarnessTransitionError:
+            return None
 
     def _record_guardrail_event(
         self,
@@ -1274,6 +2079,27 @@ def _repair_payload_succeeded(state: IncidentState) -> bool:
         or state.repair_result.get("success") is True
         or state.repair_result.get("succeeded") is True
     )
+
+
+def _aware_utc(value: datetime, name: str) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{name} must be timezone-aware")
+    return value.astimezone(UTC)
+
+
+def _string_set(value: object) -> set[str] | None:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return None
+    if any(not isinstance(item, str) or not item.strip() for item in value):
+        return None
+    result = {item for item in value}
+    return result if len(result) == len(value) else None
+
+
+def _is_sha256(value: object) -> bool:
+    if not isinstance(value, str) or len(value) != 64:
+        return False
+    return all(character in "0123456789abcdef" for character in value)
 
 
 __all__ = [
