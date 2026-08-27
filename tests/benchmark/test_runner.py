@@ -119,8 +119,9 @@ class _CaptureFactory:
 class _DecisionLoopGraph:
     """Small graph double that exposes Runner evidence registration decisions."""
 
-    def __init__(self, result: ToolExecutionResult) -> None:
-        self.result = result
+    def __init__(self, result: ToolExecutionResult | list[ToolExecutionResult]) -> None:
+        self.results = result if isinstance(result, list) else [result]
+        self.step_index = 0
         self.hypothesis_manager = HypothesisManager()
         self.hypothesis_manager.create_hypothesis(
             Hypothesis(
@@ -134,7 +135,9 @@ class _DecisionLoopGraph:
         self.attached: list[tuple[str, str, bool]] = []
 
     def execute_next_step(self, state: IncidentState, *_args: object, **_kwargs: object):
-        state.tool_trace.append(self.result.model_dump(mode="json"))
+        result = self.results[min(self.step_index, len(self.results) - 1)]
+        self.step_index += 1
+        state.tool_trace.append(result.model_dump(mode="json"))
         state.status = IncidentStatus.VALIDATING
         return SimpleNamespace(to_status=state.status)
 
@@ -161,6 +164,10 @@ class _DecisionLoopGraph:
     def validate_hypothesis(self, *_args: object, **_kwargs: object):
         return SimpleNamespace(to_status=IncidentStatus.HYPOTHESIS_TESTING)
 
+    def request_more_evidence(self, state: IncidentState, **_kwargs: object):
+        state.status = IncidentStatus.EXECUTING
+        return SimpleNamespace(to_status=state.status)
+
     def transition(self, state: IncidentState, target: IncidentStatus, **_kwargs: object):
         state.status = target
         return SimpleNamespace(to_status=target)
@@ -170,6 +177,10 @@ def _dq_runner_reference(
     evidence_id: str,
     *,
     table: str = "events",
+    observed_value: float | None = 0.05,
+    threshold: float | None = 0.01,
+    total_rows: int = 100,
+    null_rate: float | None = 0.05,
 ) -> EvidenceReference:
     return EvidenceReference(
         evidence_id=evidence_id,
@@ -183,7 +194,11 @@ def _dq_runner_reference(
             "table": table,
             "column": "user_id",
             "columns": ["user_id"],
+            "observed_value": observed_value,
+            "threshold": threshold,
             "details": {
+                "total_rows": total_rows,
+                "null_rate": null_rate,
                 "scope": {
                     "time_column": "event_time",
                     "start": "2026-01-30T00:00:00+00:00",
@@ -242,6 +257,133 @@ def test_runner_registers_each_dq_reference_only_with_its_own_polarity() -> None
     assert graph.hypothesis_manager.evidence() == (compatible,)
     assert graph.hypothesis_manager.get_hypothesis("H01").confidence == pytest.approx(
         0.75
+    )
+    assert state.root_cause is None
+
+
+def test_runner_does_not_register_empty_null_rate_evidence() -> None:
+    reference = _dq_runner_reference(
+        "dq-empty",
+        observed_value=None,
+        total_rows=0,
+        null_rate=None,
+    )
+    result = ToolExecutionResult(
+        tool_name="check_null_rate",
+        success=True,
+        query_id="Q-RUNNER-DQ",
+        result={
+            "check_name": "check_null_rate",
+            "status": "success",
+            "passed": False,
+            "table": "events",
+            "column": "user_id",
+            "columns": ["user_id"],
+            "observed_value": None,
+            "threshold": 0.01,
+        },
+        evidence=[reference],
+    )
+    step = InvestigationStep(
+        step_id="S01",
+        purpose="Check target-window null rate.",
+        hypothesis_id="H01",
+        tool="check_null_rate",
+        arguments={"table": "events", "column": "user_id", "threshold": 0.01},
+        expected_evidence=["the structured check result"],
+        stop_condition="retain the observation",
+    )
+    graph = _DecisionLoopGraph(result)
+    state = IncidentState(
+        alert={
+            "incident_id": "INC-RUNNER-DQ-EMPTY",
+            "metric": "daily_active_users",
+            "observed_at": "2026-01-30T00:00:00Z",
+            "expected_value": 100.0,
+            "observed_value": 75.0,
+            "change_rate": -0.25,
+            "severity": "high",
+        },
+        plan=[step.model_dump(mode="json")],
+        status=IncidentStatus.EXECUTING,
+    )
+
+    CurrentHarnessExecutor._run_graph_loop(graph, state)
+
+    assert graph.registered == []
+    assert graph.attached == []
+    assert graph.hypothesis_manager.get_hypothesis("H01").confidence == pytest.approx(
+        0.60
+    )
+    assert state.root_cause is None
+
+
+def test_two_unproven_failed_dq_observations_cannot_find_root_cause() -> None:
+    first = _dq_runner_reference(
+        "dq-empty",
+        observed_value=None,
+        total_rows=0,
+        null_rate=None,
+    )
+    second = _dq_runner_reference(
+        "dq-below-threshold",
+        observed_value=0.005,
+        threshold=0.01,
+        null_rate=0.005,
+    )
+
+    def result_for(reference: EvidenceReference) -> ToolExecutionResult:
+        observation = reference.observation
+        return ToolExecutionResult(
+            tool_name="check_null_rate",
+            success=True,
+            query_id="Q-RUNNER-DQ",
+            result={
+                "check_name": "check_null_rate",
+                "status": "success",
+                "passed": False,
+                "table": "events",
+                "column": "user_id",
+                "columns": ["user_id"],
+                "observed_value": observation.get("observed_value"),
+                "threshold": observation.get("threshold"),
+            },
+            evidence=[reference],
+        )
+
+    steps = [
+        InvestigationStep(
+            step_id=step_id,
+            purpose="Check target-window null rate.",
+            hypothesis_id="H01",
+            tool="check_null_rate",
+            arguments={"table": "events", "column": "user_id", "threshold": 0.01},
+            expected_evidence=["the structured check result"],
+            stop_condition="retain the observation",
+        )
+        for step_id in ("S01", "S02")
+    ]
+    graph = _DecisionLoopGraph([result_for(first), result_for(second)])
+    state = IncidentState(
+        alert={
+            "incident_id": "INC-RUNNER-DQ-TWO",
+            "metric": "daily_active_users",
+            "observed_at": "2026-01-30T00:00:00Z",
+            "expected_value": 100.0,
+            "observed_value": 75.0,
+            "change_rate": -0.25,
+            "severity": "high",
+        },
+        plan=[step.model_dump(mode="json") for step in steps],
+        status=IncidentStatus.EXECUTING,
+    )
+
+    CurrentHarnessExecutor._run_graph_loop(graph, state)
+
+    assert graph.registered == []
+    assert graph.attached == []
+    assert graph.hypothesis_manager.get_hypothesis("H01").confidence == pytest.approx(
+        0.60
     )
     assert state.root_cause is None
 

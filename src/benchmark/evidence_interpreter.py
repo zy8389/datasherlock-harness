@@ -13,6 +13,7 @@ the observation is bound to the current incident scope.
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
@@ -256,18 +257,33 @@ class RuntimeEvidenceInterpreter:
                 tool_result=tool_result,
                 reference=reference,
             )
+            if not compatible:
+                decisions.append(
+                    EvidenceDecision(
+                        evidence=reference,
+                        polarity=EvidencePolarity.NEUTRAL,
+                        reason=reason,
+                    )
+                )
+                continue
+            proven, reason = _dq_abnormality_proven(
+                tool_result.tool_name,
+                result=result,
+                reference=reference,
+            )
             decisions.append(
                 EvidenceDecision(
                     evidence=reference,
                     polarity=(
                         EvidencePolarity.SUPPORTS
-                        if compatible
+                        if proven
                         else EvidencePolarity.NEUTRAL
                     ),
                     reason=(
-                        "the failed DQ result is compatible with the active "
-                        f"hypothesis and incident scope: {reason}"
-                        if compatible
+                        "the failed DQ result proves a structured anomaly "
+                        "compatible with the active hypothesis and incident "
+                        f"scope: {reason}"
+                        if proven
                         else reason
                     ),
                 )
@@ -301,7 +317,6 @@ class RuntimeEvidenceInterpreter:
         result = _mapping(tool_result.result)
         table = observation.get("table", result.get("table"))
         column = observation.get("column", result.get("column"))
-        columns = _string_list(observation.get("columns", result.get("columns")))
         details = _mapping(observation.get("details"))
 
         if tool_result.tool_name == "check_null_rate":
@@ -320,11 +335,10 @@ class RuntimeEvidenceInterpreter:
             return True, "events.user_id null rate is measured in the target window"
 
         if tool_result.tool_name == "check_duplicate_rate":
-            if self.context.metric_id != "ai_task_count" or table != "events":
-                return False, "duplicate-rate table or metric is outside the incident scope"
-            if not set(columns).intersection({"event_id", "batch_id", "user_id"}):
-                return False, "duplicate-rate keys do not identify event or batch scope"
-            return True, "events duplicate keys match the ai_task_count diagnostic scope"
+            return False, (
+                "duplicate-rate check is not incident-scoped in the current "
+                "tool contract"
+            )
 
         if tool_result.tool_name == "check_freshness":
             if (
@@ -798,6 +812,155 @@ def _number(value: object) -> Real | Decimal | None:
     if isinstance(value, bool) or not isinstance(value, (Real, Decimal)):
         return None
     return value
+
+
+def _finite_number(value: object) -> float | None:
+    number = _number(value)
+    if number is None:
+        return None
+    try:
+        converted = float(number)
+    except (OverflowError, ValueError):
+        return None
+    return converted if math.isfinite(converted) else None
+
+
+def _structured_value(
+    observation: Mapping[str, Any],
+    details: Mapping[str, Any],
+    result: Mapping[str, Any],
+    observation_key: str,
+    detail_key: str | None = None,
+) -> object:
+    """Read canonical observation fields before their detail-level aliases."""
+
+    if observation_key in observation:
+        return observation[observation_key]
+    if detail_key is not None and detail_key in details:
+        return details[detail_key]
+    return result.get(observation_key)
+
+
+def _dq_abnormality_proven(
+    tool_name: str,
+    *,
+    result: Mapping[str, Any],
+    reference: EvidenceReference,
+) -> tuple[bool, str]:
+    """Require structured abnormal values before admitting DQ support."""
+
+    if reference.source_type not in _CANONICAL_SOURCE_TYPES:
+        return False, "evidence source type is not a canonical DQ source"
+
+    observation = _mapping(reference.observation)
+    if observation.get("check_name") != tool_name:
+        return False, "canonical DQ observation check name did not match the tool"
+    if observation.get("status") != _SUCCESS_STATUS:
+        return False, "canonical DQ observation status was not success"
+    if observation.get("passed") is not False:
+        return False, "canonical DQ observation was not a failed check"
+    if result.get("status") != _SUCCESS_STATUS or result.get("passed") is not False:
+        return False, "the failed DQ result envelope was not valid"
+
+    details = _mapping(observation.get("details"))
+    if tool_name == "check_null_rate":
+        total_rows = observation.get("total_rows", details.get("total_rows"))
+        if not isinstance(total_rows, int) or isinstance(total_rows, bool) or total_rows <= 0:
+            return False, "null-rate observation has no rows; null rate is undefined"
+        null_rate = _finite_number(
+            _structured_value(observation, details, result, "observed_value", "null_rate")
+        )
+        if null_rate is None:
+            return False, "null-rate observation has no finite null_rate"
+        threshold = _finite_number(
+            _structured_value(observation, details, result, "threshold")
+        )
+        if threshold is None:
+            return False, "null-rate observation has no finite threshold"
+        if null_rate <= threshold:
+            return False, "null rate does not exceed the configured threshold"
+        return True, f"null rate {null_rate} exceeds threshold {threshold}"
+
+    if tool_name == "check_freshness":
+        timestamp_rows = observation.get(
+            "timestamp_rows", details.get("timestamp_rows")
+        )
+        if (
+            not isinstance(timestamp_rows, int)
+            or isinstance(timestamp_rows, bool)
+            or timestamp_rows <= 0
+        ):
+            return False, "freshness observation has no timestamp rows"
+        freshness_age = _finite_number(
+            _structured_value(
+                observation,
+                details,
+                result,
+                "observed_value",
+                "freshness_age_seconds",
+            )
+        )
+        if freshness_age is None:
+            return False, "freshness observation has no finite freshness age"
+        max_age = _finite_number(
+            _structured_value(
+                observation,
+                details,
+                result,
+                "threshold",
+                "max_age_seconds",
+            )
+        )
+        if max_age is None:
+            return False, "freshness observation has no finite max age"
+        if freshness_age < 0:
+            return False, "freshness age is negative; the timestamp is future-dated"
+        if freshness_age <= max_age:
+            return False, "freshness age does not exceed the configured max age"
+        return True, f"freshness age {freshness_age} exceeds max age {max_age}"
+
+    if tool_name == "check_duplicate_rate":
+        return False, (
+            "duplicate-rate check is not incident-scoped in the current "
+            "tool contract"
+        )
+
+    if tool_name == "detect_schema_drift":
+        if not _has_actual_schema_change(details):
+            return False, "schema-drift result reported no actual schema change"
+        return True, "schema-drift details contain an actual schema change"
+
+    if tool_name == "detect_distribution_drift":
+        observed = _finite_number(
+            _structured_value(observation, details, result, "observed_value")
+        )
+        if observed is None:
+            return False, "distribution observation has no finite observed drift value"
+        threshold = _finite_number(
+            _structured_value(observation, details, result, "threshold")
+        )
+        if threshold is None:
+            return False, "distribution observation has no finite threshold"
+        if observed <= threshold:
+            return False, "observed distribution drift does not exceed the threshold"
+        return True, f"observed distribution drift {observed} exceeds threshold {threshold}"
+
+    return False, "the DQ tool has no safe abnormality rule"
+
+
+def _has_actual_schema_change(details: Mapping[str, Any]) -> bool:
+    """Recognize only the change lists emitted by the schema drift tool."""
+
+    for key in ("added_columns", "removed_columns", "type_changes"):
+        value = details.get(key)
+        if not isinstance(value, list) or not value:
+            continue
+        if key == "type_changes":
+            if any(isinstance(item, Mapping) and bool(item) for item in value):
+                return True
+        elif any(isinstance(item, str) and item.strip() for item in value):
+            return True
+    return False
 
 
 def _first_present(row: Mapping[str, Any], *names: str) -> str | None:

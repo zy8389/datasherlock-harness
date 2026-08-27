@@ -511,8 +511,15 @@ def _dq_reference(
     column: str = "user_id",
     scope: dict[str, Any] | None = None,
     source_type: str = "business_data",
+    observed_value: float | None = 0.05,
+    threshold: float | None = 0.01,
+    total_rows: int = 100,
+    null_rate: float | None = 0.05,
 ) -> EvidenceReference:
-    details: dict[str, Any] = {}
+    details: dict[str, Any] = {
+        "total_rows": total_rows,
+        "null_rate": null_rate,
+    }
     if scope is not None:
         details["scope"] = scope
     return EvidenceReference(
@@ -527,6 +534,8 @@ def _dq_reference(
             "table": table,
             "column": column,
             "columns": [column],
+            "observed_value": observed_value,
+            "threshold": threshold,
             "details": details,
         },
     )
@@ -537,6 +546,7 @@ def _dq_result(
     *,
     passed: bool = False,
 ) -> ToolExecutionResult:
+    observation = references[0].observation if references else {}
     return ToolExecutionResult(
         tool_name="check_null_rate",
         success=True,
@@ -548,8 +558,67 @@ def _dq_result(
             "table": "events",
             "column": "user_id",
             "columns": ["user_id"],
+            "observed_value": observation.get("observed_value"),
+            "threshold": observation.get("threshold"),
             "query_id": "Q-DQ",
             "evidence": [reference.model_dump(mode="json") for reference in references],
+        },
+        evidence=references,
+    )
+
+
+def _dq_tool_reference(
+    *,
+    evidence_id: str,
+    tool_name: str,
+    table: str = "events",
+    column: str | None = None,
+    columns: list[str] | None = None,
+    source_type: str = "business_data",
+    observed_value: float | None = None,
+    threshold: float | None = None,
+    details: dict[str, Any] | None = None,
+) -> EvidenceReference:
+    return EvidenceReference(
+        evidence_id=evidence_id,
+        source_type=source_type,
+        description="unrelated text must not determine DQ polarity",
+        query_id="Q-DQ-GENERIC",
+        observation={
+            "check_name": tool_name,
+            "status": "success",
+            "passed": False,
+            "table": table,
+            "column": column,
+            "columns": columns or ([column] if column is not None else []),
+            "observed_value": observed_value,
+            "threshold": threshold,
+            "details": details or {},
+        },
+    )
+
+
+def _dq_tool_result(
+    tool_name: str,
+    references: list[EvidenceReference],
+    *,
+    passed: bool = False,
+) -> ToolExecutionResult:
+    observation = references[0].observation if references else {}
+    return ToolExecutionResult(
+        tool_name=tool_name,
+        success=True,
+        query_id="Q-DQ-GENERIC",
+        result={
+            "check_name": tool_name,
+            "status": "success",
+            "passed": passed,
+            "table": observation.get("table"),
+            "column": observation.get("column"),
+            "columns": observation.get("columns", []),
+            "observed_value": observation.get("observed_value"),
+            "threshold": observation.get("threshold"),
+            "query_id": "Q-DQ-GENERIC",
         },
         evidence=references,
     )
@@ -586,6 +655,270 @@ def test_failed_null_rate_supports_null_value_anomaly() -> None:
 
     assert _decision(interpretation).polarity is EvidencePolarity.SUPPORTS
     assert _decision(interpretation).evidence == reference
+
+
+def test_empty_null_rate_is_neutral_even_when_passed_false() -> None:
+    reference = _dq_reference(
+        evidence_id="dq-empty",
+        scope=_target_scope(),
+        observed_value=None,
+        total_rows=0,
+        null_rate=None,
+    )
+    interpretation = RuntimeEvidenceInterpreter(context=_context()).interpret(
+        hypothesis=_hypothesis("null_value_anomaly"),
+        step=_step("", tool="check_null_rate"),
+        tool_result=_dq_result([reference]),
+    )
+
+    decision = _decision(interpretation)
+    assert decision.polarity is EvidencePolarity.NEUTRAL
+    assert "undefined" in decision.reason
+
+
+def test_null_rate_above_threshold_supports_null_value_anomaly() -> None:
+    reference = _dq_reference(
+        evidence_id="dq-high-null-rate",
+        scope=_target_scope(),
+        observed_value=0.05,
+        threshold=0.01,
+        null_rate=0.05,
+    )
+    interpretation = RuntimeEvidenceInterpreter(context=_context()).interpret(
+        hypothesis=_hypothesis("null_value_anomaly"),
+        step=_step("", tool="check_null_rate"),
+        tool_result=_dq_result([reference]),
+    )
+
+    assert _decision(interpretation).polarity is EvidencePolarity.SUPPORTS
+
+
+def test_inconsistent_null_rate_below_threshold_is_neutral() -> None:
+    reference = _dq_reference(
+        evidence_id="dq-inconsistent-null-rate",
+        scope=_target_scope(),
+        observed_value=0.005,
+        threshold=0.01,
+        null_rate=0.005,
+    )
+    interpretation = RuntimeEvidenceInterpreter(context=_context()).interpret(
+        hypothesis=_hypothesis("null_value_anomaly"),
+        step=_step("", tool="check_null_rate"),
+        tool_result=_dq_result([reference]),
+    )
+
+    decision = _decision(interpretation)
+    assert decision.polarity is EvidencePolarity.NEUTRAL
+    assert "does not exceed" in decision.reason
+
+
+def test_freshness_without_timestamps_is_neutral() -> None:
+    reference = _dq_tool_reference(
+        evidence_id="dq-no-timestamps",
+        tool_name="check_freshness",
+        column="event_time",
+        observed_value=None,
+        threshold=3600.0,
+        details={
+            "timestamp_rows": 0,
+            "freshness_age_seconds": None,
+            "reference_time": "2026-01-30T12:00:00+00:00",
+            "scope": _target_scope(),
+        },
+    )
+    interpretation = RuntimeEvidenceInterpreter(context=_context()).interpret(
+        hypothesis=_hypothesis("data_delay"),
+        step=_step("", tool="check_freshness"),
+        tool_result=_dq_tool_result("check_freshness", [reference]),
+    )
+
+    decision = _decision(interpretation)
+    assert decision.polarity is EvidencePolarity.NEUTRAL
+    assert "timestamp rows" in decision.reason
+
+
+def test_freshness_age_above_threshold_supports_data_delay() -> None:
+    reference = _dq_tool_reference(
+        evidence_id="dq-stale",
+        tool_name="check_freshness",
+        column="event_time",
+        observed_value=7200.0,
+        threshold=3600.0,
+        details={
+            "timestamp_rows": 10,
+            "freshness_age_seconds": 7200.0,
+            "max_age_seconds": 3600.0,
+            "reference_time": "2026-01-30T12:00:00+00:00",
+            "scope": _target_scope(),
+        },
+    )
+    interpretation = RuntimeEvidenceInterpreter(context=_context()).interpret(
+        hypothesis=_hypothesis("data_delay"),
+        step=_step("", tool="check_freshness"),
+        tool_result=_dq_tool_result("check_freshness", [reference]),
+    )
+
+    assert _decision(interpretation).polarity is EvidencePolarity.SUPPORTS
+
+
+def test_negative_freshness_age_is_neutral_for_data_delay() -> None:
+    reference = _dq_tool_reference(
+        evidence_id="dq-future-timestamp",
+        tool_name="check_freshness",
+        column="event_time",
+        observed_value=-60.0,
+        threshold=3600.0,
+        details={
+            "timestamp_rows": 10,
+            "freshness_age_seconds": -60.0,
+            "max_age_seconds": 3600.0,
+            "reference_time": "2026-01-30T12:00:00+00:00",
+            "scope": _target_scope(),
+        },
+    )
+    interpretation = RuntimeEvidenceInterpreter(context=_context()).interpret(
+        hypothesis=_hypothesis("data_delay"),
+        step=_step("", tool="check_freshness"),
+        tool_result=_dq_tool_result("check_freshness", [reference]),
+    )
+
+    decision = _decision(interpretation)
+    assert decision.polarity is EvidencePolarity.NEUTRAL
+    assert "future-dated" in decision.reason
+
+
+def test_duplicate_rate_is_neutral_without_incident_scope_support() -> None:
+    reference = _dq_tool_reference(
+        evidence_id="dq-duplicate-rate",
+        tool_name="check_duplicate_rate",
+        column=None,
+        columns=["event_id"],
+        observed_value=0.25,
+        threshold=0.01,
+        details={
+            "total_rows": 100,
+            "duplicate_rows": 25,
+            "duplicate_rate": 0.25,
+        },
+    )
+    interpretation = RuntimeEvidenceInterpreter(
+        context=_context(metric_id="ai_task_count")
+    ).interpret(
+        hypothesis=_hypothesis("duplicate_batch"),
+        step=_step("", tool="check_duplicate_rate"),
+        tool_result=_dq_tool_result("check_duplicate_rate", [reference]),
+    )
+
+    decision = _decision(interpretation)
+    assert decision.polarity is EvidencePolarity.NEUTRAL
+    assert (
+        "duplicate-rate check is not incident-scoped in the current tool contract"
+        in decision.reason
+    )
+
+
+def _schema_details(**changes: Any) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "previous_effective_at": "2026-01-29T00:00:00+00:00",
+        "current_effective_at": "2026-01-30T00:00:00+00:00",
+        "added_columns": [],
+        "removed_columns": [],
+        "type_changes": [],
+    }
+    details.update(changes)
+    return details
+
+
+def test_schema_drift_without_actual_change_is_neutral() -> None:
+    reference = _dq_tool_reference(
+        evidence_id="dq-schema-unchanged",
+        tool_name="detect_schema_drift",
+        source_type="schema_metadata",
+        observed_value=0.0,
+        threshold=0.0,
+        details=_schema_details(),
+    )
+    interpretation = RuntimeEvidenceInterpreter(context=_context()).interpret(
+        hypothesis=_hypothesis("schema_change"),
+        step=_step("", tool="detect_schema_drift"),
+        tool_result=_dq_tool_result("detect_schema_drift", [reference]),
+    )
+
+    decision = _decision(interpretation)
+    assert decision.polarity is EvidencePolarity.NEUTRAL
+    assert "no actual schema change" in decision.reason
+
+
+def test_schema_drift_with_actual_change_supports_schema_change() -> None:
+    reference = _dq_tool_reference(
+        evidence_id="dq-schema-changed",
+        tool_name="detect_schema_drift",
+        source_type="schema_metadata",
+        observed_value=1.0,
+        threshold=0.0,
+        details=_schema_details(added_columns=["new_field"]),
+    )
+    interpretation = RuntimeEvidenceInterpreter(context=_context()).interpret(
+        hypothesis=_hypothesis("schema_change"),
+        step=_step("", tool="detect_schema_drift"),
+        tool_result=_dq_tool_result("detect_schema_drift", [reference]),
+    )
+
+    assert _decision(interpretation).polarity is EvidencePolarity.SUPPORTS
+
+
+def _distribution_details() -> dict[str, Any]:
+    return {
+        "current_window": {
+            "start": "2026-01-30T00:00:00+00:00",
+            "end": "2026-01-31T00:00:00+00:00",
+            "row_count": 100,
+        }
+    }
+
+
+def test_distribution_observed_none_is_neutral() -> None:
+    reference = _dq_tool_reference(
+        evidence_id="dq-distribution-undefined",
+        tool_name="detect_distribution_drift",
+        column="event_name",
+        columns=["event_name", "event_time"],
+        observed_value=None,
+        threshold=0.1,
+        details=_distribution_details(),
+    )
+    interpretation = RuntimeEvidenceInterpreter(
+        context=_context(metric_id="ai_task_count")
+    ).interpret(
+        hypothesis=_hypothesis("field_drift"),
+        step=_step("", tool="detect_distribution_drift"),
+        tool_result=_dq_tool_result("detect_distribution_drift", [reference]),
+    )
+
+    decision = _decision(interpretation)
+    assert decision.polarity is EvidencePolarity.NEUTRAL
+    assert "no finite observed drift value" in decision.reason
+
+
+def test_distribution_observed_above_threshold_and_scoped_supports() -> None:
+    reference = _dq_tool_reference(
+        evidence_id="dq-distribution-drift",
+        tool_name="detect_distribution_drift",
+        column="event_name",
+        columns=["event_name", "event_time"],
+        observed_value=0.4,
+        threshold=0.1,
+        details=_distribution_details(),
+    )
+    interpretation = RuntimeEvidenceInterpreter(
+        context=_context(metric_id="ai_task_count")
+    ).interpret(
+        hypothesis=_hypothesis("field_drift"),
+        step=_step("", tool="detect_distribution_drift"),
+        tool_result=_dq_tool_result("detect_distribution_drift", [reference]),
+    )
+
+    assert _decision(interpretation).polarity is EvidencePolarity.SUPPORTS
 
 
 def test_multiple_dq_evidence_do_not_share_one_polarity() -> None:
