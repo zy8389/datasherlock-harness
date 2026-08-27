@@ -80,10 +80,22 @@ def test_runner_returns_bounded_rows_and_query_id(database_path: Path) -> None:
     assert result.query_id
     assert result.statement_type == "SELECT"
     assert result.columns == ["value"]
+    assert result.column_types == ["BIGINT"]
     assert result.rows == [[0], [1], [2]]
     assert result.row_count == 3
     assert result.truncated is True
     assert result.duration_ms >= 0
+
+
+def test_runner_reports_exact_duckdb_column_types(database_path: Path) -> None:
+    result = run_readonly_sql(
+        database_path,
+        "SELECT COUNT(*) AS total, CAST('2026-01-01' AS DATE) AS day, "
+        "1.5::DOUBLE AS ratio, 'ok'::VARCHAR AS label",
+    )
+
+    assert result.columns == ["total", "day", "ratio", "label"]
+    assert result.column_types == ["BIGINT", "DATE", "DOUBLE", "VARCHAR"]
 
 
 def test_runner_disables_external_file_access(
@@ -153,6 +165,7 @@ def test_structured_execution_response_contains_typed_error(
 
     assert response.status == "error"
     assert response.statement_type is None
+    assert response.column_types == []
     assert response.error is not None
     assert response.error["type"] == "validation"
     assert response.query_id

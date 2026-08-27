@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -24,6 +25,60 @@ def _resolve_config_path(filename: str) -> Path:
 DEFAULT_METRICS_PATH = _resolve_config_path("metrics.yaml")
 
 
+class MetricNumericRange(BaseModel):
+    """Inclusive numeric bounds for one metric output column."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    minimum: float | None = None
+    maximum: float | None = None
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> MetricNumericRange:
+        if self.minimum is None and self.maximum is None:
+            raise ValueError("numeric range must define a minimum or maximum")
+        if self.minimum is not None and not math.isfinite(self.minimum):
+            raise ValueError("numeric range minimum must be finite")
+        if self.maximum is not None and not math.isfinite(self.maximum):
+            raise ValueError("numeric range maximum must be finite")
+        if (
+            self.minimum is not None
+            and self.maximum is not None
+            and self.minimum > self.maximum
+        ):
+            raise ValueError("numeric range minimum must not exceed maximum")
+        return self
+
+
+class MetricValidationPolicy(BaseModel):
+    """Result contract applied to a canonical metric SQL result."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    expected_column_types: dict[str, str] = Field(min_length=1)
+    numeric_ranges: dict[str, MetricNumericRange] = Field(default_factory=dict)
+    max_result_rows: int = Field(gt=0)
+
+    @field_validator("expected_column_types")
+    @classmethod
+    def validate_column_types(cls, column_types: dict[str, str]) -> dict[str, str]:
+        if any(not column or not data_type for column, data_type in column_types.items()):
+            raise ValueError("expected column types must not contain blank values")
+        return column_types
+
+    @model_validator(mode="after")
+    def validate_numeric_columns(self) -> MetricValidationPolicy:
+        unknown_columns = sorted(
+            set(self.numeric_ranges) - set(self.expected_column_types)
+        )
+        if unknown_columns:
+            raise ValueError(
+                "numeric ranges reference undeclared output column(s): "
+                + ", ".join(unknown_columns)
+            )
+        return self
+
+
 class MetricDefinition(BaseModel):
     """Validated executable definition for one metric."""
 
@@ -34,6 +89,7 @@ class MetricDefinition(BaseModel):
     description: str = Field(min_length=1)
     aggregation: str = Field(min_length=1)
     query: str = Field(min_length=1)
+    validation: MetricValidationPolicy
     unit: str = Field(min_length=1)
     formula: str | None = None
     validity: dict[str, Any] = Field(default_factory=dict)

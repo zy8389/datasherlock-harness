@@ -417,6 +417,7 @@ class HarnessGraph:
                     selected,
                     incident_id=_incident_id(state),
                     trace_id=trace_id,
+                    metric_id=_metric_id(state),
                     timeout_seconds=decision.timeout_seconds,
                     max_rows=decision.max_rows,
                 )
@@ -1191,6 +1192,11 @@ def _first_plan_step(plan: Sequence[Mapping[str, JsonValue]]) -> Mapping[str, Js
 
 def _incident_id(state: IncidentState) -> str | None:
     value = state.alert.get("incident_id")
+    return value if isinstance(value, str) else None
+
+
+def _metric_id(state: IncidentState) -> str | None:
+    value = state.alert.get("metric")
     return value if isinstance(value, str) else None
 
 

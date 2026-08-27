@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from agents.planner import InvestigationStep
 from config.faults import EvidenceSourceType
+from config.metrics import MetricDefinition, load_metrics_config
 from harness.hypothesis import EvidenceReference
 from tools.data_quality import (
     DataQualityCheckResult,
@@ -41,6 +42,13 @@ from tools.sql_runner import (
     SqlRunnerError,
     execute_readonly_sql,
     validate_readonly_sql,
+)
+from validators.sql_result import (
+    MetricAggregation,
+    NumericRange,
+    SqlResultExpectation,
+    SqlResultValidation,
+    validate_sql_result,
 )
 
 
@@ -77,6 +85,7 @@ class ToolExecutionResult(BaseModel):
     query_id: str | None = None
     result: JsonValue | None = None
     error: dict[str, str] | None = None
+    sql_validation: SqlResultValidation | None = None
     # Evidence is opt-in.  A successful SQL response is a result, not proof
     # of a root cause, so the default adapter deliberately returns no entries.
     evidence: list[EvidenceReference] = Field(default_factory=list)
@@ -103,6 +112,7 @@ class ToolExecutor:
             else data_quality_execution
         )
         self.audit_path = audit_path
+        self._metrics_config = load_metrics_config()
 
     def execute_step(
         self,
@@ -112,6 +122,8 @@ class ToolExecutor:
         trace_id: str | None = None,
         timeout_seconds: float | None = None,
         max_rows: int | None = None,
+        metric_id: str | None = None,
+        sql_result_expectation: SqlResultExpectation | Mapping[str, Any] | None = None,
     ) -> ToolExecutionResult:
         """Validate and execute one plan step.
 
@@ -193,12 +205,20 @@ class ToolExecutor:
             )
 
         payload = cast(dict[str, JsonValue], response.model_dump(mode="json"))
+        expectation = self._sql_expectation(
+            response,
+            metric_id=metric_id,
+            max_rows=max_rows,
+            explicit=sql_result_expectation,
+        )
+        sql_validation = validate_sql_result(response, expectation, sql=sql)
         if response.status == "success":
             return ToolExecutionResult(
                 tool_name=tool_name,
                 success=True,
                 query_id=response.query_id,
                 result=payload,
+                sql_validation=sql_validation,
             )
         return ToolExecutionResult(
             tool_name=tool_name,
@@ -207,7 +227,57 @@ class ToolExecutor:
             result=payload,
             error=response.error
             or {"type": "execution", "message": "SQL execution failed"},
+            sql_validation=sql_validation,
         )
+
+    def _sql_expectation(
+        self,
+        response: SqlExecutionResponse,
+        *,
+        metric_id: str | None,
+        max_rows: int | None,
+        explicit: SqlResultExpectation | Mapping[str, Any] | None,
+    ) -> SqlResultExpectation:
+        """Resolve the internal result contract without exposing it to Planner."""
+
+        if explicit is not None:
+            return (
+                explicit
+                if isinstance(explicit, SqlResultExpectation)
+                else SqlResultExpectation.model_validate(explicit)
+            )
+
+        metric = self._metric_definition(metric_id)
+        if metric is not None and metric.id in response.columns:
+            try:
+                aggregation = MetricAggregation(metric.aggregation)
+            except ValueError:
+                aggregation = None
+            policy = metric.validation
+            return SqlResultExpectation(
+                required_columns=list(policy.expected_column_types),
+                expected_column_types=dict(policy.expected_column_types),
+                numeric_ranges={
+                    column: NumericRange.model_validate(bounds.model_dump())
+                    for column, bounds in policy.numeric_ranges.items()
+                },
+                expected_aggregation=aggregation,
+                max_result_rows=policy.max_result_rows,
+            )
+
+        return SqlResultExpectation(max_result_rows=max_rows)
+
+    def _metric_definition(self, metric_id: str | None) -> MetricDefinition | None:
+        if metric_id is None:
+            return None
+        try:
+            return next(
+                metric
+                for metric in self._metrics_config.metrics
+                if metric.id == metric_id
+            )
+        except StopIteration:
+            return None
 
     def _execute_data_quality(
         self,

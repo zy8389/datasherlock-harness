@@ -26,6 +26,33 @@ def test_metrics_config_has_six_unique_executable_metrics() -> None:
     assert config.date_grain == "day"
 
 
+def test_canonical_metrics_have_result_validation_policies() -> None:
+    config = load_metrics_config()
+
+    for metric in config.metrics:
+        policy = metric.validation
+        assert "metric_date" in policy.expected_column_types
+        assert metric.id in policy.expected_column_types
+        assert metric.id in policy.numeric_ranges
+        assert policy.max_result_rows > 0
+
+
+def test_metric_validation_policy_rejects_bad_bounds_and_unknown_columns() -> None:
+    payload = load_metrics_config().model_dump()
+    payload["metrics"][0]["validation"]["numeric_ranges"][
+        "daily_active_users"
+    ] = {"minimum": 2, "maximum": 1}
+    with pytest.raises(ValidationError, match="minimum must not exceed maximum"):
+        MetricsConfig.model_validate(payload)
+
+    payload = load_metrics_config().model_dump()
+    payload["metrics"][0]["validation"]["numeric_ranges"]["unknown"] = {
+        "minimum": 0
+    }
+    with pytest.raises(ValidationError, match="undeclared output"):
+        MetricsConfig.model_validate(payload)
+
+
 def test_metric_diagnostics_are_complete_in_metrics_config() -> None:
     config = load_metrics_config()
     available_tools = set(build_default_tool_registry().names())
