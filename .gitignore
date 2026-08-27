@@ -219,3 +219,4 @@ __marimo__/
 data/processed/
 *.duckdb
 *.parquet
+experiments/ablation/results/

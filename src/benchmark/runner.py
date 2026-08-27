@@ -45,7 +45,7 @@ from benchmark.evidence_interpreter import (
 from config.model_settings import ModelSettings
 from harness.checkpoint import CheckpointManager, FileCheckpointStore
 from harness.graph import HarnessGraph
-from harness.guardrails import GuardrailRuntime
+from harness.guardrails import GuardrailPolicy, GuardrailRuntime
 from harness.hypothesis import EvidenceReference, HypothesisManager
 from harness.state import IncidentState, IncidentStatus
 from llm.base import ModelClient
@@ -91,6 +91,11 @@ class BenchmarkRunConfig(BaseModel):
     checkpoint_enabled: bool = False
     overwrite: bool = False
     max_planner_retries: int = Field(default=2, ge=0)
+    max_agent_rounds: int = Field(default=20, gt=0)
+    max_tool_calls: int = Field(default=20, gt=0)
+    max_sql_calls: int = Field(default=15, gt=0)
+    max_result_rows: int = Field(default=1000, gt=0)
+    max_duplicate_calls: int = Field(default=1, gt=0)
     input_cost_per_token: float | None = Field(default=None, ge=0)
     output_cost_per_token: float | None = Field(default=None, ge=0)
 
@@ -467,7 +472,16 @@ class CurrentHarnessExecutor:
             tool_executor=tool_executor,
             hypothesis_manager=HypothesisManager(),
             root_cause_validator=RootCauseValidator(),
-            guardrail_runtime=GuardrailRuntime(registry=registry),
+            guardrail_runtime=GuardrailRuntime(
+                policy=GuardrailPolicy(
+                    max_agent_rounds=config.max_agent_rounds,
+                    max_tool_calls=config.max_tool_calls,
+                    max_sql_calls=config.max_sql_calls,
+                    max_result_rows=config.max_result_rows,
+                    max_duplicate_calls=config.max_duplicate_calls,
+                ),
+                registry=registry,
+            ),
             checkpoint_manager=checkpoint_manager,
         )
         state = IncidentState(
