@@ -719,7 +719,13 @@ class HarnessGraph:
         reason: str | None = None,
         **details: JsonValue,
     ) -> HarnessTransitionResult:
-        """Record a repair outcome without implementing a repair engine."""
+        """Record a repair outcome without implementing a repair engine.
+
+        A concrete executor remains an injected collaborator.  Its typed
+        ``SandboxRun`` payload is stored here so a checkpoint after a
+        successful repair can resume at post-validation without replaying the
+        repair.
+        """
 
         if isinstance(succeeded, Mapping):
             if result is not None:
@@ -758,6 +764,7 @@ class HarnessGraph:
         payload: dict[str, JsonValue] = dict(result or {})
         payload.update(details)
         payload["status"] = "succeeded" if repair_succeeded else "failed"
+        self._validate_typed_repair_result(state, payload)
         target = IncidentStatus.POST_VALIDATION if repair_succeeded else IncidentStatus.TOOL_FAILED
         return self._transition(
             state,
@@ -767,19 +774,184 @@ class HarnessGraph:
             before_commit=lambda: setattr(state, "repair_result", payload),
         )
 
+    def record_pending_repair_run(
+        self,
+        state: IncidentState,
+        run: Mapping[str, JsonValue] | Any,
+    ) -> None:
+        """Checkpoint one approved pending run before its first write.
+
+        This is an artifact checkpoint, not an incident transition.  Keeping
+        it on ``repair_result`` preserves the current IncidentState schema and
+        gives restart logic a durable record that no handler has run yet.
+        """
+
+        self._ensure_incident_state(state)
+        self._ensure_active(state)
+        if state.status is not IncidentStatus.SANDBOX_REPAIR:
+            raise self._error(
+                state,
+                IncidentStatus.SANDBOX_REPAIR,
+                "pending repair runs require SANDBOX_REPAIR",
+            )
+        if state.approval is None or state.approval.get("status") != "approved":
+            raise self._error(
+                state,
+                IncidentStatus.SANDBOX_REPAIR,
+                "pending repair run requires an approved approval payload",
+            )
+        from harness.repair import SandboxRun, proposal_is_intact
+
+        try:
+            typed_run = (
+                run
+                if isinstance(run, SandboxRun)
+                else SandboxRun.model_validate(run)
+            )
+        except (TypeError, ValueError) as exc:
+            raise self._error(
+                state,
+                IncidentStatus.SANDBOX_REPAIR,
+                "pending repair run is not a valid typed artifact",
+            ) from exc
+        if typed_run.status.value != "pending":
+            raise self._error(
+                state,
+                IncidentStatus.SANDBOX_REPAIR,
+                "pending repair run must have status pending",
+            )
+        existing = state.repair_result
+        if existing is not None:
+            raise self._error(
+                state,
+                IncidentStatus.SANDBOX_REPAIR,
+                "incident already has a repair artifact",
+            )
+        incident_id = _incident_id(state)
+        if typed_run.incident_id != incident_id:
+            raise self._error(
+                state,
+                IncidentStatus.SANDBOX_REPAIR,
+                "pending repair run incident does not match state",
+            )
+        approval_id = state.approval.get("decision_id")
+        if not isinstance(approval_id, str) or typed_run.approval_decision_id != approval_id:
+            raise self._error(
+                state,
+                IncidentStatus.SANDBOX_REPAIR,
+                "pending repair run approval does not match state",
+            )
+        try:
+            from harness.repair import RepairProposal
+
+            proposal = RepairProposal.model_validate(state.fix_proposal)
+        except (TypeError, ValueError) as exc:
+            raise self._error(
+                state,
+                IncidentStatus.SANDBOX_REPAIR,
+                "checkpointed repair proposal is invalid",
+            ) from exc
+        if (
+            not proposal_is_intact(proposal)
+            or typed_run.proposal_id != proposal.proposal_id
+            or typed_run.action is not proposal.action
+            or typed_run.proposal_hash != proposal.proposal_hash
+        ):
+            raise self._error(
+                state,
+                IncidentStatus.SANDBOX_REPAIR,
+                "pending repair run does not bind to checkpointed proposal",
+            )
+        state.repair_result = {
+            "status": "pending",
+            "sandbox_run": cast(
+                dict[str, JsonValue], typed_run.model_dump(mode="json")
+            ),
+        }
+        self._save_checkpoint(state, reason="repair_run_pending")
+
     def record_post_validation_result(
         self,
         state: IncidentState,
         validated: bool,
         *,
         reason: str | None = None,
+        result: Mapping[str, JsonValue] | None = None,
     ) -> HarnessTransitionResult:
         """Resolve a repaired incident or emit terminal validation failure."""
 
         if not isinstance(validated, bool):
             raise self._error(state, IncidentStatus.RESOLVED, "validated must be a boolean")
         target = IncidentStatus.RESOLVED if validated else IncidentStatus.VALIDATION_FAILED
-        return self._transition(state, target, reason=reason, fatal=not validated)
+
+        def before_commit() -> None:
+            if result is None:
+                return
+            from harness.repair import PostValidationResult
+
+            try:
+                typed = PostValidationResult.model_validate(result)
+            except (TypeError, ValueError) as exc:
+                raise self._error(
+                    state,
+                    target,
+                    "post-validation result is not a valid typed artifact",
+                ) from exc
+            try:
+                from harness.repair import (
+                    RepairProposal,
+                    SandboxRun,
+                    proposal_is_intact,
+                )
+
+                proposal = RepairProposal.model_validate(state.fix_proposal)
+                repair_payload = state.repair_result or {}
+                run_payload = repair_payload.get("sandbox_run", repair_payload)
+                typed_run = SandboxRun.model_validate(run_payload)
+            except (TypeError, ValueError) as exc:
+                raise self._error(
+                    state,
+                    target,
+                    "post-validation has no valid completed sandbox run artifact",
+                ) from exc
+            if (
+                not proposal_is_intact(proposal)
+                or typed.incident_id != _incident_id(state)
+                or typed.sandbox_run_id != typed_run.run_id
+                or typed.proposal_hash != proposal.proposal_hash
+                or typed_run.status.value != "succeeded"
+                or typed_run.proposal_hash != proposal.proposal_hash
+            ):
+                raise self._error(
+                    state,
+                    target,
+                    "post-validation result does not bind to completed repair",
+                )
+            if typed.status.value == "passed" and not validated:
+                raise self._error(
+                    state,
+                    target,
+                    "validated=False conflicts with a passing post-validation result",
+                )
+            if typed.status.value == "failed" and validated:
+                raise self._error(
+                    state,
+                    target,
+                    "validated=True conflicts with a failing post-validation result",
+                )
+            payload = dict(state.repair_result or {})
+            payload["post_validation"] = cast(
+                dict[str, JsonValue], typed.model_dump(mode="json")
+            )
+            state.repair_result = payload
+
+        return self._transition(
+            state,
+            target,
+            reason=reason,
+            fatal=not validated,
+            before_commit=before_commit,
+        )
 
     def mark_budget_exceeded(
         self,
@@ -1081,6 +1253,58 @@ class HarnessGraph:
             cast(dict[str, JsonValue], item.model_dump(mode="json"))
             for item in self.hypothesis_manager.hypotheses()
         ]
+
+    @staticmethod
+    def _validate_typed_repair_result(
+        state: IncidentState,
+        payload: Mapping[str, JsonValue],
+    ) -> None:
+        """Validate a full SandboxRun payload when one is supplied.
+
+        Legacy graph callers may still report only ``success`` and an error;
+        those calls intentionally retain the older lightweight contract.  A
+        payload carrying a run identity, however, must bind to the
+        checkpointed proposal before the transition can be committed.
+        """
+
+        run_payload: object = payload.get("sandbox_run", payload)
+        if not isinstance(run_payload, Mapping) or "run_id" not in run_payload:
+            return
+        from harness.repair import RepairProposal, SandboxRun, proposal_is_intact
+
+        try:
+            run = SandboxRun.model_validate(run_payload)
+            proposal = RepairProposal.model_validate(state.fix_proposal)
+        except (TypeError, ValueError) as exc:
+            raise HarnessTransitionError(
+                "repair result is not a valid typed sandbox run",
+                from_status=state.status,
+                to_status=(
+                    IncidentStatus.POST_VALIDATION
+                    if payload.get("status") == "succeeded"
+                    else IncidentStatus.TOOL_FAILED
+                ),
+                reason="repair result is not a valid typed sandbox run",
+            ) from exc
+        if (
+            not proposal_is_intact(proposal)
+            or run.incident_id != _incident_id(state)
+            or run.proposal_id != proposal.proposal_id
+            or run.proposal_hash != proposal.proposal_hash
+            or run.action is not proposal.action
+            or run.approval_decision_id
+            != (state.approval or {}).get("decision_id")
+        ):
+            raise HarnessTransitionError(
+                "repair result does not bind to the approved proposal",
+                from_status=state.status,
+                to_status=(
+                    IncidentStatus.POST_VALIDATION
+                    if payload.get("status") == "succeeded"
+                    else IncidentStatus.TOOL_FAILED
+                ),
+                reason="repair result does not bind to the approved proposal",
+            )
 
     def _record_guardrail_event(
         self,
