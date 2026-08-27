@@ -292,8 +292,17 @@ class SandboxRun(BaseModel):
             raise ValueError("finished sandbox runs require started_at")
         if self.started_at and self.finished_at and self.finished_at < self.started_at:
             raise ValueError("finished_at cannot precede started_at")
-        if self.status is SandboxRunStatus.FAILED and not self.error:
+        if self.status in {
+            SandboxRunStatus.FAILED,
+            SandboxRunStatus.CANCELLED,
+        } and not self.error:
             raise ValueError("failed sandbox runs require an error")
+        if self.status in {
+            SandboxRunStatus.FAILED,
+            SandboxRunStatus.CANCELLED,
+            SandboxRunStatus.SUCCEEDED,
+        } and self.finished_at is None:
+            raise ValueError("terminal sandbox runs require finished_at")
         if self.status is SandboxRunStatus.SUCCEEDED and self.handler_invocation_count != 1:
             raise ValueError("successful sandbox runs require one handler invocation")
         return self

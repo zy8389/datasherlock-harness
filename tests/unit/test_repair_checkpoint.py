@@ -8,7 +8,13 @@ from harness.checkpoint import (
     ResumeAction,
 )
 from harness.graph import HarnessGraph
-from harness.repair import ApprovalDecision, ApprovalOutcome, SandboxRun
+from harness.repair import (
+    ApprovalDecision,
+    ApprovalOutcome,
+    PostValidationResult,
+    PostValidationStatus,
+    SandboxRun,
+)
 from harness.repair_proposal import RepairProposalBuilder
 from harness.state import IncidentState, IncidentStatus
 
@@ -98,10 +104,37 @@ def test_repair_artifacts_round_trip_and_resume_without_execution(tmp_path: Path
             "action": run.action.value,
             "sandbox_path": run.sandbox_path,
             "status": "succeeded",
+            "source_hash_before": "a" * 64,
+            "source_hash_after": "a" * 64,
+            "sandbox_hash_before": "b" * 64,
+            "sandbox_hash_after": "c" * 64,
             "handler_invocation_count": 1,
+            "started_at": now.isoformat(),
+            "finished_at": now.isoformat(),
         },
     )
     assert restored.status is IncidentStatus.POST_VALIDATION
     after_repair, post_resume = resumed_graph.resume_latest(item.incident_id)
     assert after_repair.status is IncidentStatus.POST_VALIDATION
     assert post_resume.action is ResumeAction.CONTINUE_POST_ROOT_CAUSE_FLOW
+    validation = PostValidationResult(
+        validation_id="PV-CP",
+        incident_id=item.incident_id,
+        sandbox_run_id=run.run_id,
+        proposal_hash=item.proposal_hash,
+        metric_id="daily_active_users",
+        observed_before=1,
+        observed_after=2,
+        target_met=True,
+        status=PostValidationStatus.PASSED,
+        summary="all checks passed",
+    )
+    resumed_graph.record_post_validation_result(
+        restored,
+        validated=True,
+        result=validation.model_dump(mode="json"),
+    )
+    final, _ = resumed_graph.resume_latest(item.incident_id)
+    assert final.repair_result is not None
+    assert final.repair_result["sandbox_run"]["run_id"] == run.run_id
+    assert final.repair_result["post_validation"]["validation_id"] == "PV-CP"

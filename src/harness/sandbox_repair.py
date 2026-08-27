@@ -74,22 +74,13 @@ class SandboxRepairExecutor:
 
         self._validate_binding(proposal, run)
         target = self.sandbox_path_for(run)
-        supplied = Path(run.sandbox_path)
-        if not supplied.is_absolute() or ".." in supplied.parts:
-            raise SandboxRepairError(
-                "sandbox_path must be an absolute executor-derived path without traversal"
-            )
-        try:
-            supplied_resolved = supplied.resolve(strict=False)
-        except OSError as exc:
-            raise SandboxRepairError("sandbox_path could not be resolved") from exc
-        if supplied_resolved != target:
-            raise SandboxRepairError(
-                "sandbox_path must equal the executor-derived sandbox path"
-            )
+        self._validate_supplied_sandbox_path(run, target)
         self._assert_confined(target)
-        self._assert_no_reparse_points(target.parent, include_root=False)
+        self._assert_no_reparse_points(target.parent, include_root=True)
         if target.parent.exists():
+            recovered = self.recover_run(proposal, run)
+            if recovered is not None:
+                return recovered
             raise SandboxRepairError("sandbox run directory already exists")
 
         source_before = _sha256_file(self._source_database_path)
@@ -148,6 +139,113 @@ class SandboxRepairExecutor:
             operation_details=operation_details,
             sandbox_path=target,
         )
+
+    def recover_run(
+        self,
+        proposal: RepairProposal,
+        pending_run: SandboxRun,
+    ) -> SandboxRun | None:
+        """Recover a durable terminal run without invoking its handler."""
+
+        self._validate_binding(proposal, pending_run)
+        target = self.sandbox_path_for(pending_run)
+        self._validate_supplied_sandbox_path(pending_run, target)
+        self._assert_confined(target)
+        run_directory = target.parent
+        if not run_directory.exists():
+            return None
+        self._assert_no_reparse_points(run_directory, include_root=True)
+        result_path = run_directory / "repair-result.json"
+        temporary_result_path = run_directory / "repair-result.json.tmp"
+        marker_path = run_directory / "repair-invocation.json"
+        self._assert_no_reparse_points(result_path, include_root=True)
+        self._assert_no_reparse_points(temporary_result_path, include_root=True)
+        self._assert_no_reparse_points(marker_path, include_root=True)
+        if temporary_result_path.exists():
+            raise SandboxRepairError(
+                "repair run is indeterminate: terminal result write was incomplete"
+            )
+        if not result_path.is_file():
+            if marker_path.exists():
+                raise SandboxRepairError(
+                    "repair run is indeterminate: invocation marker has no durable terminal result"
+                )
+            raise SandboxRepairError(
+                "sandbox run directory exists without a durable terminal result"
+            )
+        try:
+            raw = json.loads(result_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, Mapping):
+                raise TypeError("result JSON must contain an object")
+            required_fields = {
+                "run_id",
+                "incident_id",
+                "proposal_id",
+                "proposal_hash",
+                "approval_decision_id",
+                "action",
+                "sandbox_path",
+                "status",
+                "source_hash_before",
+                "source_hash_after",
+                "sandbox_hash_before",
+                "sandbox_hash_after",
+                "handler_invocation_count",
+                "changed_row_counts",
+                "operation_details",
+                "started_at",
+                "finished_at",
+                "error",
+            }
+            if not required_fields.issubset(raw):
+                raise TypeError("result JSON is missing terminal run fields")
+            recovered = SandboxRun.model_validate(raw)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise SandboxRepairError("durable repair result is malformed") from exc
+        if recovered.status not in {
+            SandboxRunStatus.SUCCEEDED,
+            SandboxRunStatus.FAILED,
+            SandboxRunStatus.CANCELLED,
+        }:
+            raise SandboxRepairError("durable repair result is not terminal")
+        if (
+            not proposal_is_intact(proposal)
+            or recovered.run_id != pending_run.run_id
+            or recovered.incident_id != proposal.incident_id
+            or recovered.proposal_id != proposal.proposal_id
+            or not hmac.compare_digest(recovered.proposal_hash, proposal.proposal_hash)
+            or recovered.action is not proposal.action
+            or recovered.approval_decision_id != pending_run.approval_decision_id
+        ):
+            raise SandboxRepairError(
+                "durable repair result does not bind to the pending proposal"
+            )
+        self._validate_supplied_sandbox_path(recovered, target)
+        self._validate_terminal_run_contract(recovered)
+        self._validate_invocation_marker(marker_path, recovered)
+        source_current = _sha256_file(self._source_database_path)
+        if recovered.status is SandboxRunStatus.SUCCEEDED:
+            if not target.is_file():
+                raise SandboxRepairError(
+                    "durable successful repair is missing its sandbox database"
+                )
+            if recovered.source_hash_before != source_current or recovered.source_hash_after != source_current:
+                raise SandboxRepairError(
+                    "source database hash no longer matches durable successful repair"
+                )
+            if recovered.sandbox_hash_after != _sha256_file(target):
+                raise SandboxRepairError(
+                    "sandbox database hash no longer matches durable successful repair"
+                )
+        elif recovered.source_hash_before is not None and recovered.source_hash_after is not None:
+            if (
+                recovered.source_hash_before != source_current
+                or recovered.source_hash_after != source_current
+            ):
+                raise SandboxRepairError(
+                    "source database hash no longer matches durable repair result"
+                )
+        return recovered
 
     def _execute_handler(
         self,
@@ -277,6 +375,35 @@ class SandboxRepairExecutor:
             file.flush()
             os.fsync(file.fileno())
 
+    def _write_terminal_result(self, run: SandboxRun) -> None:
+        result_path = Path(run.sandbox_path).parent / "repair-result.json"
+        temporary_path = result_path.with_name("repair-result.json.tmp")
+        self._assert_no_reparse_points(result_path, include_root=True)
+        self._assert_no_reparse_points(temporary_path, include_root=True)
+        if result_path.exists() or temporary_path.exists():
+            raise SandboxRepairError("durable terminal repair result already exists")
+        try:
+            with temporary_path.open("x", encoding="utf-8") as file:
+                json.dump(
+                    run.model_dump(mode="json"),
+                    file,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                file.write("\n")
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temporary_path, result_path)
+            _fsync_directory(result_path.parent)
+        except (OSError, TypeError, ValueError) as exc:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise SandboxRepairError(
+                "could not durably persist terminal repair result"
+            ) from exc
+
     def _validate_binding(self, proposal: RepairProposal, run: SandboxRun) -> None:
         if run.status is not SandboxRunStatus.PENDING:
             raise SandboxRepairError("only pending sandbox runs may execute")
@@ -289,6 +416,75 @@ class SandboxRepairExecutor:
             or not hmac.compare_digest(run.proposal_hash, proposal.proposal_hash)
         ):
             raise SandboxRepairError("sandbox run does not bind to repair proposal")
+
+    @staticmethod
+    def _validate_supplied_sandbox_path(run: SandboxRun, target: Path) -> None:
+        supplied = Path(run.sandbox_path)
+        if not supplied.is_absolute() or ".." in supplied.parts:
+            raise SandboxRepairError(
+                "sandbox_path must be an absolute executor-derived path without traversal"
+            )
+        try:
+            supplied_resolved = supplied.resolve(strict=False)
+        except OSError as exc:
+            raise SandboxRepairError("sandbox_path could not be resolved") from exc
+        if supplied_resolved != target:
+            raise SandboxRepairError(
+                "sandbox_path must equal the executor-derived sandbox path"
+            )
+
+    @staticmethod
+    def _validate_terminal_run_contract(run: SandboxRun) -> None:
+        if run.status is SandboxRunStatus.SUCCEEDED:
+            if (
+                not _is_sha256(run.source_hash_before)
+                or not _is_sha256(run.source_hash_after)
+                or run.source_hash_before != run.source_hash_after
+                or not _is_sha256(run.sandbox_hash_before)
+                or not _is_sha256(run.sandbox_hash_after)
+                or run.finished_at is None
+                or run.error is not None
+                or run.handler_invocation_count != 1
+            ):
+                raise SandboxRepairError(
+                    "successful sandbox run is incomplete or internally inconsistent"
+                )
+        elif (
+            not run.error
+            or run.finished_at is None
+            or run.handler_invocation_count < 0
+        ):
+            raise SandboxRepairError(
+                "failed sandbox run requires error and finished_at"
+            )
+        for value in (
+            run.source_hash_before,
+            run.source_hash_after,
+            run.sandbox_hash_before,
+            run.sandbox_hash_after,
+        ):
+            if value is not None and not _is_sha256(value):
+                raise SandboxRepairError("sandbox run contains an invalid hash")
+
+    @staticmethod
+    def _validate_invocation_marker(marker_path: Path, run: SandboxRun) -> None:
+        if not marker_path.exists():
+            if run.status is SandboxRunStatus.SUCCEEDED or run.handler_invocation_count != 0:
+                raise SandboxRepairError("terminal repair result is missing invocation marker")
+            return
+        try:
+            payload = json.loads(marker_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise SandboxRepairError("repair invocation marker is malformed") from exc
+        if (
+            not isinstance(payload, Mapping)
+            or payload.get("handler_invocation_count") != 1
+            or payload.get("run_id") != run.run_id
+            or payload.get("proposal_id") != run.proposal_id
+            or payload.get("proposal_hash") != run.proposal_hash
+            or run.handler_invocation_count != 1
+        ):
+            raise SandboxRepairError("repair invocation marker does not bind to result")
 
     def _assert_confined(self, path: Path) -> None:
         resolved = path.resolve(strict=False)
@@ -318,8 +514,8 @@ class SandboxRepairExecutor:
             if candidate.exists() and _is_reparse_point(candidate):
                 raise SandboxRepairError("sandbox path contains a symlink or reparse point")
 
-    @staticmethod
     def _finished_run(
+        self,
         run: SandboxRun,
         *,
         status: SandboxRunStatus,
@@ -334,7 +530,7 @@ class SandboxRepairExecutor:
         sandbox_path: Path,
         error: str | None = None,
     ) -> SandboxRun:
-        return SandboxRun.model_validate(
+        finished = SandboxRun.model_validate(
             {
                 **run.model_dump(mode="json"),
                 "sandbox_path": str(sandbox_path),
@@ -351,6 +547,9 @@ class SandboxRepairExecutor:
                 "error": error,
             }
         )
+        self._validate_terminal_run_contract(finished)
+        self._write_terminal_result(finished)
+        return finished
 
 
 def _sha256_file(path: Path) -> str:
@@ -373,6 +572,29 @@ def _is_reparse_point(path: Path) -> bool:
     except (AttributeError, OSError):
         return False
     return bool(attributes & 0x400)
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _fsync_directory(path: Path) -> None:
+    """Best-effort directory durability across POSIX and Windows."""
+
+    try:
+        descriptor = os.open(str(path), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
 
 
 __all__ = ["SandboxRepairError", "SandboxRepairExecutor"]

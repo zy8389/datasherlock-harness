@@ -82,12 +82,13 @@ def record_approval(
         raise ApprovalValidationError("graph does not expose record_approval")
     metadata = decision.model_dump(mode="json")
     if decision.outcome is ApprovalOutcome.APPROVED:
-        return method(state, approved=True, metadata=metadata)
+        return method(state, approved=True, metadata=metadata, now=now)
     return method(
         state,
         approved=False,
         reason=decision.comment,
         metadata=metadata,
+        now=now,
     )
 
 

@@ -178,7 +178,23 @@ def test_f01_rejected_approval_does_not_create_sandbox(tmp_path: Path) -> None:
     )
     state = IncidentState(
         alert={"incident_id": item.incident_id},
-        root_cause={"root_cause_type": item.root_cause_type},
+        root_cause={
+            "root_cause_type": item.root_cause_type,
+            "supporting_evidence_ids": ["E1", "E2"],
+            "independent_source_types": ["business_data", "operational_metadata"],
+        },
+        evidence=[
+            {
+                "evidence_id": "E1",
+                "source_type": "business_data",
+                "description": "empty",
+            },
+            {
+                "evidence_id": "E2",
+                "source_type": "operational_metadata",
+                "description": "missing",
+            },
+        ],
         status=IncidentStatus.ROOT_CAUSE_FOUND,
     )
     graph = HarnessGraph()
