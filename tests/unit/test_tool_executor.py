@@ -173,6 +173,32 @@ def test_executor_applies_metric_policy_only_when_metric_output_is_present() -> 
     assert result.sql_validation.evidence.ast_validated is True
 
 
+def test_executor_metric_policy_is_order_insensitive_for_exact_metric_columns() -> None:
+    def run_sql(_: str, __: str, **_kwargs: object) -> SqlExecutionResponse:
+        return SqlExecutionResponse(
+            query_id="Q-METRIC-REORDERED",
+            status="success",
+            statement_type="SELECT",
+            columns=["daily_active_users", "metric_date"],
+            column_types=["BIGINT", "DATE"],
+            rows=[[10, "2026-08-12"]],
+            row_count=1,
+        )
+
+    metric_sql = (
+        "SELECT COUNT(DISTINCT 1) AS daily_active_users, "
+        "CAST('2026-08-12' AS DATE) AS metric_date"
+    )
+    result = ToolExecutor("test.duckdb", sql_execution=run_sql).execute_step(
+        _step(metric_sql), metric_id="daily_active_users"
+    )
+
+    assert result.success is True
+    assert result.sql_validation is not None
+    assert result.sql_validation.passed is True
+    assert result.sql_validation.evidence.ast_validated is True
+
+
 def test_executor_does_not_apply_metric_policy_to_diagnostic_comparison_output() -> None:
     def run_sql(_: str, __: str, **_kwargs: object) -> SqlExecutionResponse:
         return SqlExecutionResponse(

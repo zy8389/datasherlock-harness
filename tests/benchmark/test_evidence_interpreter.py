@@ -1,3 +1,4 @@
+from datetime import date
 from typing import Any
 
 import pytest
@@ -5,11 +6,14 @@ import pytest
 from agents.planner import InvestigationStep
 from benchmark.evidence_interpreter import (
     EvidencePolarity,
+    IncidentEvidenceContext,
     RuntimeEvidenceInterpreter,
 )
 from harness.hypothesis import EvidenceReference, HypothesisState
 from tools.executor import ToolExecutionResult
 from validators.sql_result import SqlResultEvidence, SqlResultValidation
+
+TARGET_DATE = date(2026, 1, 30)
 
 
 def _hypothesis(root_cause_type: str) -> HypothesisState:
@@ -21,13 +25,28 @@ def _hypothesis(root_cause_type: str) -> HypothesisState:
     )
 
 
-def _step(sql: str, *, step_id: str = "S01") -> InvestigationStep:
+def _context(
+    *,
+    metric_id: str = "daily_active_users",
+    target_date: date = TARGET_DATE,
+    device_type: str | None = None,
+) -> IncidentEvidenceContext:
+    return IncidentEvidenceContext(
+        incident_id="INC-TEST",
+        metric_id=metric_id,
+        observed_at=f"{target_date.isoformat()}T00:00:00+00:00",
+        target_date=target_date,
+        device_type=device_type,
+    )
+
+
+def _step(sql: str, *, step_id: str = "S01", tool: str = "sql_query") -> InvestigationStep:
     return InvestigationStep(
         step_id=step_id,
         purpose="Inspect the bounded runtime observation.",
         hypothesis_id="H01",
-        tool="sql_query",
-        arguments={"sql": sql},
+        tool=tool,
+        arguments={"sql": sql} if tool == "sql_query" else {},
         expected_evidence=["the bounded observation"],
         stop_condition="retain the observation",
     )
@@ -82,12 +101,27 @@ def _interpret(
     hypothesis: str,
     step: InvestigationStep,
     result: ToolExecutionResult,
+    *,
+    context: IncidentEvidenceContext | None = None,
 ):
-    return RuntimeEvidenceInterpreter("INC-TEST").interpret(
+    return RuntimeEvidenceInterpreter(
+        context=context or _context(
+            metric_id=(
+                "daily_active_users"
+                if hypothesis not in {"duplicate_batch", "join_explosion", "field_drift"}
+                else "ai_task_count"
+            )
+        )
+    ).interpret(
         hypothesis=_hypothesis(hypothesis),
         step=step,
         tool_result=result,
     )
+
+
+def _decision(interpretation, index: int = 0):
+    assert interpretation.decisions
+    return interpretation.decisions[index]
 
 
 def test_successful_ordinary_sql_is_neutral() -> None:
@@ -97,7 +131,9 @@ def test_successful_ordinary_sql_is_neutral() -> None:
         sql="SELECT COUNT(*) AS event_count FROM events",
     )
 
-    interpretation = _interpret("missing_partition", _step("SELECT COUNT(*) FROM events"), result)
+    interpretation = _interpret(
+        "missing_partition", _step("SELECT COUNT(*) FROM events"), result
+    )
 
     assert interpretation.polarity is EvidencePolarity.NEUTRAL
     assert interpretation.evidence is None
@@ -130,7 +166,11 @@ def test_invalid_empty_or_truncated_sql_result_does_not_support(
     result = _sql_result(
         ["android_event_count"],
         rows,
-        sql="SELECT COUNT(*) AS android_event_count FROM events WHERE device_type = 'android'",
+        sql=(
+            "SELECT COUNT(*) AS android_event_count FROM events "
+            "WHERE CAST(event_time AS DATE) = DATE '2026-01-30' "
+            "AND device_type = 'android'"
+        ),
         validation_passed=validation_passed,
         usable=usable,
         truncated=truncated,
@@ -138,7 +178,11 @@ def test_invalid_empty_or_truncated_sql_result_does_not_support(
 
     interpretation = _interpret(
         "missing_partition",
-        _step("SELECT COUNT(*) AS android_event_count FROM events WHERE device_type = 'android'"),
+        _step(
+            "SELECT COUNT(*) AS android_event_count FROM events "
+            "WHERE CAST(event_time AS DATE) = DATE '2026-01-30' "
+            "AND device_type = 'android'"
+        ),
         result,
     )
 
@@ -153,9 +197,9 @@ def test_partition_or_metric_table_name_alone_is_not_evidence() -> None:
         sql="SELECT status FROM partition_metadata",
     )
     metric_versions = _sql_result(
-        ["version", "definition_hash", "query"],
-        [[1, "same", "SELECT 1"]],
-        sql="SELECT version, definition_hash, query FROM metric_versions",
+        ["metric_id", "version", "definition_hash", "query"],
+        [["daily_active_users", 1, "same", "SELECT 1"]],
+        sql="SELECT metric_id, version, definition_hash, query FROM metric_versions",
     )
 
     assert _interpret(
@@ -163,21 +207,30 @@ def test_partition_or_metric_table_name_alone_is_not_evidence() -> None:
     ).evidence is None
     assert _interpret(
         "metric_definition_change",
-        _step("SELECT version, definition_hash, query FROM metric_versions"),
+        _step("SELECT metric_id, version, definition_hash, query FROM metric_versions"),
         metric_versions,
     ).evidence is None
 
 
 def test_metric_versions_without_change_is_neutral() -> None:
     result = _sql_result(
-        ["version", "definition_hash", "query"],
-        [[1, "same", "SELECT 1"], [1, "same", "SELECT 1"]],
-        sql="SELECT version, definition_hash, query FROM metric_versions ORDER BY version",
+        ["metric_id", "version", "definition_hash", "query", "effective_at"],
+        [
+            ["daily_active_users", 1, "same", "SELECT 1", "2026-01-01"],
+            ["daily_active_users", 1, "same", "SELECT 1", "2026-01-30"],
+        ],
+        sql=(
+            "SELECT metric_id, version, definition_hash, query, effective_at "
+            "FROM metric_versions WHERE metric_id = 'daily_active_users' ORDER BY version"
+        ),
     )
 
     interpretation = _interpret(
         "metric_definition_change",
-        _step("SELECT version, definition_hash, query FROM metric_versions ORDER BY version"),
+        _step(
+            "SELECT metric_id, version, definition_hash, query, effective_at "
+            "FROM metric_versions WHERE metric_id = 'daily_active_users' ORDER BY version"
+        ),
         result,
     )
 
@@ -189,7 +242,11 @@ def test_f01_healthy_activity_and_partition_cannot_support_missing_partition() -
     business = _sql_result(
         ["android_event_count"],
         [[7]],
-        sql="SELECT COUNT(*) AS android_event_count FROM events WHERE device_type = 'android'",
+        sql=(
+            "SELECT COUNT(*) AS android_event_count FROM events "
+            "WHERE CAST(event_time AS DATE) = DATE '2026-01-30' "
+            "AND device_type = 'android'"
+        ),
         query_id="Q-BUSINESS",
     )
     partition = _sql_result(
@@ -202,7 +259,9 @@ def test_f01_healthy_activity_and_partition_cannot_support_missing_partition() -
     business_interpretation = _interpret(
         "missing_partition",
         _step(
-            "SELECT COUNT(*) AS android_event_count FROM events WHERE device_type = 'android'",
+            "SELECT COUNT(*) AS android_event_count FROM events "
+            "WHERE CAST(event_time AS DATE) = DATE '2026-01-30' "
+            "AND device_type = 'android'",
             step_id="S01",
         ),
         business,
@@ -218,19 +277,17 @@ def test_f01_healthy_activity_and_partition_cannot_support_missing_partition() -
 
     assert business_interpretation.polarity is EvidencePolarity.CONTRADICTS
     assert partition_interpretation.polarity is EvidencePolarity.CONTRADICTS
-    assert business_interpretation.evidence is not None
-    assert partition_interpretation.evidence is not None
-    assert all(
-        interpretation.polarity is not EvidencePolarity.SUPPORTS
-        for interpretation in (business_interpretation, partition_interpretation)
-    )
 
 
 def test_f01_uses_actual_business_and_operational_values() -> None:
     business = _sql_result(
         ["android_event_count"],
         [[0]],
-        sql="SELECT COUNT(*) AS android_event_count FROM events WHERE device_type = 'android'",
+        sql=(
+            "SELECT COUNT(*) AS android_event_count FROM events "
+            "WHERE CAST(event_time AS DATE) = DATE '2026-01-30' "
+            "AND device_type = 'android'"
+        ),
         query_id="Q-BUSINESS",
     )
     partition = _sql_result(
@@ -243,7 +300,9 @@ def test_f01_uses_actual_business_and_operational_values() -> None:
     first = _interpret(
         "missing_partition",
         _step(
-            "SELECT COUNT(*) AS android_event_count FROM events WHERE device_type = 'android'",
+            "SELECT COUNT(*) AS android_event_count FROM events "
+            "WHERE CAST(event_time AS DATE) = DATE '2026-01-30' "
+            "AND device_type = 'android'",
             step_id="S01",
         ),
         business,
@@ -264,37 +323,112 @@ def test_f01_uses_actual_business_and_operational_values() -> None:
     assert first.evidence.source_type == "business_data"
     assert second.evidence.source_type == "operational_metadata"
     assert "android_event_count=0" in first.evidence.description
-    assert "row_count=0" in second.evidence.description
-    assert "status=missing" in second.evidence.description
+    assert "partition_value=2026-01-30/android" in second.evidence.description
     assert first.evidence.evidence_id.startswith("runner-")
     assert first.evidence.evidence_id == _interpret(
         "missing_partition",
         _step(
-            "SELECT COUNT(*) AS android_event_count FROM events WHERE device_type = 'android'",
+            "SELECT COUNT(*) AS android_event_count FROM events "
+            "WHERE CAST(event_time AS DATE) = DATE '2026-01-30' "
+            "AND device_type = 'android'",
             step_id="S01",
         ),
         business,
     ).evidence.evidence_id
+    assert set(first.evidence.observation) >= {
+        "incident_id",
+        "metric_id",
+        "target_date",
+        "step_id",
+        "rule",
+        "scope_check",
+        "observed_row",
+        "sql_validation",
+    }
+
+
+def test_f01_wrong_date_partition_is_neutral() -> None:
+    result = _sql_result(
+        ["partition_value", "row_count", "status"],
+        [["2026-01-10/android", 0, "missing"]],
+        sql="SELECT partition_value, row_count, status FROM partition_metadata",
+    )
+
+    interpretation = _interpret(
+        "missing_partition",
+        _step("SELECT partition_value, row_count, status FROM partition_metadata"),
+        result,
+    )
+
+    assert interpretation.polarity is EvidencePolarity.NEUTRAL
+    assert interpretation.evidence is None
+
+
+def test_f01_wrong_segment_partition_is_neutral() -> None:
+    result = _sql_result(
+        ["partition_value", "row_count", "status"],
+        [["2026-01-30/ios", 0, "missing"]],
+        sql="SELECT partition_value, row_count, status FROM partition_metadata",
+    )
+
+    interpretation = _interpret(
+        "missing_partition",
+        _step("SELECT partition_value, row_count, status FROM partition_metadata"),
+        result,
+    )
+
+    assert interpretation.polarity is EvidencePolarity.NEUTRAL
+    assert interpretation.evidence is None
+
+
+def test_f01_correct_target_partition_supports() -> None:
+    result = _sql_result(
+        ["partition_value", "row_count", "status"],
+        [["2026-01-30/android", 0, "missing"]],
+        sql="SELECT partition_value, row_count, status FROM partition_metadata",
+    )
+
+    interpretation = _interpret(
+        "missing_partition",
+        _step("SELECT partition_value, row_count, status FROM partition_metadata"),
+        result,
+    )
+
+    assert interpretation.polarity is EvidencePolarity.SUPPORTS
 
 
 def test_f11_requires_actual_activity_divergence_and_version_change() -> None:
     business = _sql_result(
         ["raw_event_count", "raw_user_count", "daily_active_users"],
         [[373, 111, 59]],
-        sql="SELECT raw_event_count, raw_user_count, daily_active_users FROM events",
+        sql=(
+            "SELECT COUNT(*) AS raw_event_count, "
+            "COUNT(DISTINCT user_id) AS raw_user_count, "
+            "(SELECT daily_active_users FROM daily_metrics "
+            "WHERE metric_date = DATE '2026-01-30') AS daily_active_users "
+            "FROM events WHERE CAST(event_time AS DATE) = DATE '2026-01-30'"
+        ),
         query_id="Q-BUSINESS",
     )
     versions = _sql_result(
-        ["version", "definition_hash", "query"],
-        [[1, "hash-1", "SELECT 1"], [2, "hash-2", "SELECT 2"]],
-        sql="SELECT version, definition_hash, query FROM metric_versions ORDER BY version",
+        ["metric_id", "version", "definition_hash", "query", "effective_at"],
+        [
+            ["daily_active_users", 1, "hash-1", "SELECT 1", "2026-01-01"],
+            ["daily_active_users", 2, "hash-2", "SELECT 2", "2026-01-30"],
+        ],
+        sql=(
+            "SELECT metric_id, version, definition_hash, query, effective_at "
+            "FROM metric_versions WHERE metric_id = 'daily_active_users' ORDER BY version"
+        ),
         query_id="Q-VERSIONS",
     )
 
     first = _interpret(
         "metric_definition_change",
         _step(
-            "SELECT raw_event_count, raw_user_count, daily_active_users FROM events",
+            "SELECT COUNT(*) AS raw_event_count, COUNT(DISTINCT user_id) AS raw_user_count, "
+            "(SELECT daily_active_users FROM daily_metrics WHERE metric_date = DATE '2026-01-30') "
+            "AS daily_active_users FROM events WHERE CAST(event_time AS DATE) = DATE '2026-01-30'",
             step_id="S01",
         ),
         business,
@@ -302,7 +436,8 @@ def test_f11_requires_actual_activity_divergence_and_version_change() -> None:
     second = _interpret(
         "metric_definition_change",
         _step(
-            "SELECT version, definition_hash, query FROM metric_versions ORDER BY version",
+            "SELECT metric_id, version, definition_hash, query, effective_at "
+            "FROM metric_versions WHERE metric_id = 'daily_active_users' ORDER BY version",
             step_id="S02",
         ),
         versions,
@@ -316,48 +451,217 @@ def test_f11_requires_actual_activity_divergence_and_version_change() -> None:
     assert second.evidence.source_type == "metric_version"
     assert "raw_event_count=373" in first.evidence.description
     assert "daily_active_users=59" in first.evidence.description
-    assert "changed_fields" in second.evidence.description
 
 
-def test_failed_data_quality_check_preserves_canonical_evidence() -> None:
-    canonical = EvidenceReference(
-        evidence_id="dq-canonical-001",
-        source_type="business_data",
-        description="events.user_id null rate is 5.00%",
-        query_id="Q-DQ",
-        observation={"observed_value": 0.05},
+def test_f11_wrong_metric_version_is_neutral() -> None:
+    result = _sql_result(
+        ["metric_id", "version", "definition_hash", "query", "effective_at"],
+        [
+            ["conversion_rate", 1, "hash-1", "SELECT 1", "2026-01-01"],
+            ["conversion_rate", 2, "hash-2", "SELECT 2", "2026-01-30"],
+        ],
+        sql=(
+            "SELECT metric_id, version, definition_hash, query, effective_at "
+            "FROM metric_versions WHERE metric_id = 'conversion_rate' ORDER BY version"
+        ),
     )
-    result = ToolExecutionResult(
+
+    interpretation = _interpret(
+        "metric_definition_change",
+        _step(
+            "SELECT metric_id, version, definition_hash, query, effective_at "
+            "FROM metric_versions WHERE metric_id = 'conversion_rate' ORDER BY version"
+        ),
+        result,
+    )
+
+    assert interpretation.polarity is EvidencePolarity.NEUTRAL
+    assert interpretation.evidence is None
+
+
+def test_f11_correct_metric_version_supports() -> None:
+    result = _sql_result(
+        ["metric_id", "version", "definition_hash", "query", "effective_at"],
+        [
+            ["daily_active_users", 1, "hash-1", "SELECT 1", "2026-01-01"],
+            ["daily_active_users", 2, "hash-2", "SELECT 2", "2026-01-30"],
+        ],
+        sql=(
+            "SELECT metric_id, version, definition_hash, query, effective_at "
+            "FROM metric_versions WHERE metric_id = 'daily_active_users' ORDER BY version"
+        ),
+    )
+
+    interpretation = _interpret(
+        "metric_definition_change",
+        _step(
+            "SELECT metric_id, version, definition_hash, query, effective_at "
+            "FROM metric_versions WHERE metric_id = 'daily_active_users' ORDER BY version"
+        ),
+        result,
+    )
+
+    assert interpretation.polarity is EvidencePolarity.SUPPORTS
+
+
+def _dq_reference(
+    *,
+    evidence_id: str,
+    table: str = "events",
+    column: str = "user_id",
+    scope: dict[str, Any] | None = None,
+    source_type: str = "business_data",
+) -> EvidenceReference:
+    details: dict[str, Any] = {}
+    if scope is not None:
+        details["scope"] = scope
+    return EvidenceReference(
+        evidence_id=evidence_id,
+        source_type=source_type,
+        description="canonical DQ finding",
+        query_id="Q-DQ",
+        observation={
+            "check_name": "check_null_rate",
+            "status": "success",
+            "passed": False,
+            "table": table,
+            "column": column,
+            "columns": [column],
+            "details": details,
+        },
+    )
+
+
+def _dq_result(
+    references: list[EvidenceReference],
+    *,
+    passed: bool = False,
+) -> ToolExecutionResult:
+    return ToolExecutionResult(
         tool_name="check_null_rate",
         success=True,
         query_id="Q-DQ",
         result={
             "check_name": "check_null_rate",
             "status": "success",
-            "passed": False,
+            "passed": passed,
             "table": "events",
             "column": "user_id",
+            "columns": ["user_id"],
             "query_id": "Q-DQ",
-            "evidence": [canonical.model_dump(mode="json")],
+            "evidence": [reference.model_dump(mode="json") for reference in references],
         },
-        evidence=[canonical],
+        evidence=references,
     )
 
-    interpretation = RuntimeEvidenceInterpreter("INC-TEST").interpret(
+
+def _target_scope() -> dict[str, Any]:
+    return {
+        "equals": {"device_type": ["ios", "android"]},
+        "time_column": "event_time",
+        "start": "2026-01-30T00:00:00+00:00",
+        "end": "2026-01-31T00:00:00+00:00",
+    }
+
+
+def test_failed_null_rate_does_not_support_missing_partition() -> None:
+    reference = _dq_reference(evidence_id="dq-mismatch", scope=_target_scope())
+    interpretation = RuntimeEvidenceInterpreter(context=_context()).interpret(
+        hypothesis=_hypothesis("missing_partition"),
+        step=_step("", tool="check_null_rate"),
+        tool_result=_dq_result([reference]),
+    )
+
+    assert _decision(interpretation).polarity is EvidencePolarity.NEUTRAL
+    assert _decision(interpretation).evidence == reference
+
+
+def test_failed_null_rate_supports_null_value_anomaly() -> None:
+    reference = _dq_reference(evidence_id="dq-compatible", scope=_target_scope())
+    interpretation = RuntimeEvidenceInterpreter(context=_context()).interpret(
         hypothesis=_hypothesis("null_value_anomaly"),
-        step=InvestigationStep(
-            step_id="S01",
-            purpose="Check null rate.",
-            hypothesis_id="H01",
-            tool="check_null_rate",
-            arguments={"table": "events", "column": "user_id", "threshold": 0.01},
-            expected_evidence=["the failed null-rate check"],
-            stop_condition="retain the finding",
-        ),
-        tool_result=result,
+        step=_step("", tool="check_null_rate"),
+        tool_result=_dq_result([reference]),
     )
 
-    assert interpretation.polarity is EvidencePolarity.SUPPORTS
-    assert interpretation.evidence == canonical
-    assert interpretation.evidence.source_type == "business_data"
-    assert interpretation.model_dump_json()
+    assert _decision(interpretation).polarity is EvidencePolarity.SUPPORTS
+    assert _decision(interpretation).evidence == reference
+
+
+def test_multiple_dq_evidence_do_not_share_one_polarity() -> None:
+    compatible = _dq_reference(evidence_id="dq-compatible", scope=_target_scope())
+    wrong_table = _dq_reference(
+        evidence_id="dq-wrong-table",
+        table="users",
+        scope=_target_scope(),
+    )
+    interpretation = RuntimeEvidenceInterpreter(context=_context()).interpret(
+        hypothesis=_hypothesis("null_value_anomaly"),
+        step=_step("", tool="check_null_rate"),
+        tool_result=_dq_result([compatible, wrong_table]),
+    )
+
+    assert [decision.polarity for decision in interpretation.decisions] == [
+        EvidencePolarity.SUPPORTS,
+        EvidencePolarity.NEUTRAL,
+    ]
+    assert [decision.evidence.evidence_id for decision in interpretation.decisions] == [
+        "dq-compatible",
+        "dq-wrong-table",
+    ]
+
+
+def test_passed_dq_is_neutral_and_preserves_canonical_reference() -> None:
+    reference = _dq_reference(evidence_id="dq-passed", scope=_target_scope())
+    interpretation = RuntimeEvidenceInterpreter(context=_context()).interpret(
+        hypothesis=_hypothesis("null_value_anomaly"),
+        step=_step("", tool="check_null_rate"),
+        tool_result=_dq_result([reference], passed=True),
+    )
+
+    assert _decision(interpretation).polarity is EvidencePolarity.NEUTRAL
+    assert _decision(interpretation).evidence == reference
+
+
+def test_wrong_scope_evidence_does_not_raise_hypothesis_confidence() -> None:
+    reference = _dq_reference(
+        evidence_id="dq-wrong-window",
+        scope={
+            "equals": {"device_type": "android"},
+            "time_column": "event_time",
+            "start": "2026-01-10T00:00:00+00:00",
+            "end": "2026-01-11T00:00:00+00:00",
+        },
+    )
+    hypothesis = _hypothesis("null_value_anomaly")
+    interpretation = RuntimeEvidenceInterpreter(context=_context()).interpret(
+        hypothesis=hypothesis,
+        step=_step("", tool="check_null_rate"),
+        tool_result=_dq_result([reference]),
+    )
+
+    assert _decision(interpretation).polarity is EvidencePolarity.NEUTRAL
+    assert hypothesis.confidence == pytest.approx(0.60)
+
+
+def test_wrong_scope_observations_cannot_reach_root_cause_found() -> None:
+    reference = _dq_reference(
+        evidence_id="dq-wrong-window",
+        scope={
+            "equals": {"device_type": "android"},
+            "time_column": "event_time",
+            "start": "2026-01-10T00:00:00+00:00",
+            "end": "2026-01-11T00:00:00+00:00",
+        },
+    )
+    interpretation = RuntimeEvidenceInterpreter(context=_context()).interpret(
+        hypothesis=_hypothesis("null_value_anomaly"),
+        step=_step("", tool="check_null_rate"),
+        tool_result=_dq_result([reference]),
+    )
+
+    assert all(
+        decision.polarity is EvidencePolarity.NEUTRAL
+        for decision in interpretation.decisions
+    )
+    assert interpretation.evidence == reference

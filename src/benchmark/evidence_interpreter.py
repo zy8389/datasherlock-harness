@@ -3,22 +3,25 @@
 Tool execution and root-cause validation are deliberately separate concerns.
 This module is the narrow adapter between them: it looks at the structured
 result returned by a tool, applies deterministic observation rules, and emits
-at most one canonical evidence reference for that observation.
+independent decisions for each evidence reference.
 
-In particular, a successful SQL call is not evidence by itself.  SQL evidence
-is created only when the returned values match a concrete diagnostic rule.
+In particular, a successful SQL call is not evidence by itself. SQL evidence
+is created only when the returned values match a concrete diagnostic rule and
+the observation is bound to the current incident scope.
 """
 
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Mapping, Sequence
+from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from numbers import Real
 from typing import Any, cast
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 from agents.planner import InvestigationStep
 from config.faults import EvidenceSourceType
@@ -35,32 +38,133 @@ class EvidencePolarity(StrEnum):
     NEUTRAL = "neutral"
 
 
-class EvidenceInterpretation(BaseModel):
-    """Serializable result of interpreting one tool observation."""
+class IncidentEvidenceContext(BaseModel):
+    """Runtime incident scope used to bind evidence to the active alert."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    incident_id: str = Field(min_length=1)
+    metric_id: str = Field(min_length=1)
+    observed_at: datetime
+    target_date: date
+    device_type: str | None = None
+    region: str | None = None
+
+    @model_validator(mode="after")
+    def target_date_matches_observation(self) -> IncidentEvidenceContext:
+        if self.observed_at.date() != self.target_date:
+            raise ValueError("target_date must match observed_at date")
+        return self
+
+    @classmethod
+    def from_alert(cls, alert: Mapping[str, Any] | object) -> IncidentEvidenceContext:
+        """Build scope from an Alert/state alert, never from benchmark metadata."""
+
+        if isinstance(alert, Mapping):
+            payload = alert
+        elif hasattr(alert, "model_dump"):
+            dumped = alert.model_dump(mode="python")
+            if not isinstance(dumped, Mapping):
+                raise TypeError("alert.model_dump() must return a mapping")
+            payload = dumped
+        else:
+            raise TypeError("alert must be an Alert or mapping")
+
+        incident_id = payload.get("incident_id")
+        metric_id = payload.get("metric")
+        if not isinstance(incident_id, str) or not incident_id.strip():
+            raise ValueError("runtime alert incident_id is required")
+        if not isinstance(metric_id, str) or not metric_id.strip():
+            raise ValueError("runtime alert metric is required")
+        observed_at = _parse_observed_datetime(payload.get("observed_at"))
+        return cls(
+            incident_id=incident_id,
+            metric_id=metric_id,
+            observed_at=observed_at,
+            target_date=observed_at.date(),
+            device_type=_optional_string(
+                payload.get("device_type", payload.get("segment"))
+            ),
+            region=_optional_string(payload.get("region")),
+        )
+
+
+class EvidenceDecision(BaseModel):
+    """One evidence reference and its independent hypothesis polarity."""
 
     model_config = ConfigDict(extra="forbid")
 
+    evidence: EvidenceReference
     polarity: EvidencePolarity
-    evidence: EvidenceReference | None = None
     reason: str = Field(min_length=1)
+
+
+class EvidenceInterpretation(BaseModel):
+    """Serializable result containing one decision per evidence reference."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    decisions: list[EvidenceDecision] = Field(default_factory=list)
+    neutral_reason: str | None = None
+
+    @property
+    def polarity(self) -> EvidencePolarity:
+        """Compatibility view for callers that only produced one decision."""
+
+        if len(self.decisions) == 1:
+            return self.decisions[0].polarity
+        return EvidencePolarity.NEUTRAL
+
+    @property
+    def evidence(self) -> EvidenceReference | None:
+        """Compatibility view for callers that only produced one decision."""
+
+        if len(self.decisions) == 1:
+            return self.decisions[0].evidence
+        return None
 
 
 _CANONICAL_SOURCE_TYPES = frozenset(item.value for item in EvidenceSourceType)
 _SUCCESS_STATUS = "success"
 _MISSING_PARTITION = "missing_partition"
 _METRIC_DEFINITION_CHANGE = "metric_definition_change"
+_DQ_HYPOTHESIS_COMPATIBILITY = {
+    "check_null_rate": frozenset({"null_value_anomaly"}),
+    "check_duplicate_rate": frozenset({"duplicate_batch", "join_explosion"}),
+    "check_freshness": frozenset({"data_delay"}),
+    "detect_schema_drift": frozenset({"schema_change", "field_drift"}),
+    "detect_distribution_drift": frozenset({"ab_split_anomaly", "field_drift"}),
+}
+_DATE_LITERAL_PATTERN = re.compile(
+    r"(?:\bDATE\s*)?['\"](\d{4}-\d{2}-\d{2})(?:[T ][^'\"]*)?['\"]",
+    re.IGNORECASE,
+)
+_ANDROID_FILTER_PATTERN = re.compile(
+    r"\b(?:device_type|segment)\s*=\s*['\"]android['\"]",
+    re.IGNORECASE,
+)
+_METRIC_FILTER_PATTERN = re.compile(
+    r"\bmetric_id\s*=\s*['\"]([^'\"]+)['\"]",
+    re.IGNORECASE,
+)
+_VERSION_TIME_COLUMNS = (
+    "effective_at",
+    "valid_from",
+    "changed_at",
+    "created_at",
+    "updated_at",
+)
 
 
 class RuntimeEvidenceInterpreter:
-    """Turn structured tool output into deterministic runtime evidence.
+    """Turn structured tool output into deterministic runtime evidence."""
 
-    ``incident_id`` is supplied by the runtime caller only to make generated
-    IDs stable within an incident.  No benchmark case or expected answer is
-    needed by this interpreter.
-    """
-
-    def __init__(self, incident_id: str | None = None) -> None:
-        self.incident_id = incident_id or "unknown-incident"
+    def __init__(
+        self,
+        context: IncidentEvidenceContext,
+    ) -> None:
+        self.context = context
+        self.incident_id = context.incident_id
 
     def interpret(
         self,
@@ -72,14 +176,16 @@ class RuntimeEvidenceInterpreter:
         """Interpret one typed tool result without mutating runtime state."""
 
         if tool_result.evidence:
-            dq_interpretation = self._interpret_canonical_evidence(
+            return self._interpret_canonical_evidence(
+                hypothesis=hypothesis,
+                step=step,
                 tool_result=tool_result,
             )
-            if dq_interpretation is not None:
-                return dq_interpretation
 
         if tool_result.tool_name != "sql_query":
-            return self._neutral("the tool result did not contain a recognized abnormal finding")
+            return self._neutral(
+                "the tool result did not contain a recognized abnormal finding"
+            )
 
         return self._interpret_sql(
             hypothesis=hypothesis,
@@ -90,35 +196,194 @@ class RuntimeEvidenceInterpreter:
     def _interpret_canonical_evidence(
         self,
         *,
+        hypothesis: HypothesisState,
+        step: InvestigationStep,
         tool_result: ToolExecutionResult,
-    ) -> EvidenceInterpretation | None:
-        """Preserve DQ evidence IDs and source types, while requiring failure."""
+    ) -> EvidenceInterpretation:
+        """Decide every canonical DQ reference independently and fail closed."""
 
         result = _mapping(tool_result.result)
-        passed = result.get("passed")
-        status = result.get("status")
-        if not tool_result.success or status != _SUCCESS_STATUS or passed is not False:
-            return None
+        if not tool_result.success:
+            return self._neutral_for_references(
+                tool_result.evidence, "the data-quality tool did not succeed"
+            )
+        if result.get("status") != _SUCCESS_STATUS:
+            return self._neutral_for_references(
+                tool_result.evidence, "the data-quality result status was not success"
+            )
+        if result.get("passed") is not False:
+            return self._neutral_for_references(
+                tool_result.evidence,
+                "passed data-quality checks are neutral by default",
+            )
+        if result.get("check_name") != tool_result.tool_name:
+            return self._neutral_for_references(
+                tool_result.evidence, "data-quality check name did not match the tool"
+            )
+        if self.context is None:
+            return self._neutral_for_references(
+                tool_result.evidence, "incident scope was not provided"
+            )
 
-        canonical = next(
-            (
-                reference
-                for reference in tool_result.evidence
-                if reference.source_type in _CANONICAL_SOURCE_TYPES
-            ),
-            None,
-        )
-        if canonical is None:
-            return None
+        decisions: list[EvidenceDecision] = []
+        for reference in tool_result.evidence:
+            if reference.source_type not in _CANONICAL_SOURCE_TYPES:
+                decisions.append(
+                    EvidenceDecision(
+                        evidence=reference,
+                        polarity=EvidencePolarity.NEUTRAL,
+                        reason="evidence source type is not a canonical DQ source",
+                    )
+                )
+                continue
+            if hypothesis.root_cause_type not in _DQ_HYPOTHESIS_COMPATIBILITY.get(
+                tool_result.tool_name, frozenset()
+            ):
+                reason = (
+                    f"{tool_result.tool_name} is not compatible with "
+                    f"{hypothesis.root_cause_type}"
+                )
+                decisions.append(
+                    EvidenceDecision(
+                        evidence=reference,
+                        polarity=EvidencePolarity.NEUTRAL,
+                        reason=reason,
+                    )
+                )
+                continue
+            compatible, reason = self._dq_scope_compatible(
+                hypothesis=hypothesis,
+                tool_result=tool_result,
+                reference=reference,
+            )
+            decisions.append(
+                EvidenceDecision(
+                    evidence=reference,
+                    polarity=(
+                        EvidencePolarity.SUPPORTS
+                        if compatible
+                        else EvidencePolarity.NEUTRAL
+                    ),
+                    reason=(
+                        "the failed DQ result is compatible with the active "
+                        f"hypothesis and incident scope: {reason}"
+                        if compatible
+                        else reason
+                    ),
+                )
+            )
 
+        if not decisions:
+            return self._neutral("the DQ result contained no evidence references")
         return EvidenceInterpretation(
-            polarity=EvidencePolarity.SUPPORTS,
-            evidence=canonical,
-            reason=(
-                "the data-quality check explicitly failed and its canonical "
-                f"{canonical.source_type} evidence was preserved"
+            decisions=decisions,
+            neutral_reason=(
+                "data-quality evidence was not a scoped failed check"
+                if all(
+                    decision.polarity is EvidencePolarity.NEUTRAL
+                    for decision in decisions
+                )
+                else None
             ),
         )
+
+    def _dq_scope_compatible(
+        self,
+        *,
+        hypothesis: HypothesisState,
+        tool_result: ToolExecutionResult,
+        reference: EvidenceReference,
+    ) -> tuple[bool, str]:
+        """Check only runtime DQ fields that prove metric/scope compatibility."""
+
+        assert self.context is not None
+        observation = _mapping(reference.observation)
+        result = _mapping(tool_result.result)
+        table = observation.get("table", result.get("table"))
+        column = observation.get("column", result.get("column"))
+        columns = _string_list(observation.get("columns", result.get("columns")))
+        details = _mapping(observation.get("details"))
+
+        if tool_result.tool_name == "check_null_rate":
+            if (
+                hypothesis.root_cause_type != "null_value_anomaly"
+                or self.context.metric_id != "daily_active_users"
+                or table != "events"
+                or column != "user_id"
+            ):
+                return False, "null-rate table, column, or metric is outside the incident scope"
+            scope = _mapping(details.get("scope"))
+            if not _scope_covers_date(scope, self.context.target_date):
+                return False, "null-rate scope does not cover the incident target date"
+            if not _scope_matches_segment(scope, self.context.device_type):
+                return False, "null-rate scope does not contain the incident segment"
+            return True, "events.user_id null rate is measured in the target window"
+
+        if tool_result.tool_name == "check_duplicate_rate":
+            if self.context.metric_id != "ai_task_count" or table != "events":
+                return False, "duplicate-rate table or metric is outside the incident scope"
+            if not set(columns).intersection({"event_id", "batch_id", "user_id"}):
+                return False, "duplicate-rate keys do not identify event or batch scope"
+            return True, "events duplicate keys match the ai_task_count diagnostic scope"
+
+        if tool_result.tool_name == "check_freshness":
+            if (
+                self.context.metric_id != "daily_active_users"
+                or table != "events"
+                or column != "event_time"
+            ):
+                return False, "freshness table, timestamp, or metric is outside the incident scope"
+            scope = _mapping(details.get("scope"))
+            reference_time = _parse_date_like(details.get("reference_time"))
+            if reference_time is None:
+                return False, "freshness evidence has no usable reference_time"
+            if scope and not _scope_covers_date(scope, self.context.target_date):
+                return False, "freshness current window does not cover the incident target date"
+            if scope and not _scope_matches_segment(scope, self.context.device_type):
+                return False, "freshness scope does not contain the incident segment"
+            if not scope and abs((reference_time - self.context.target_date).days) > 1:
+                return False, "freshness reference_time is outside the incident target window"
+            return True, "events freshness is measured against the incident target window"
+
+        if tool_result.tool_name == "detect_schema_drift":
+            expected_metric = (
+                "daily_active_users"
+                if hypothesis.root_cause_type == "schema_change"
+                else "ai_task_count"
+            )
+            if self.context.metric_id != expected_metric or table != "events":
+                return False, "schema-drift table or metric is outside the incident scope"
+            current_date = _parse_date_like(details.get("current_effective_at"))
+            previous_date = _parse_date_like(details.get("previous_effective_at"))
+            if current_date is None or previous_date is None:
+                return False, "schema-drift evidence has no usable snapshot dates"
+            if not _dates_near_or_cover(
+                (previous_date, current_date), self.context.target_date
+            ):
+                return False, "schema-drift snapshots are outside the incident target window"
+            return True, "events schema snapshots cover the incident target window"
+
+        if tool_result.tool_name == "detect_distribution_drift":
+            current_window = _mapping(details.get("current_window"))
+            if not _scope_covers_date(current_window, self.context.target_date):
+                return False, "distribution current window does not cover the incident target date"
+            if hypothesis.root_cause_type == "field_drift":
+                compatible = (
+                    self.context.metric_id == "ai_task_count"
+                    and table == "events"
+                    and column == "event_name"
+                )
+            else:
+                compatible = (
+                    self.context.metric_id == "conversion_rate"
+                    and table in {"events", "experiment_assignments"}
+                    and isinstance(column, str)
+                )
+            if not compatible:
+                return False, "distribution table, column, or metric is outside the incident scope"
+            return True, "distribution current window covers the incident target date"
+
+        return False, "the DQ tool has no safe scope rule"
 
     def _interpret_sql(
         self,
@@ -195,66 +460,77 @@ class RuntimeEvidenceInterpreter:
         tool_result: ToolExecutionResult,
         rows: list[dict[str, Any]],
     ) -> EvidenceInterpretation | None:
+        if self.context is None:
+            return self._neutral("incident scope was not provided")
         row = rows[0]
 
-        android_column = _first_present(
-            row,
-            "android_event_count",
-            "android_events",
-        )
+        android_column = _first_present(row, "android_event_count", "android_events")
         if android_column is None and _step_mentions_android(step):
             android_column = _first_present(row, "event_count", "events")
-        if android_column is not None:
+        if android_column is not None and hypothesis.root_cause_type == _MISSING_PARTITION:
+            if not _f01_business_scope_matches(self.context, step, row):
+                return self._neutral(
+                    "F01 business observation is outside the target date or Android scope"
+                )
             android_count = _number(row[android_column])
-            if android_count is not None and hypothesis.root_cause_type == _MISSING_PARTITION:
-                description = (
-                    "Business activity query returned "
-                    f"{android_column}={_display(android_count)}."
-                )
-                polarity = (
-                    EvidencePolarity.SUPPORTS
-                    if android_count == 0
-                    else EvidencePolarity.CONTRADICTS
-                )
-                return self._make_interpretation(
-                    step_id=step.step_id,
-                    tool_result=tool_result,
-                    source_type=EvidenceSourceType.BUSINESS_DATA.value,
-                    rule="f01_android_event_count",
-                    polarity=polarity,
-                    description=description,
-                    row=row,
-                )
+            if android_count is None:
+                return self._neutral("F01 Android event count was not numeric")
+            description = (
+                "Business activity query returned "
+                f"{android_column}={_display(android_count)}."
+            )
+            polarity = (
+                EvidencePolarity.SUPPORTS
+                if android_count == 0
+                else EvidencePolarity.CONTRADICTS
+            )
+            return self._make_interpretation(
+                step_id=step.step_id,
+                tool_result=tool_result,
+                source_type=EvidenceSourceType.BUSINESS_DATA.value,
+                rule="f01_android_event_count",
+                polarity=polarity,
+                description=description,
+                row=row,
+                scope_check="target date and Android query/result scope matched",
+            )
 
         required = {"raw_event_count", "raw_user_count", "daily_active_users"}
-        if required.issubset(row):
+        if required.issubset(row) and hypothesis.root_cause_type == _METRIC_DEFINITION_CHANGE:
+            if not _f11_business_scope_matches(self.context, step, row):
+                return self._neutral(
+                    "F11 business observation is outside the target metric or date scope"
+                )
             raw_event_count = _number(row["raw_event_count"])
             raw_user_count = _number(row["raw_user_count"])
             daily_active_users = _number(row["daily_active_users"])
             if (
-                raw_event_count is not None
-                and raw_user_count is not None
-                and daily_active_users is not None
-                and hypothesis.root_cause_type == _METRIC_DEFINITION_CHANGE
-                and raw_event_count > 0
-                and daily_active_users < raw_user_count
+                raw_event_count is None
+                or raw_user_count is None
+                or daily_active_users is None
             ):
-                description = (
-                    "Business activity remains present while the materialized "
-                    "metric is lower: "
-                    f"raw_event_count={_display(raw_event_count)}, "
-                    f"raw_user_count={_display(raw_user_count)}, "
-                    f"daily_active_users={_display(daily_active_users)}."
+                return self._neutral("F11 business values were not numeric")
+            if raw_event_count <= 0 or daily_active_users >= raw_user_count:
+                return self._neutral(
+                    "F11 business values did not show raw activity exceeding the metric"
                 )
-                return self._make_interpretation(
-                    step_id=step.step_id,
-                    tool_result=tool_result,
-                    source_type=EvidenceSourceType.BUSINESS_DATA.value,
-                    rule="f11_metric_divergence",
-                    polarity=EvidencePolarity.SUPPORTS,
-                    description=description,
-                    row=row,
-                )
+            description = (
+                "Business activity remains present while the materialized "
+                "metric is lower: "
+                f"raw_event_count={_display(raw_event_count)}, "
+                f"raw_user_count={_display(raw_user_count)}, "
+                f"daily_active_users={_display(daily_active_users)}."
+            )
+            return self._make_interpretation(
+                step_id=step.step_id,
+                tool_result=tool_result,
+                source_type=EvidenceSourceType.BUSINESS_DATA.value,
+                rule="f11_metric_divergence",
+                polarity=EvidencePolarity.SUPPORTS,
+                description=description,
+                row=row,
+                scope_check="target metric and target-date business query/result matched",
+            )
         return None
 
     def _interpret_partition_observation(
@@ -266,37 +542,48 @@ class RuntimeEvidenceInterpreter:
         columns: list[str],
         rows: list[dict[str, Any]],
     ) -> EvidenceInterpretation | None:
-        if not {"row_count", "status"}.issubset(columns):
+        if hypothesis.root_cause_type != _MISSING_PARTITION:
+            return None
+        if self.context is None:
+            return self._neutral("incident scope was not provided")
+        if not {"row_count", "status", "partition_value"}.issubset(columns):
             return None
         if not _step_mentions_partition_metadata(step, rows):
             return None
-        row = next(
+        if self.context.metric_id != "daily_active_users":
+            return self._neutral("F01 partition observation is outside the metric scope")
+        if self.context.device_type is not None and self.context.device_type.lower() != "android":
+            return self._neutral("F01 partition observation is outside the incident segment")
+
+        matching_row = next(
             (
                 candidate
                 for candidate in rows
-                if isinstance(candidate.get("partition_value"), str)
-                and "android" in candidate["partition_value"].lower()
+                if _partition_scope_matches(candidate, self.context.target_date)
             ),
-            rows[0],
+            None,
         )
-        row_count = _number(row.get("row_count"))
-        status = row.get("status")
+        if matching_row is None:
+            return self._neutral(
+                "partition metadata did not contain the target-date Android partition"
+            )
+        row_count = _number(matching_row.get("row_count"))
+        status = matching_row.get("status")
         if row_count is None or not isinstance(status, str):
-            return None
-        if hypothesis.root_cause_type != _MISSING_PARTITION:
-            return None
+            return self._neutral("partition metadata values were not usable")
 
         normalized_status = status.strip().lower()
         description = (
             "partition_metadata reports "
-            f"row_count={_display(row_count)} and status={normalized_status}."
+            f"partition_value={matching_row['partition_value']}, "
+            f"row_count={_display(row_count)}, status={normalized_status}."
         )
         if row_count == 0 and normalized_status == "missing":
             polarity = EvidencePolarity.SUPPORTS
         elif row_count > 0 and normalized_status in {"ready", "success"}:
             polarity = EvidencePolarity.CONTRADICTS
         else:
-            return None
+            return self._neutral("partition metadata matched no safe F01 state")
         return self._make_interpretation(
             step_id=step.step_id,
             tool_result=tool_result,
@@ -304,7 +591,8 @@ class RuntimeEvidenceInterpreter:
             rule="f01_partition_state",
             polarity=polarity,
             description=description,
-            row=row,
+            row=matching_row,
+            scope_check="target date and Android partition_value matched",
         )
 
     def _interpret_metric_versions(
@@ -318,27 +606,63 @@ class RuntimeEvidenceInterpreter:
     ) -> EvidenceInterpretation | None:
         if not _step_mentions_metric_versions(step, columns):
             return None
+        if self.context is None:
+            return self._neutral("incident scope was not provided")
+        if "metric_id" not in columns:
+            return self._neutral("metric_versions did not return metric_id")
+        returned_metric_ids = {row.get("metric_id") for row in rows}
+        if returned_metric_ids != {self.context.metric_id}:
+            return self._neutral(
+                "metric_versions returned a metric_id outside the incident scope"
+            )
+        query_metric_ids = set(_METRIC_FILTER_PATTERN.findall(_sql_text(step)))
+        if query_metric_ids and query_metric_ids != {self.context.metric_id}:
+            return self._neutral("metric_versions query filtered a different metric_id")
+
         comparable_columns = [
             column
             for column in ("version", "definition_hash", "query")
             if column in columns
         ]
         if len(rows) < 2 or not comparable_columns:
-            return None
+            return self._neutral("metric_versions did not return comparable version data")
         changes = [
             column
             for column in comparable_columns
-            if any(rows[index].get(column) != rows[index - 1].get(column) for index in range(1, len(rows)))
+            if any(
+                rows[index].get(column) != rows[index - 1].get(column)
+                for index in range(1, len(rows))
+            )
         ]
         if not changes:
             return self._neutral("metric_versions returned no version, hash, or query change")
+
+        time_columns = [column for column in _VERSION_TIME_COLUMNS if column in columns]
+        time_scope_reason = "metric_versions has no time column; metric_id scope was enforced"
+        if time_columns:
+            time_values: list[date] = []
+            for row in rows:
+                for column in time_columns:
+                    parsed = _parse_date_like(row.get(column))
+                    if parsed is None:
+                        return self._neutral(
+                            "metric_versions time column contained no usable date"
+                        )
+                    time_values.append(parsed)
+            if not _dates_near_or_cover(time_values, self.context.target_date):
+                return self._neutral(
+                    "metric_versions change is outside the incident target-date window"
+                )
+            time_scope_reason = "metric_versions change date covered the incident target window"
+
         if hypothesis.root_cause_type != _METRIC_DEFINITION_CHANGE:
             return self._neutral(
                 "metric_versions showed a change, but it does not support the active hypothesis"
             )
 
-        before = _project_row(rows[0], comparable_columns)
-        after = _project_row(rows[-1], comparable_columns)
+        projected_columns = ["metric_id", *comparable_columns, *time_columns]
+        before = _project_row(rows[0], projected_columns)
+        after = _project_row(rows[-1], projected_columns)
         description = (
             "metric_versions changed in returned observations: "
             f"before={before}; after={after}; changed_fields={changes}."
@@ -355,6 +679,7 @@ class RuntimeEvidenceInterpreter:
                 "after": after,
                 "changed_fields": changes,
             },
+            scope_check=time_scope_reason,
         )
 
     def _make_interpretation(
@@ -367,6 +692,7 @@ class RuntimeEvidenceInterpreter:
         polarity: EvidencePolarity,
         description: str,
         row: Mapping[str, Any],
+        scope_check: str,
     ) -> EvidenceInterpretation:
         query_id = tool_result.query_id or "no-query-id"
         evidence_id = self._evidence_id(
@@ -374,32 +700,64 @@ class RuntimeEvidenceInterpreter:
             query_id=query_id,
             rule=rule,
         )
-        observation = _observation_payload(tool_result, row=row, rule=rule)
+        observation = _observation_payload(
+            tool_result,
+            context=self.context,
+            step_id=step_id,
+            row=row,
+            rule=rule,
+            scope_check=scope_check,
+        )
+        evidence = EvidenceReference(
+            evidence_id=evidence_id,
+            source_type=source_type,
+            description=description,
+            query_id=tool_result.query_id,
+            observation=observation,
+        )
         return EvidenceInterpretation(
-            polarity=polarity,
-            evidence=EvidenceReference(
-                evidence_id=evidence_id,
-                source_type=source_type,
-                description=description,
-                query_id=tool_result.query_id,
-                observation=observation,
-            ),
-            reason=description,
+            decisions=[
+                EvidenceDecision(
+                    evidence=evidence,
+                    polarity=polarity,
+                    reason=description,
+                )
+            ]
         )
 
-    def _evidence_id(
-        self,
-        *,
-        step_id: str,
-        query_id: str,
-        rule: str,
-    ) -> str:
-        identity = f"{self.incident_id}\x1f{step_id}\x1f{query_id}\x1f{rule}"
+    def _evidence_id(self, *, step_id: str, query_id: str, rule: str) -> str:
+        metric_id = self.context.metric_id if self.context is not None else "unknown-metric"
+        target_date = (
+            self.context.target_date.isoformat()
+            if self.context is not None
+            else "unknown-date"
+        )
+        identity = (
+            f"{self.incident_id}\x1f{metric_id}\x1f{target_date}\x1f"
+            f"{step_id}\x1f{query_id}\x1f{rule}"
+        )
         return "runner-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _neutral(reason: str) -> EvidenceInterpretation:
-        return EvidenceInterpretation(polarity=EvidencePolarity.NEUTRAL, reason=reason)
+        return EvidenceInterpretation(neutral_reason=reason)
+
+    @staticmethod
+    def _neutral_for_references(
+        references: Sequence[EvidenceReference],
+        reason: str,
+    ) -> EvidenceInterpretation:
+        return EvidenceInterpretation(
+            decisions=[
+                EvidenceDecision(
+                    evidence=reference,
+                    polarity=EvidencePolarity.NEUTRAL,
+                    reason=reason,
+                )
+                for reference in references
+            ],
+            neutral_reason=reason,
+        )
 
 
 def _validation_is_usable(validation: SqlResultValidation) -> bool:
@@ -447,30 +805,40 @@ def _first_present(row: Mapping[str, Any], *names: str) -> str | None:
 
 
 def _step_mentions_android(step: InvestigationStep) -> bool:
-    sql = step.arguments.get("sql")
-    return isinstance(sql, str) and "android" in sql.lower()
+    return "android" in _sql_text(step).lower()
 
 
 def _step_mentions_partition_metadata(
     step: InvestigationStep,
     rows: Sequence[Mapping[str, Any]],
 ) -> bool:
-    sql = step.arguments.get("sql")
-    if isinstance(sql, str) and "partition_metadata" in sql.lower():
-        return True
-    return any("partition_value" in row for row in rows)
-
-
-def _step_mentions_metric_versions(step: InvestigationStep, columns: Sequence[str]) -> bool:
-    sql = step.arguments.get("sql")
-    return (
-        isinstance(sql, str)
-        and "metric_versions" in sql.lower()
-        and bool(set(columns).intersection({"version", "definition_hash", "query"}))
+    return "partition_metadata" in _sql_text(step).lower() or any(
+        "partition_value" in row for row in rows
     )
 
 
-def _project_row(row: Mapping[str, Any], columns: Sequence[str]) -> dict[str, JsonValue]:
+def _step_mentions_metric_versions(
+    step: InvestigationStep,
+    columns: Sequence[str],
+) -> bool:
+    return (
+        "metric_versions" in _sql_text(step).lower()
+        and bool(
+            set(columns).intersection(
+                {"metric_id", "version", "definition_hash", "query"}
+            )
+        )
+    )
+
+
+def _sql_text(step: InvestigationStep) -> str:
+    sql = step.arguments.get("sql")
+    return sql if isinstance(sql, str) else ""
+
+
+def _project_row(
+    row: Mapping[str, Any], columns: Sequence[str]
+) -> dict[str, JsonValue]:
     return cast(dict[str, JsonValue], {column: row.get(column) for column in columns})
 
 
@@ -481,11 +849,21 @@ def _display(value: object) -> str:
 def _observation_payload(
     tool_result: ToolExecutionResult,
     *,
+    context: IncidentEvidenceContext | None,
+    step_id: str,
     row: Mapping[str, Any],
     rule: str,
+    scope_check: str,
 ) -> dict[str, JsonValue]:
     payload: dict[str, JsonValue] = {
+        "incident_id": context.incident_id if context is not None else None,
+        "metric_id": context.metric_id if context is not None else None,
+        "target_date": (
+            context.target_date.isoformat() if context is not None else None
+        ),
+        "step_id": step_id,
         "rule": rule,
+        "scope_check": scope_check,
         "tool_name": tool_result.tool_name,
         "query_id": tool_result.query_id,
         "observed_row": cast(dict[str, JsonValue], dict(row)),
@@ -499,8 +877,152 @@ def _observation_payload(
     return payload
 
 
+def _parse_observed_datetime(value: object) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time())
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("runtime alert observed_at is required")
+    normalized = value.strip().replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        try:
+            return datetime.combine(date.fromisoformat(normalized), datetime.min.time())
+        except ValueError as exc:
+            raise ValueError("runtime alert observed_at must be ISO-8601") from exc
+
+
+def _optional_string(value: object) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _parse_date_like(value: object) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str) or len(value) < 10:
+        return None
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        return None
+
+
+def _row_dates(row: Mapping[str, Any], names: Sequence[str]) -> list[date]:
+    values: list[date] = []
+    for name in names:
+        if name in row:
+            parsed = _parse_date_like(row[name])
+            if parsed is not None:
+                values.append(parsed)
+    return values
+
+
+def _sql_dates(sql: str) -> list[date]:
+    values: list[date] = []
+    for value in _DATE_LITERAL_PATTERN.findall(sql):
+        parsed = _parse_date_like(value)
+        if parsed is not None:
+            values.append(parsed)
+    return values
+
+
+def _f01_business_scope_matches(
+    context: IncidentEvidenceContext,
+    step: InvestigationStep,
+    row: Mapping[str, Any],
+) -> bool:
+    if context.metric_id != "daily_active_users":
+        return False
+    row_dates = _row_dates(row, ("metric_date", "target_date", "event_date", "date"))
+    sql_dates = _sql_dates(_sql_text(step))
+    if any(value != context.target_date for value in row_dates):
+        return False
+    if context.target_date not in {*row_dates, *sql_dates}:
+        return False
+
+    row_segments = [
+        str(row[name]).strip().lower()
+        for name in ("device_type", "segment")
+        if name in row and row[name] is not None
+    ]
+    if any(segment != "android" for segment in row_segments):
+        return False
+    if not row_segments and not _ANDROID_FILTER_PATTERN.search(_sql_text(step)):
+        return False
+    return context.device_type is None or context.device_type.lower() == "android"
+
+
+def _f11_business_scope_matches(
+    context: IncidentEvidenceContext,
+    step: InvestigationStep,
+    row: Mapping[str, Any],
+) -> bool:
+    if context.metric_id != "daily_active_users":
+        return False
+    if "metric_id" in row and row["metric_id"] != context.metric_id:
+        return False
+    dates = _row_dates(row, ("metric_date", "target_date", "event_date", "date"))
+    sql = _sql_text(step)
+    if any(value != context.target_date for value in dates):
+        return False
+    if context.target_date not in {*dates, *_sql_dates(sql)}:
+        return False
+    return (
+        re.search(r"\bdaily_active_users\b", sql, re.IGNORECASE) is not None
+        and "daily_metrics" in sql.lower()
+        and "events" in sql.lower()
+    )
+
+
+def _partition_scope_matches(row: Mapping[str, Any], target_date: date) -> bool:
+    value = row.get("partition_value")
+    if not isinstance(value, str):
+        return False
+    parts = value.strip().split("/", 1)
+    if len(parts) != 2:
+        return False
+    partition_date = _parse_date_like(parts[0])
+    return partition_date == target_date and parts[1].strip().lower() == "android"
+
+
+def _scope_covers_date(scope: Mapping[str, Any], target_date: date) -> bool:
+    start = _parse_date_like(scope.get("start"))
+    end = _parse_date_like(scope.get("end"))
+    return start is not None and end is not None and start <= target_date < end
+
+
+def _scope_matches_segment(scope: Mapping[str, Any], device_type: str | None) -> bool:
+    if device_type is None:
+        return True
+    equals = _mapping(scope.get("equals"))
+    raw_value = equals.get("device_type", equals.get("segment"))
+    values = raw_value if isinstance(raw_value, list) else [raw_value]
+    return any(
+        isinstance(value, str) and value.strip().lower() == device_type.lower()
+        for value in values
+    )
+
+
+def _dates_near_or_cover(values: Sequence[date], target_date: date) -> bool:
+    if not values:
+        return False
+    if min(values) <= target_date <= max(values):
+        return True
+    return any(abs((value - target_date).days) <= 1 for value in values)
+
+
+DQ_HYPOTHESIS_COMPATIBILITY = _DQ_HYPOTHESIS_COMPATIBILITY
+
+
 __all__ = [
+    "DQ_HYPOTHESIS_COMPATIBILITY",
+    "EvidenceDecision",
     "EvidenceInterpretation",
     "EvidencePolarity",
+    "IncidentEvidenceContext",
     "RuntimeEvidenceInterpreter",
 ]

@@ -39,13 +39,14 @@ from benchmark.case_generator import (
 from benchmark.cases import CASE_ID_RE, CaseManifest
 from benchmark.evidence_interpreter import (
     EvidencePolarity,
+    IncidentEvidenceContext,
     RuntimeEvidenceInterpreter,
 )
 from config.model_settings import ModelSettings
 from harness.checkpoint import CheckpointManager, FileCheckpointStore
 from harness.graph import HarnessGraph
 from harness.guardrails import GuardrailRuntime
-from harness.hypothesis import HypothesisManager
+from harness.hypothesis import EvidenceReference, HypothesisManager
 from harness.state import IncidentState, IncidentStatus
 from llm.base import ModelClient
 from llm.factory import create_model_client
@@ -375,8 +376,9 @@ def _default_mock_plan(alert: Alert) -> InvestigationPlan:
                     "tool": "sql_query",
                     "arguments": {
                         "sql": (
-                            "SELECT COUNT(*) AS event_count FROM events "
-                            f"WHERE CAST(event_time AS DATE) = DATE '{date_literal}'"
+                            "SELECT COUNT(*) AS android_event_count FROM events "
+                            f"WHERE CAST(event_time AS DATE) = DATE '{date_literal}' "
+                            "AND device_type = 'android'"
                         )
                     },
                     "expected_evidence": ["target-day activity observation"],
@@ -389,8 +391,9 @@ def _default_mock_plan(alert: Alert) -> InvestigationPlan:
                     "tool": "sql_query",
                     "arguments": {
                         "sql": (
-                            "SELECT row_count, status FROM partition_metadata "
-                            f"WHERE partition_value LIKE '{date_literal}/%'"
+                            "SELECT partition_value, row_count, status "
+                            "FROM partition_metadata "
+                            f"WHERE partition_value = '{date_literal}/android'"
                         )
                     },
                     "expected_evidence": ["partition metadata observation"],
@@ -399,6 +402,28 @@ def _default_mock_plan(alert: Alert) -> InvestigationPlan:
             ],
         }
     )
+
+
+class _RunnerEvidenceGraph(HarnessGraph):
+    """Defer HarnessGraph's automatic evidence registration until interpretation."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._evidence_binding_enabled = False
+
+    def set_evidence_binding(self, enabled: bool) -> None:
+        """Allow only Runner-approved evidence to enter the hypothesis manager."""
+
+        self._evidence_binding_enabled = enabled
+
+    def register_evidence(
+        self,
+        state: IncidentState,
+        evidence: EvidenceReference,
+    ) -> EvidenceReference:
+        if not self._evidence_binding_enabled:
+            return evidence
+        return super().register_evidence(state, evidence)
 
 
 class CurrentHarnessExecutor:
@@ -437,7 +462,7 @@ class CurrentHarnessExecutor:
             checkpoint_manager = CheckpointManager(
                 FileCheckpointStore(Path(runtime_input.database_path).parent / "checkpoints")
             )
-        graph = HarnessGraph(
+        graph = _RunnerEvidenceGraph(
             planner=planner,
             tool_executor=tool_executor,
             hypothesis_manager=HypothesisManager(),
@@ -508,12 +533,15 @@ class CurrentHarnessExecutor:
         """Advance through graph APIs and interpret structured observations."""
 
         steps = [InvestigationStep.model_validate(step) for step in state.plan]
+        set_evidence_binding = getattr(graph, "set_evidence_binding", None)
         interpreter = RuntimeEvidenceInterpreter(
-            incident_id=str(state.alert.get("incident_id", "unknown-incident"))
+            context=IncidentEvidenceContext.from_alert(state.alert)
         )
         for index, step in enumerate(steps, start=1):
             if state.status is not IncidentStatus.EXECUTING:
                 break
+            if callable(set_evidence_binding):
+                set_evidence_binding(False)
             graph.execute_next_step(
                 state,
                 step,
@@ -523,27 +551,27 @@ class CurrentHarnessExecutor:
                 break
             graph.enter_hypothesis_testing(state)
             tool_result = ToolExecutionResult.model_validate(state.tool_trace[-1])
+            if callable(set_evidence_binding):
+                set_evidence_binding(True)
             hypothesis = graph.hypothesis_manager.get_hypothesis(step.hypothesis_id)
             interpretation = interpreter.interpret(
                 hypothesis=hypothesis,
                 step=step,
                 tool_result=tool_result,
             )
-            references = (
-                tool_result.evidence
-                if tool_result.evidence and interpretation.evidence is not None
-                else ([interpretation.evidence] if interpretation.evidence else [])
-            )
-            for evidence in references:
-                graph.register_evidence(state, evidence)
-                if interpretation.polarity is EvidencePolarity.SUPPORTS:
+            for decision in interpretation.decisions:
+                if decision.polarity is EvidencePolarity.SUPPORTS:
+                    evidence = decision.evidence
+                    graph.register_evidence(state, evidence)
                     graph.attach_evidence(
                         state,
                         step.hypothesis_id,
                         evidence.evidence_id,
                         supports=True,
                     )
-                elif interpretation.polarity is EvidencePolarity.CONTRADICTS:
+                elif decision.polarity is EvidencePolarity.CONTRADICTS:
+                    evidence = decision.evidence
+                    graph.register_evidence(state, evidence)
                     graph.attach_evidence(
                         state,
                         step.hypothesis_id,
@@ -1250,7 +1278,8 @@ def _smoke_model_client_factory(runtime_input: HarnessRuntimeInput) -> ModelClie
     if alert.metric == "daily_active_users" and alert.change_rate <= -0.4:
         root_cause = "metric_definition_change"
         second_sql = (
-            "SELECT version, definition_hash, query FROM metric_versions "
+            "SELECT metric_id, version, definition_hash, query, effective_at "
+            "FROM metric_versions "
             "WHERE metric_id = 'daily_active_users' ORDER BY version"
         )
     elif alert.metric == "daily_active_users" and alert.change_rate < 0:

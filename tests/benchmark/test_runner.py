@@ -1,10 +1,12 @@
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from agents.planner import Hypothesis, InvestigationStep
 from benchmark import case_generator
 from benchmark.case_generator import load_case_manifest
 from benchmark.runner import (
@@ -22,6 +24,9 @@ from benchmark.runner import (
     run_deterministic_harness_smoke,
     run_seed_orchestration,
 )
+from harness.hypothesis import EvidenceReference, HypothesisManager
+from harness.state import IncidentState, IncidentStatus
+from tools.executor import ToolExecutionResult
 
 ROOT = Path(__file__).parents[2]
 CASES_DIRECTORY = ROOT / "benchmark" / "cases"
@@ -109,6 +114,136 @@ class _CaptureFactory:
         from benchmark.runner import _smoke_model_client_factory
 
         return _smoke_model_client_factory(runtime_input)
+
+
+class _DecisionLoopGraph:
+    """Small graph double that exposes Runner evidence registration decisions."""
+
+    def __init__(self, result: ToolExecutionResult) -> None:
+        self.result = result
+        self.hypothesis_manager = HypothesisManager()
+        self.hypothesis_manager.create_hypothesis(
+            Hypothesis(
+                hypothesis_id="H01",
+                root_cause_type="null_value_anomaly",
+                description="Null values may distort the metric.",
+                initial_confidence=0.60,
+            )
+        )
+        self.registered: list[str] = []
+        self.attached: list[tuple[str, str, bool]] = []
+
+    def execute_next_step(self, state: IncidentState, *_args: object, **_kwargs: object):
+        state.tool_trace.append(self.result.model_dump(mode="json"))
+        state.status = IncidentStatus.VALIDATING
+        return SimpleNamespace(to_status=state.status)
+
+    def enter_hypothesis_testing(self, state: IncidentState, **_kwargs: object):
+        state.status = IncidentStatus.HYPOTHESIS_TESTING
+        return SimpleNamespace(to_status=state.status)
+
+    def register_evidence(self, state: IncidentState, evidence: EvidenceReference):
+        self.registered.append(evidence.evidence_id)
+        return self.hypothesis_manager.register_evidence(evidence)
+
+    def attach_evidence(
+        self,
+        state: IncidentState,
+        hypothesis_id: str,
+        evidence_id: str,
+        supports: bool,
+    ):
+        self.attached.append((hypothesis_id, evidence_id, supports))
+        return self.hypothesis_manager.attach_evidence(
+            hypothesis_id, evidence_id, supports
+        )
+
+    def validate_hypothesis(self, *_args: object, **_kwargs: object):
+        return SimpleNamespace(to_status=IncidentStatus.HYPOTHESIS_TESTING)
+
+    def transition(self, state: IncidentState, target: IncidentStatus, **_kwargs: object):
+        state.status = target
+        return SimpleNamespace(to_status=target)
+
+
+def _dq_runner_reference(
+    evidence_id: str,
+    *,
+    table: str = "events",
+) -> EvidenceReference:
+    return EvidenceReference(
+        evidence_id=evidence_id,
+        source_type="business_data",
+        description="canonical null-rate finding",
+        query_id="Q-RUNNER-DQ",
+        observation={
+            "check_name": "check_null_rate",
+            "status": "success",
+            "passed": False,
+            "table": table,
+            "column": "user_id",
+            "columns": ["user_id"],
+            "details": {
+                "scope": {
+                    "time_column": "event_time",
+                    "start": "2026-01-30T00:00:00+00:00",
+                    "end": "2026-01-31T00:00:00+00:00",
+                }
+            },
+        },
+    )
+
+
+def test_runner_registers_each_dq_reference_only_with_its_own_polarity() -> None:
+    compatible = _dq_runner_reference("dq-compatible")
+    wrong_scope = _dq_runner_reference("dq-wrong-scope", table="users")
+    result = ToolExecutionResult(
+        tool_name="check_null_rate",
+        success=True,
+        query_id="Q-RUNNER-DQ",
+        result={
+            "check_name": "check_null_rate",
+            "status": "success",
+            "passed": False,
+            "table": "events",
+            "column": "user_id",
+            "columns": ["user_id"],
+        },
+        evidence=[compatible, wrong_scope],
+    )
+    step = InvestigationStep(
+        step_id="S01",
+        purpose="Check target-window null rate.",
+        hypothesis_id="H01",
+        tool="check_null_rate",
+        arguments={"table": "events", "column": "user_id", "threshold": 0.01},
+        expected_evidence=["the structured check result"],
+        stop_condition="retain the observation",
+    )
+    graph = _DecisionLoopGraph(result)
+    state = IncidentState(
+        alert={
+            "incident_id": "INC-RUNNER-DQ",
+            "metric": "daily_active_users",
+            "observed_at": "2026-01-30T00:00:00Z",
+            "expected_value": 100.0,
+            "observed_value": 75.0,
+            "change_rate": -0.25,
+            "severity": "high",
+        },
+        plan=[step.model_dump(mode="json")],
+        status=IncidentStatus.EXECUTING,
+    )
+
+    CurrentHarnessExecutor._run_graph_loop(graph, state)
+
+    assert graph.registered == ["dq-compatible"]
+    assert graph.attached == [("H01", "dq-compatible", True)]
+    assert graph.hypothesis_manager.evidence() == (compatible,)
+    assert graph.hypothesis_manager.get_hypothesis("H01").confidence == pytest.approx(
+        0.75
+    )
+    assert state.root_cause is None
 
 
 def test_runner_reuses_canonical_case_apis_and_rejects_duplicate_ids() -> None:
