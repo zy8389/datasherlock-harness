@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -9,10 +11,12 @@ from agents.planner import (
     PlannerFallbackReason,
     PlannerInput,
     PlannerValidationError,
+    StructuredInvestigationPlan,
     _sql_for_root_cause,
     build_fallback_plan,
     build_planner_prompt,
     load_metric_context,
+    structured_plan_to_investigation_plan,
     validate_plan_tools,
 )
 from config.faults import load_fault_catalog
@@ -25,6 +29,175 @@ from tools.sql_runner import validate_readonly_sql
 def _request_for(alert_payload: dict[str, object]):
     alert = Alert.model_validate(alert_payload)
     return alert, load_metric_context(alert.metric)
+
+
+def _structured_plan(
+    arguments_json: str,
+    *,
+    tool: str = "sql_query",
+) -> StructuredInvestigationPlan:
+    alert, metric_context = _request_for(dict(PLANNER_ALERT_EXAMPLES[0]))
+    canonical = build_fallback_plan(
+        PlannerInput(alert=alert, metric_context=metric_context)
+    )
+    payload = canonical.model_dump(mode="json")
+    step = dict(payload["steps"][0])
+    step["tool"] = tool
+    step.pop("arguments")
+    step["arguments_json"] = arguments_json
+    payload["steps"] = [step]
+    return StructuredInvestigationPlan.model_validate(payload)
+
+
+def _walk_schema(value: object):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _walk_schema(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_schema(child)
+
+
+def test_structured_planner_schema_is_strict_and_uses_string_arguments() -> None:
+    schema = StructuredInvestigationPlan.model_json_schema()
+
+    assert schema["type"] == "object"
+    assert "anyOf" not in schema
+    step_schema = schema["$defs"]["StructuredInvestigationStep"]
+    assert step_schema["properties"]["arguments_json"]["type"] == "string"
+    assert "arguments" not in step_schema["properties"]
+    assert set(step_schema["required"]) == set(step_schema["properties"])
+    assert set(schema["required"]) == set(schema["properties"])
+
+    for candidate in _walk_schema(schema):
+        if candidate.get("type") == "object":
+            assert candidate.get("additionalProperties") is False
+        assert candidate.get("additionalProperties") is not True
+        assert not isinstance(candidate.get("additionalProperties"), dict)
+
+
+def test_structured_plan_converter_decodes_sql_arguments() -> None:
+    structured = _structured_plan('{"sql":"SELECT 1"}')
+
+    plan = structured_plan_to_investigation_plan(
+        structured, build_default_tool_registry()
+    )
+
+    assert plan.steps[0].arguments == {"sql": "SELECT 1"}
+
+
+def test_structured_plan_converter_decodes_nested_data_quality_scope() -> None:
+    arguments = {
+        "table": "events",
+        "column": "user_id",
+        "threshold": 0.01,
+        "scope": {
+            "equals": {"device_type": ["ios", "android"]},
+            "time_column": "event_time",
+            "start": "2026-01-30T00:00:00+00:00",
+            "end": "2026-01-31T00:00:00+00:00",
+        },
+    }
+    structured = _structured_plan(
+        json.dumps(arguments, sort_keys=True, separators=(",", ":")),
+        tool="check_null_rate",
+    )
+
+    plan = structured_plan_to_investigation_plan(
+        structured, build_default_tool_registry()
+    )
+
+    assert plan.steps[0].arguments == arguments
+
+
+@pytest.mark.parametrize("arguments_json", ["[]", '"foo"', "1", "null", "true"])
+def test_structured_plan_converter_rejects_non_object_arguments(
+    arguments_json: str,
+) -> None:
+    with pytest.raises(PlannerValidationError, match="JSON object"):
+        structured_plan_to_investigation_plan(
+            _structured_plan(arguments_json), build_default_tool_registry()
+        )
+
+
+def test_structured_plan_converter_rejects_malformed_json() -> None:
+    with pytest.raises(PlannerValidationError, match="not valid JSON"):
+        structured_plan_to_investigation_plan(
+            _structured_plan("{not-json"), build_default_tool_registry()
+        )
+
+
+def test_structured_plan_converter_uses_registry_for_unknown_arguments() -> None:
+    with pytest.raises(PlannerValidationError, match="unknown field"):
+        structured_plan_to_investigation_plan(
+            _structured_plan('{"query":"SELECT 1"}'), build_default_tool_registry()
+        )
+
+
+def test_structured_plan_keeps_unsafe_sql_rejected_by_existing_semantics() -> None:
+    plan = structured_plan_to_investigation_plan(
+        _structured_plan('{"sql":"DELETE FROM events"}'),
+        build_default_tool_registry(),
+    )
+
+    with pytest.raises(PlannerValidationError, match="unsafe SQL"):
+        validate_plan_tools(plan, build_default_tool_registry())
+
+
+def test_structured_plan_accepts_canonical_arguments_only_at_local_boundary() -> None:
+    alert, metric_context = _request_for(dict(PLANNER_ALERT_EXAMPLES[0]))
+    canonical = build_fallback_plan(
+        PlannerInput(alert=alert, metric_context=metric_context)
+    )
+
+    structured = StructuredInvestigationPlan.model_validate(canonical)
+
+    assert structured.steps[0].arguments_json == json.dumps(
+        canonical.steps[0].arguments,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    assert "arguments" not in structured.model_dump(mode="json")["steps"][0]
+
+
+def test_malformed_arguments_json_enters_planner_repair_and_succeeds() -> None:
+    alert, metric_context = _request_for(dict(PLANNER_ALERT_EXAMPLES[0]))
+    valid = _structured_plan('{"sql":"SELECT 1"}')
+    invalid = _structured_plan("{not-json")
+    calls = 0
+
+    def response_factory(response_model: type[StructuredInvestigationPlan], _: str, __: str):
+        nonlocal calls
+        calls += 1
+        return response_model.model_validate(invalid if calls == 1 else valid)
+
+    result = Planner(MockModelClient(response_factory), max_retries=1).run(
+        alert, metric_context
+    )
+
+    assert result.fallback_used is False
+    assert result.planner_repair_count == 1
+    assert result.plan.steps[0].arguments == {"sql": "SELECT 1"}
+    assert result.model_result is not None
+    assert isinstance(result.model_result.parsed, InvestigationPlan)
+
+
+def test_repeated_malformed_arguments_json_returns_audited_fallback() -> None:
+    alert, metric_context = _request_for(dict(PLANNER_ALERT_EXAMPLES[0]))
+    invalid = _structured_plan("{not-json")
+
+    def response_factory(response_model: type[StructuredInvestigationPlan], _: str, __: str):
+        return response_model.model_validate(invalid)
+
+    result = Planner(MockModelClient(response_factory), max_retries=1).run(
+        alert, metric_context
+    )
+
+    assert result.fallback_used is True
+    assert result.fallback_reason == PlannerFallbackReason.PLANNER_VALIDATION_FAILED
+    assert result.planner_repair_count == 2
+    assert result.model_result is None
 
 
 def test_three_alert_examples_produce_stable_bounded_fallback_plans() -> None:
@@ -85,6 +258,8 @@ def test_prompt_contains_structured_input_schema_and_json_only_constraint() -> N
     prompt = build_planner_prompt(alert, metric_context)
 
     assert "Output only one valid JSON object" in prompt
+    assert "JSON-encoded object string" in prompt
+    assert 'arguments_json = "{\\"sql\\":\\"SELECT ...\\"}"' in prompt
     assert '"incident_id"' in prompt
     assert '"hypotheses"' in prompt
     assert '"expected_evidence"' in prompt

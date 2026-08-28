@@ -37,10 +37,10 @@ from pydantic import (
 
 from agents.planner import (
     Alert,
-    InvestigationPlan,
     InvestigationStep,
     MetricContext,
     Planner,
+    StructuredInvestigationPlan,
     load_metric_context,
 )
 from benchmark.case_generator import (
@@ -558,22 +558,24 @@ def _mock_response_factory(
                     "null_value_anomaly",
                 ],
             )
-        if response_model is InvestigationPlan:
+        if response_model is StructuredInvestigationPlan:
             if config.mock_plan is not None:
-                return InvestigationPlan.model_validate(config.mock_plan)
+                return StructuredInvestigationPlan.model_validate(config.mock_plan)
             from benchmark.runner import _default_mock_plan
 
-            return _default_mock_plan(
-                Alert.model_validate(
-                    {
-                        "incident_id": "offline-smoke",
-                        "metric": "daily_active_users",
-                        "observed_at": "2026-01-30",
-                        "expected_value": 1.0,
-                        "observed_value": 0.5,
-                        "change_rate": -0.5,
-                        "severity": "high",
-                    }
+            return StructuredInvestigationPlan.model_validate(
+                _default_mock_plan(
+                    Alert.model_validate(
+                        {
+                            "incident_id": "offline-smoke",
+                            "metric": "daily_active_users",
+                            "observed_at": "2026-01-30",
+                            "expected_value": 1.0,
+                            "observed_value": 0.5,
+                            "change_rate": -0.5,
+                            "severity": "high",
+                        }
+                    )
                 )
             )
         raise TypeError(f"unsupported offline response model: {response_model!r}")

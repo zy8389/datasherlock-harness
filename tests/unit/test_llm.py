@@ -12,6 +12,7 @@ from agents.planner import (
     Planner,
     PlannerFallbackReason,
     PlannerInput,
+    StructuredInvestigationPlan,
     build_fallback_plan,
     load_metric_context,
 )
@@ -109,6 +110,20 @@ def test_mock_model_client_and_planner_use_structured_result_without_network() -
     assert model_client.calls[0]["system_prompt"]
     assert model_client.calls[0]["user_prompt"]
     assert planner.last_model_result is not None
+
+
+def test_planner_requests_strict_provider_schema_and_returns_canonical_plan() -> None:
+    responses = _FakeResponses(response=_fake_response(_plan().model_dump(mode="json")))
+    client = _client(responses)
+    alert = Alert.model_validate(PLANNER_ALERT_EXAMPLES[0])
+    context = load_metric_context(alert.metric)
+
+    result = Planner(client, max_retries=0).run(alert, context)
+
+    assert result.fallback_used is False
+    assert result.model_result is not None
+    assert isinstance(result.model_result.parsed, InvestigationPlan)
+    assert responses.calls[0]["text_format"] is StructuredInvestigationPlan
 
 
 @pytest.mark.parametrize(
