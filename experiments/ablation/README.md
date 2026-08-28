@@ -47,16 +47,23 @@ database path. They never receive `case_id`, `fault_id`, `expected_root_cause`,
 `expected_evidence`, `source_seed_case_id`, `manifest`, or a Ground Truth object.
 The outer scorer joins the adapter output to the manifest after execution.
 
+Top-1 uses the adapter's explicit `primary_prediction` authority. Single
+Prompt, ReAct, and State Graph No Validator derive it from their first returned
+ranked label; Full Harness derives it only from the production validator's
+`predicted_root_cause`, which may be null even when hypothesis rankings exist.
 Top-3 is stored as an ordered list of at most three model labels. For scoring,
-unknown labels are invalid and are never mapped to a canonical label. Top-1 is
-the first raw label. Top-3 searches the first three valid, deduplicated
-canonical labels, preserving order.
+unknown labels are invalid and are never mapped to a canonical label. Top-3
+searches the first three valid, deduplicated canonical labels, preserving order.
 
-Tool and SQL counts come from guardrail preflight events and the shared tool
-trace. Invalid SQL means an SQL attempt rejected by parser, read-only
-validation, result validation, or execution; a successful empty SQL result is
-not invalid. Unsafe and duplicate rates use the actual GuardrailRuntime reasons
-`unsafe_sql`, `non_read_only_tool`, `unsafe_tool`, and `duplicate_tool_call`.
+Tool and SQL attempt denominators come from guardrail preflight events when
+available; without them, SQL tool-result records are counted conservatively.
+Invalid SQL means a blocked `unsafe_sql` or SQL `invalid_tool_contract`, or an
+allowed SQL whose `ToolExecutionResult` failed due validation, execution,
+timeout, or tool-contract error. A successful empty SQL result and a budget
+block are not invalid, and `sql_validation.passed == false` alone is not
+enough to classify an attempt as invalid. Unsafe and duplicate rates use the
+actual GuardrailRuntime reasons `unsafe_sql`, `non_read_only_tool`,
+`unsafe_tool`, and `duplicate_tool_call`.
 Unknown token rates or unknown token counts produce `null` cost, never zero.
 
 ## Running

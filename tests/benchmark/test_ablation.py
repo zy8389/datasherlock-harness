@@ -8,7 +8,7 @@ import duckdb
 import pytest
 from pydantic import BaseModel
 
-from agents.planner import Alert, MetricContext
+from agents.planner import Alert, MetricContext, build_planner_prompt
 from benchmark.ablation import (
     CANONICAL_CASE_IDS,
     CANONICAL_ROOT_CAUSES,
@@ -26,6 +26,7 @@ from benchmark.ablation import (
 )
 from benchmark.case_generator import load_case_manifest
 from llm.models import ModelCallResult, ModelUsage
+from tools.registry import build_default_tool_registry
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -36,6 +37,8 @@ class _SequenceClient:
     def __init__(self, payloads: list[dict[str, Any]]) -> None:
         self.payloads = payloads
         self.calls = 0
+        self.system_prompts: list[str] = []
+        self.user_prompts: list[str] = []
 
     async def generate_structured(
         self,
@@ -44,7 +47,8 @@ class _SequenceClient:
         user_prompt: str,
         response_model: type[T],
     ) -> ModelCallResult[T]:
-        del system_prompt, user_prompt
+        self.system_prompts.append(system_prompt)
+        self.user_prompts.append(user_prompt)
         payload = self.payloads[self.calls]
         self.calls += 1
         parsed = response_model.model_validate(payload)
@@ -130,6 +134,7 @@ def test_single_prompt_makes_one_call_and_no_tool_calls(tmp_path: Path) -> None:
     )(_runtime(tmp_path))
     assert client.calls == 1
     assert output.completion_status == "completed"
+    assert output.primary_prediction == "missing_partition"
     assert output.tool_call_count == 0
     assert output.sql_call_count == 0
 
@@ -153,8 +158,41 @@ def test_react_loop_is_bounded_and_uses_current_guardrails(tmp_path: Path) -> No
     )(_runtime(tmp_path))
     assert client.calls == 1
     assert output.completion_status == "budget_exceeded"
+    assert output.primary_prediction is None
     assert output.tool_call_count == 1
     assert output.sql_call_count == 1
+
+    prompt_payload = json.loads(client.user_prompts[0])
+    expected_tools = [
+        definition.model_dump(mode="json")
+        for definition in build_default_tool_registry().definitions()
+    ]
+    assert prompt_payload["available_tools"] == expected_tools
+    planner_prompt = build_planner_prompt(
+        _runtime(tmp_path).alert,
+        _runtime(tmp_path).metric_context,
+        tool_registry=build_default_tool_registry(),
+    )
+    for definition in build_default_tool_registry().definitions():
+        assert f"Tool: {definition.name}" in planner_prompt
+        assert definition.description in planner_prompt
+        assert json.dumps(
+            definition.argument_schema, ensure_ascii=False, indent=2
+        ) in planner_prompt
+        assert f"Read-only: {str(definition.read_only).lower()}" in planner_prompt
+
+
+def test_react_primary_prediction_is_first_final_label(tmp_path: Path) -> None:
+    from benchmark.ablation import ReActAdapter
+
+    client = _SequenceClient(
+        [{"type": "final", "ranked_root_causes": ["missing_partition", "data_delay"]}]
+    )
+    output = ReActAdapter(
+        _config(tmp_path), model_client_factory=lambda _runtime: client
+    )(_runtime(tmp_path))
+    assert output.primary_prediction == "missing_partition"
+    assert output.ranked_root_causes[0] == output.primary_prediction
 
 
 def test_state_graph_without_validator_never_sets_authoritative_root_cause(
@@ -207,6 +245,7 @@ def test_state_graph_without_validator_never_sets_authoritative_root_cause(
     assert client.calls == 1
     assert output.completion_status == "unresolved"
     assert output.trace_payload["state"]["root_cause"] is None
+    assert output.primary_prediction == "missing_partition"
     assert output.tool_call_count == 1
 
 
@@ -242,6 +281,93 @@ def test_full_harness_adapter_reuses_production_builder(
     assert calls == [("mock", "mock-model")]
     assert output.variant == "full_harness"
     assert output.completion_status == "UNRESOLVED"
+
+
+def test_full_harness_unvalidated_hypothesis_cannot_receive_top1_credit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from benchmark import ablation
+
+    manifest = load_case_manifest("F01-001")
+
+    def fake_builder(config: Any, *, model_client_factory: Any) -> Any:
+        del config, model_client_factory
+
+        def execute(_runtime: Any) -> Any:
+            return ablation.HarnessExecutionOutput(
+                harness_status="UNRESOLVED",
+                predicted_root_cause=None,
+                trace_payload={
+                    "state": {
+                        "hypotheses": [
+                            {
+                                "root_cause_type": manifest.root_cause_type,
+                                "confidence": 0.9,
+                            },
+                            {"root_cause_type": "data_delay", "confidence": 0.1},
+                        ],
+                        "root_cause": None,
+                        "tool_trace": [],
+                        "guardrail_events": [],
+                    }
+                },
+            )
+
+        return execute
+
+    monkeypatch.setattr(ablation, "build_harness_executor", fake_builder)
+    output = ablation.FullHarnessAdapter(_config(tmp_path))(_runtime(tmp_path))
+    result = score_execution(output, manifest)
+
+    assert output.primary_prediction is None
+    assert output.ranked_root_causes[0] == manifest.root_cause_type
+    assert result.top1_correct is False
+    assert result.top3_correct is True
+    assert result.abstention is True
+
+
+def test_full_harness_primary_prediction_is_validator_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from benchmark import ablation
+
+    manifest = load_case_manifest("F01-001")
+
+    def fake_builder(config: Any, *, model_client_factory: Any) -> Any:
+        del config, model_client_factory
+
+        def execute(_runtime: Any) -> Any:
+            return ablation.HarnessExecutionOutput(
+                harness_status="ROOT_CAUSE_FOUND",
+                predicted_root_cause=manifest.root_cause_type,
+                trace_payload={
+                    "state": {
+                        "hypotheses": [
+                            {"root_cause_type": "data_delay", "confidence": 0.9},
+                            {
+                                "root_cause_type": manifest.root_cause_type,
+                                "confidence": 0.1,
+                            },
+                        ],
+                        "root_cause": {
+                            "root_cause_type": manifest.root_cause_type
+                        },
+                        "tool_trace": [],
+                        "guardrail_events": [],
+                    }
+                },
+            )
+
+        return execute
+
+    monkeypatch.setattr(ablation, "build_harness_executor", fake_builder)
+    output = ablation.FullHarnessAdapter(_config(tmp_path))(_runtime(tmp_path))
+    result = score_execution(output, manifest)
+
+    assert output.primary_prediction == manifest.root_cause_type
+    assert output.ranked_root_causes[0] == manifest.root_cause_type
+    assert result.top1_correct is True
+    assert result.abstention is False
 
 
 def test_scoring_keeps_unresolved_in_denominator_and_deduplicates_top3() -> None:
@@ -319,8 +445,9 @@ def test_empty_sql_is_valid_and_guardrail_reasons_drive_rates() -> None:
     assert result.unsafe_operation_attempts == 1
     assert result.duplicate_operation_attempts == 1
     assert metrics.total_tool_attempts == 3
-    assert metrics.total_sql_attempts == 2
-    assert metrics.invalid_sql_rate == 0.5
+    assert result.total_sql_attempts == 3
+    assert metrics.total_sql_attempts == 3
+    assert metrics.invalid_sql_rate == 1 / 3
     assert metrics.unsafe_operation_rate == 1 / 3
     assert metrics.duplicate_operation_rate == 1 / 3
     assert metrics.known_average_cost is None
@@ -330,6 +457,123 @@ def test_empty_sql_is_valid_and_guardrail_reasons_drive_rates() -> None:
         manifest,
     )
     assert failed.status == "error"
+
+
+def test_allowed_successful_sql_has_zero_invalid_rate() -> None:
+    manifest = load_case_manifest("F01-001")
+    output = AblationExecutionOutput(
+        variant="react",
+        completion_status="completed",
+        trace_payload={
+            "guardrail_events": [
+                {
+                    "event_type": "preflight",
+                    "tool_name": "sql_query",
+                    "allowed": True,
+                    "reason": None,
+                }
+            ],
+            "tool_trace": [
+                {
+                    "tool_name": "sql_query",
+                    "success": True,
+                    "result": {"status": "success", "row_count": 1, "rows": [[1]]},
+                }
+            ],
+        },
+    )
+    result = score_execution(output, manifest)
+    metrics = compute_metrics([result], "react")
+
+    assert result.total_sql_attempts == 1
+    assert result.invalid_sql_attempts == 0
+    assert metrics.invalid_sql_rate == 0
+
+
+def test_allowed_sql_execution_failure_is_one_invalid_attempt() -> None:
+    manifest = load_case_manifest("F01-001")
+    output = AblationExecutionOutput(
+        variant="react",
+        completion_status="tool_failed",
+        trace_payload={
+            "guardrail_events": [
+                {
+                    "event_type": "preflight",
+                    "tool_name": "sql_query",
+                    "allowed": True,
+                    "reason": None,
+                }
+            ],
+            "tool_trace": [
+                {
+                    "tool_name": "sql_query",
+                    "success": False,
+                    "error": {"type": "execution", "message": "missing table"},
+                }
+            ],
+        },
+    )
+    result = score_execution(output, manifest)
+    metrics = compute_metrics([result], "react")
+
+    assert result.total_sql_attempts == 1
+    assert result.invalid_sql_attempts == 1
+    assert metrics.invalid_sql_rate == 1.0
+
+
+def test_valid_empty_sql_result_is_not_invalid() -> None:
+    manifest = load_case_manifest("F01-001")
+    output = AblationExecutionOutput(
+        variant="react",
+        completion_status="completed",
+        trace_payload={
+            "guardrail_events": [
+                {
+                    "event_type": "preflight",
+                    "tool_name": "sql_query",
+                    "allowed": True,
+                    "reason": None,
+                }
+            ],
+            "tool_trace": [
+                {
+                    "tool_name": "sql_query",
+                    "success": True,
+                    "result": {"status": "success", "row_count": 0, "rows": []},
+                    "sql_validation": {"passed": False, "reason": "empty_result"},
+                }
+            ],
+        },
+    )
+    result = score_execution(output, manifest)
+
+    assert result.total_sql_attempts == 1
+    assert result.invalid_sql_attempts == 0
+
+
+def test_budget_blocked_sql_counts_in_denominator_only() -> None:
+    manifest = load_case_manifest("F01-001")
+    output = AblationExecutionOutput(
+        variant="react",
+        completion_status="budget_exceeded",
+        trace_payload={
+            "guardrail_events": [
+                {
+                    "event_type": "preflight",
+                    "tool_name": "sql_query",
+                    "allowed": False,
+                    "reason": "sql_call_budget_exceeded",
+                }
+            ],
+            "tool_trace": [],
+        },
+    )
+    result = score_execution(output, manifest)
+    metrics = compute_metrics([result], "react")
+
+    assert result.total_sql_attempts == 1
+    assert result.invalid_sql_attempts == 0
+    assert metrics.invalid_sql_rate == 0
 
 
 def test_fairness_requires_complete_pairs_and_equal_hashes() -> None:

@@ -80,7 +80,7 @@ from llm.factory import create_model_client
 from llm.mock_client import MockModelClient
 from llm.models import ModelUsage
 from tools.executor import ToolExecutionResult, ToolExecutor
-from tools.registry import build_default_tool_registry
+from tools.registry import ToolRegistry, build_default_tool_registry
 
 VariantName = Literal[
     "single_prompt",
@@ -169,7 +169,7 @@ class AblationConfig(BaseModel):
         invalid = [value for value in values if value not in CANONICAL_CASE_IDS]
         if invalid:
             raise ValueError(
-                "case_ids must use canonical F01-001 through F12-005 IDs: "
+                "case_ids must use canonical benchmark case IDs: "
                 + ", ".join(invalid)
             )
         return values
@@ -268,6 +268,7 @@ class AblationExecutionOutput(BaseModel):
 
     variant: VariantName
     completion_status: str = Field(min_length=1)
+    primary_prediction: str | None = None
     ranked_root_causes: list[str] = Field(default_factory=list, max_length=3)
     tool_call_count: int = Field(default=0, ge=0)
     sql_call_count: int = Field(default=0, ge=0)
@@ -289,6 +290,7 @@ class AblationCaseResult(BaseModel):
     variant: VariantName
     status: RunStatus
     completion_status: str
+    primary_prediction: str | None = None
     ranked_root_causes: list[str] = Field(default_factory=list, max_length=3)
     expected_root_cause: str
     top1_correct: bool
@@ -297,6 +299,7 @@ class AblationCaseResult(BaseModel):
     tool_call_count: int = Field(default=0, ge=0)
     sql_call_count: int = Field(default=0, ge=0)
     total_tool_attempts: int = Field(default=0, ge=0)
+    total_sql_attempts: int = Field(default=0, ge=0)
     invalid_sql_attempts: int = Field(default=0, ge=0)
     unsafe_operation_attempts: int = Field(default=0, ge=0)
     duplicate_operation_attempts: int = Field(default=0, ge=0)
@@ -665,6 +668,11 @@ class AblationVariantExecutor:
             return _output(
                 variant="single_prompt",
                 completion_status="completed",
+                primary_prediction=(
+                    parsed.ranked_root_causes[0]
+                    if parsed.ranked_root_causes
+                    else None
+                ),
                 ranked=parsed.ranked_root_causes,
                 usage=_aggregate_usage(usages),
                 config=self.config,
@@ -717,6 +725,7 @@ class AblationVariantExecutor:
                             "alert": runtime_input.alert.model_dump(mode="json"),
                             "metric_context": runtime_input.metric_context.planner_payload(),
                             "allowed_root_causes": runtime_input.allowed_root_causes,
+                            "available_tools": _tool_catalog_payload(registry),
                             "observations": observations,
                         },
                         sort_keys=True,
@@ -730,6 +739,11 @@ class AblationVariantExecutor:
                     return _output(
                         variant="react",
                         completion_status=status,
+                        primary_prediction=(
+                            action.ranked_root_causes[0]
+                            if action.ranked_root_causes
+                            else None
+                        ),
                         ranked=action.ranked_root_causes,
                         usage=_aggregate_usage(usages),
                         config=self.config,
@@ -889,6 +903,7 @@ class AblationVariantExecutor:
                     if state.status is IncidentStatus.HYPOTHESIS_TESTING
                     else state.status.value.lower()
                 ),
+                primary_prediction=ranked[0] if ranked else None,
                 ranked=ranked,
                 usage=_aggregate_usage(usages),
                 config=self.config,
@@ -962,7 +977,9 @@ class AblationVariantExecutor:
         started = perf_counter()
         try:
             benchmark_config = BenchmarkRunConfig(
-                case_ids=["F01-001"],
+                # Neutral selection for one sanitized runtime execution; this
+                # value is not used for case routing.
+                case_ids=list(CANONICAL_CASE_IDS),
                 harness_version="current-main",
                 model_name=self.config.model_name,
                 output_dir=runtime_input.database_path.parent,
@@ -998,6 +1015,7 @@ class AblationVariantExecutor:
             return _output(
                 variant="full_harness",
                 completion_status=output.harness_status,
+                primary_prediction=output.predicted_root_cause,
                 ranked=ranked,
                 usage=output.model_usage,
                 config=self.config,
@@ -1081,6 +1099,12 @@ def _rank_hypotheses(hypotheses: Sequence[Any]) -> list[str]:
     return [str(item[1].root_cause_type) for item in ordered[:3]]
 
 
+def _tool_catalog_payload(registry: ToolRegistry) -> list[dict[str, Any]]:
+    """Expose the executor/guardrail registry without maintaining a second list."""
+
+    return [definition.model_dump(mode="json") for definition in registry.definitions()]
+
+
 def _rank_state_payload(payload: object, *, predicted: str | None) -> list[str]:
     if not isinstance(payload, Mapping):
         return [predicted] if predicted else []
@@ -1116,6 +1140,7 @@ def _output(
     completion_status: str,
     config: AblationConfig,
     latency_ms: float,
+    primary_prediction: str | None = None,
     ranked: Sequence[str] = (),
     usage: ModelUsage | None = None,
     tool_call_count: int | None = None,
@@ -1137,6 +1162,7 @@ def _output(
     return AblationExecutionOutput(
         variant=variant,
         completion_status=completion_status,
+        primary_prediction=primary_prediction,
         ranked_root_causes=list(ranked)[:3],
         tool_call_count=(
             sum(
@@ -1215,6 +1241,63 @@ def _trace_tool_results(result: AblationCaseResult) -> list[Mapping[str, Any]]:
     return []
 
 
+_SQL_RESULT_FAILURE_TYPES = frozenset(
+    {"validation", "execution", "timeout", "tool_contract"}
+)
+
+
+def _is_failed_sql_result(item: Mapping[str, Any]) -> bool:
+    error = item.get("error")
+    return bool(
+        item.get("tool_name") == "sql_query"
+        and item.get("success") is False
+        and isinstance(error, Mapping)
+        and error.get("type") in _SQL_RESULT_FAILURE_TYPES
+    )
+
+
+def _attempt_metrics(
+    preflight_events: Sequence[Mapping[str, Any]],
+    tool_results: Sequence[Mapping[str, Any]],
+) -> tuple[int, int, int]:
+    """Return total tool attempts, SQL attempts, and invalid SQL attempts.
+
+    A preflight is the authoritative attempt record whenever it exists. Tool
+    results are then used only to classify allowed SQL executions, preventing
+    one call from being counted once as a preflight and again as a result.
+    """
+
+    if not preflight_events:
+        sql_results = [
+            item for item in tool_results if item.get("tool_name") == "sql_query"
+        ]
+        return (
+            len(tool_results),
+            len(sql_results),
+            sum(_is_failed_sql_result(item) for item in sql_results),
+        )
+
+    sql_preflights = [
+        item for item in preflight_events if item.get("tool_name") == "sql_query"
+    ]
+    blocked_invalid = sum(
+        not item.get("allowed", True)
+        and item.get("reason") in {"unsafe_sql", "invalid_tool_contract"}
+        for item in sql_preflights
+    )
+    allowed_sql_count = sum(item.get("allowed") is True for item in sql_preflights)
+    failed_sql_results = sum(_is_failed_sql_result(item) for item in tool_results)
+    # Only allowed preflights can have an executed result. Pairing by count
+    # keeps a malformed trace from inflating the invalid numerator past its
+    # preflight denominator and avoids counting blocked/result duplicates twice.
+    invalid_executions = min(allowed_sql_count, failed_sql_results)
+    return (
+        len(preflight_events),
+        len(sql_preflights),
+        blocked_invalid + invalid_executions,
+    )
+
+
 def score_execution(
     output: AblationExecutionOutput | None,
     manifest: CaseManifest,
@@ -1239,16 +1322,21 @@ def score_execution(
         and adapter_status in {"error", "tool_failed", "validation_failed"}
         else status
     )
+    primary_prediction = output.primary_prediction
     labels = list(output.ranked_root_causes)
     valid_labels: list[str] = []
     for label in labels:
         if label in CANONICAL_ROOT_CAUSES and label not in valid_labels:
             valid_labels.append(label)
-    invalid_prediction = any(label not in CANONICAL_ROOT_CAUSES for label in labels)
+    invalid_prediction = any(
+        label not in CANONICAL_ROOT_CAUSES
+        for label in [*labels, primary_prediction]
+        if label is not None
+    )
     top1 = bool(
         effective_status == "completed"
-        and labels
-        and labels[0] == manifest.root_cause_type
+        and primary_prediction is not None
+        and primary_prediction == manifest.root_cause_type
     )
     top3 = bool(
         effective_status == "completed" and manifest.root_cause_type in valid_labels[:3]
@@ -1260,6 +1348,7 @@ def score_execution(
             variant=output.variant,
             status=effective_status,
             completion_status=output.completion_status,
+            primary_prediction=primary_prediction,
             ranked_root_causes=labels,
             expected_root_cause=manifest.root_cause_type,
             top1_correct=top1,
@@ -1274,6 +1363,7 @@ def score_execution(
             variant=output.variant,
             status=effective_status,
             completion_status=output.completion_status,
+            primary_prediction=primary_prediction,
             ranked_root_causes=labels,
             expected_root_cause=manifest.root_cause_type,
             top1_correct=top1,
@@ -1284,21 +1374,8 @@ def score_execution(
     preflight_events = [
         item for item in events if item.get("event_type") == "preflight"
     ]
-    total_tool_attempts = len(preflight_events) or len(tool_results)
-    invalid_sql = sum(
-        1
-        for item in preflight_events
-        if item.get("tool_name") == "sql_query"
-        and item.get("reason") in {"unsafe_sql", "invalid_tool_contract"}
-    )
-    invalid_sql += sum(
-        1
-        for item in tool_results
-        if item.get("tool_name") == "sql_query"
-        and item.get("success") is False
-        and isinstance(item.get("error"), Mapping)
-        and item["error"].get("type")
-        in {"validation", "execution", "timeout", "tool_contract"}
+    total_tool_attempts, total_sql_attempts, invalid_sql = _attempt_metrics(
+        preflight_events, tool_results
     )
     unsafe = sum(
         1
@@ -1327,6 +1404,7 @@ def score_execution(
         variant=output.variant,
         status=effective_status,
         completion_status=output.completion_status,
+        primary_prediction=primary_prediction,
         ranked_root_causes=labels,
         expected_root_cause=manifest.root_cause_type,
         top1_correct=top1,
@@ -1335,6 +1413,7 @@ def score_execution(
         tool_call_count=output.tool_call_count,
         sql_call_count=output.sql_call_count,
         total_tool_attempts=total_tool_attempts,
+        total_sql_attempts=total_sql_attempts,
         invalid_sql_attempts=invalid_sql,
         unsafe_operation_attempts=unsafe,
         duplicate_operation_attempts=duplicate,
@@ -1343,7 +1422,7 @@ def score_execution(
         model_usage=output.model_usage,
         known_cost=output.known_cost,
         latency_ms=latency_ms if latency_ms is not None else output.latency_ms,
-        abstention=not labels,
+        abstention=primary_prediction is None,
         error=error or output.error,
         trace_payload=output.trace_payload,
     )
@@ -1359,9 +1438,7 @@ def compute_metrics(
     attempted = len(selected)
     latencies = [result.latency_ms for result in selected]
     tool_attempts = sum(result.total_tool_attempts for result in selected)
-    sql_attempts = sum(
-        result.sql_call_count + result.invalid_sql_attempts for result in selected
-    )
+    sql_attempts = sum(result.total_sql_attempts for result in selected)
     known_costs = [
         result.known_cost for result in selected if result.known_cost is not None
     ]
@@ -1401,8 +1478,7 @@ def compute_metrics(
         invalid_sql_rate=_metrics_rate(
             sum(result.invalid_sql_attempts for result in selected),
             sum(
-                result.sql_call_count + result.invalid_sql_attempts
-                for result in selected
+                result.total_sql_attempts for result in selected
             ),
         ),
         unsafe_operation_attempts=sum(
@@ -2062,9 +2138,9 @@ def render_report(
             "",
             "## Definitions",
             "",
-            "Top-1 and Top-3 use all attempted case/variant pairs as the denominator; errors, timeouts, unresolved cases, and abstentions are incorrect.",
+            "Top-1 uses only the adapter's explicit primary_prediction; Full Harness therefore abstains when the production validator returns null. Top-3 uses all attempted case/variant pairs as the denominator; errors, timeouts, unresolved cases, and abstentions are incorrect.",
             "Top-3 uses the first three valid, deduplicated canonical labels. Unknown labels remain invalid and are never coerced.",
-            "Invalid SQL rate is invalid SQL attempts divided by SQL attempts. SQL parser, read-only, validation, and execution failures count; a valid empty result does not.",
+            "Invalid SQL rate is invalid SQL attempts divided by SQL attempts. Blocked unsafe/invalid SQL and failed allowed SQL tool results count; budget blocks and valid empty results do not, and a false sql_validation.passed flag alone does not.",
             "Unsafe operation rate and duplicate operation rate use actual GuardrailRuntime preflight reasons divided by total tool attempts.",
             "Known cost is null/unknown unless both input and output token counts and both configured rates are available; unknown is never reported as zero.",
             "",
@@ -2113,6 +2189,7 @@ def load_ablation_config(
     path: str | Path,
     *,
     smoke: bool = False,
+    case_ids: Sequence[str] | None = None,
     run_id: str | None = None,
 ) -> AblationConfig:
     """Load YAML config without ever persisting or printing credentials."""
@@ -2121,8 +2198,9 @@ def load_ablation_config(
     if not isinstance(payload, Mapping):
         raise TypeError("ablation config must be a YAML object")
     values = dict(payload)
+    if case_ids is not None:
+        values["case_ids"] = list(case_ids)
     if smoke:
-        values["case_ids"] = ["F01-001", "F03-001", "F06-001", "F11-001", "F12-001"]
         values["model_provider"] = "mock"
         values["model_name"] = "deterministic-smoke"
         values["run_kind"] = "smoke"

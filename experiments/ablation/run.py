@@ -13,6 +13,8 @@ if str(SOURCE_ROOT) not in sys.path:
 
 from benchmark.ablation import AblationRunner, full_run_blocker, load_ablation_config
 
+SMOKE_CASE_IDS = ("F01-001", "F03-001", "F06-001", "F11-001", "F12-001")
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -32,7 +34,12 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.smoke and args.full:
         raise SystemExit("--smoke and --full are mutually exclusive")
-    config = load_ablation_config(args.config, smoke=args.smoke, run_id=args.run_id)
+    config = load_ablation_config(
+        args.config,
+        smoke=args.smoke,
+        case_ids=SMOKE_CASE_IDS if args.smoke else None,
+        run_id=args.run_id,
+    )
     if args.resume:
         config = config.model_copy(update={"resume": True})
     if args.full and not config.is_full_selection:
