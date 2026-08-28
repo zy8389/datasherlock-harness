@@ -89,7 +89,7 @@ VariantName = Literal[
     "full_harness",
 ]
 RunStatus = Literal["completed", "error", "timed_out"]
-RunKind = Literal["full", "smoke"]
+RunKind = Literal["full", "smoke", "pilot"]
 
 VARIANT_ORDER: tuple[VariantName, ...] = (
     "single_prompt",
@@ -427,6 +427,38 @@ def full_run_blocker(
 
     if config.run_kind != "full" or model_client_factory is not None:
         return None
+    if config.model_provider == "openai":
+        settings = ModelSettings(
+            model_provider=config.model_provider,
+            openai_model=config.model_name,
+            openai_base_url=config.model_base_url,
+            llm_timeout_seconds=config.model_timeout_seconds,
+            llm_max_retries=config.model_retries,
+            llm_retry_base_delay_seconds=config.model_retry_base_delay_seconds,
+        )
+        if settings.openai_api_key is None:
+            return "OPENAI_API_KEY is not configured"
+    return None
+
+
+def run_blocker(
+    config: AblationConfig,
+    *,
+    model_client_factory: ModelClientFactory | None = None,
+) -> str | None:
+    """Return a preflight blocker for real-provider run kinds."""
+
+    if config.run_kind != "pilot":
+        return full_run_blocker(
+            config,
+            model_client_factory=model_client_factory,
+        )
+    if model_client_factory is not None:
+        return None
+    if config.is_full_selection:
+        return "pilot requires a canonical case subset"
+    if config.model_provider == "mock":
+        return "mock provider is reserved for deterministic smoke"
     if config.model_provider == "openai":
         settings = ModelSettings(
             model_provider=config.model_provider,
@@ -987,6 +1019,10 @@ class AblationVariantExecutor:
                 output_dir=runtime_input.database_path.parent,
                 benchmark_run_id="runtime",
                 model_provider=self.config.model_provider,
+                model_base_url=self.config.model_base_url,
+                model_timeout_seconds=self.config.model_timeout_seconds,
+                model_retries=self.config.model_retries,
+                model_retry_base_delay_seconds=self.config.model_retry_base_delay_seconds,
                 mock_plan=self.config.mock_plan,
                 checkpoint_enabled=False,
                 max_planner_retries=self.config.max_planner_retries,
@@ -1778,12 +1814,14 @@ class AblationRunner:
         self.run_dir = _run_dir(config)
 
     def run(self) -> AblationRun:
-        blocker = full_run_blocker(
+        blocker = run_blocker(
             self.config,
             model_client_factory=self.model_client_factory,
         )
         if blocker is not None:
-            raise RuntimeError(f"FULL RUN = BLOCKED: {blocker}")
+            raise RuntimeError(
+                f"{self.config.run_kind.upper()} RUN = BLOCKED: {blocker}"
+            )
         manifests = _load_manifests(self.config, self.cases_directory)
         case_inputs = self._prepare_case_inputs(manifests)
         existing = self._load_existing_results()
@@ -2101,7 +2139,11 @@ def render_report(
             "This is a deterministic wiring smoke and must not be read as scientific "
             "ablation accuracy."
             if config.run_kind == "smoke"
-            else "This report contains the configured full ablation run."
+            else (
+                "This report contains the configured real-provider pilot subset."
+                if config.run_kind == "pilot"
+                else "This report contains the configured full ablation run."
+            )
         ),
         "",
         f"Run ID: `{config.run_id}`",
@@ -2242,6 +2284,7 @@ __all__ = [
     "load_ablation_config",
     "recompute_report",
     "render_report",
+    "run_blocker",
     "score_execution",
     "serialize_runtime_input",
     "validate_fairness",

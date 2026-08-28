@@ -220,3 +220,4 @@ data/processed/
 *.duckdb
 *.parquet
 experiments/ablation/results/
+.runtime/

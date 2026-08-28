@@ -11,7 +11,12 @@ SOURCE_ROOT = REPOSITORY_ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from benchmark.ablation import AblationRunner, full_run_blocker, load_ablation_config
+from benchmark.ablation import (
+    AblationRunner,
+    full_run_blocker,
+    load_ablation_config,
+    run_blocker,
+)
 
 SMOKE_CASE_IDS = ("F01-001", "F03-001", "F06-001", "F11-001", "F12-001")
 
@@ -51,6 +56,11 @@ def main(argv: list[str] | None = None) -> int:
         blocker = full_run_blocker(config)
         if blocker is not None:
             print(f"FULL RUN = BLOCKED: {blocker}")
+            return 2
+    elif config.run_kind == "pilot":
+        blocker = run_blocker(config)
+        if blocker is not None:
+            print(f"PILOT RUN = BLOCKED: {blocker}")
             return 2
     result = AblationRunner(config).run()
     print(f"artifacts: {result.run_dir}")

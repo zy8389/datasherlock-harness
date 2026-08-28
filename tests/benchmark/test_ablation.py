@@ -62,12 +62,13 @@ class _SequenceClient:
 
 
 def _config(tmp_path: Path, **updates: Any) -> AblationConfig:
-    return AblationConfig(
-        case_ids=["F01-001"],
-        model_name="mock-model",
-        output_dir=tmp_path,
-        **updates,
-    )
+    values: dict[str, Any] = {
+        "case_ids": ["F01-001"],
+        "model_name": "mock-model",
+        "output_dir": tmp_path,
+    }
+    values.update(updates)
+    return AblationConfig(**values)
 
 
 def _runtime(tmp_path: Path) -> AblationRuntimeInput:
@@ -254,10 +255,19 @@ def test_full_harness_adapter_reuses_production_builder(
 ) -> None:
     from benchmark import ablation
 
-    calls: list[tuple[str, str]] = []
+    calls: list[tuple[str, str, str | None, float, int, float]] = []
 
     def fake_builder(config: Any, *, model_client_factory: Any) -> Any:
-        calls.append((config.model_provider, config.model_name))
+        calls.append(
+            (
+                config.model_provider,
+                config.model_name,
+                config.model_base_url,
+                config.model_timeout_seconds,
+                config.model_retries,
+                config.model_retry_base_delay_seconds,
+            )
+        )
 
         def execute(_runtime: Any) -> Any:
             return ablation.HarnessExecutionOutput(
@@ -277,10 +287,77 @@ def test_full_harness_adapter_reuses_production_builder(
         return execute
 
     monkeypatch.setattr(ablation, "build_harness_executor", fake_builder)
-    output = ablation.FullHarnessAdapter(_config(tmp_path))(_runtime(tmp_path))
-    assert calls == [("mock", "mock-model")]
+    config = _config(
+        tmp_path,
+        model_base_url="https://model.example/v1",
+        model_timeout_seconds=91.5,
+        model_retries=4,
+        model_retry_base_delay_seconds=1.25,
+    )
+    output = ablation.FullHarnessAdapter(config)(_runtime(tmp_path))
+    assert calls == [("mock", "mock-model", "https://model.example/v1", 91.5, 4, 1.25)]
     assert output.variant == "full_harness"
     assert output.completion_status == "UNRESOLVED"
+
+
+def test_all_ablation_adapters_bind_the_same_model_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from benchmark import ablation
+
+    config = _config(
+        tmp_path,
+        model_provider="openai",
+        model_name="gpt-test",
+        model_base_url=" https://model.example/v1 ",
+        model_timeout_seconds=91.5,
+        model_retries=4,
+        model_retry_base_delay_seconds=1.25,
+    )
+    captured: list[Any] = []
+    sentinel = object()
+    monkeypatch.setattr(
+        ablation,
+        "create_model_client",
+        lambda settings: captured.append(settings) or sentinel,
+    )
+
+    adapters = (
+        ablation.SinglePromptAdapter,
+        ablation.ReActAdapter,
+        ablation.StateGraphNoValidatorAdapter,
+        ablation.FullHarnessAdapter,
+    )
+    runtime = _runtime(tmp_path)
+    for adapter_type in adapters:
+        assert adapter_type(config)._model_client(runtime) is sentinel
+
+    assert len(captured) == len(adapters)
+    assert [
+        (
+            settings.model_provider,
+            settings.openai_model,
+            settings.openai_base_url,
+            settings.llm_timeout_seconds,
+            settings.llm_max_retries,
+            settings.llm_retry_base_delay_seconds,
+        )
+        for settings in captured
+    ] == [
+        ("openai", "gpt-test", "https://model.example/v1", 91.5, 4, 1.25)
+    ] * len(adapters)
+
+
+def test_pilot_requires_a_real_provider(tmp_path: Path) -> None:
+    from benchmark.ablation import run_blocker
+
+    config = _config(tmp_path, run_kind="pilot")
+    assert run_blocker(config) == "mock provider is reserved for deterministic smoke"
+
+    full_config = config.model_copy(
+        update={"case_ids": list(CANONICAL_CASE_IDS), "model_provider": "openai"}
+    )
+    assert run_blocker(full_config) == "pilot requires a canonical case subset"
 
 
 def test_full_harness_unvalidated_hypothesis_cannot_receive_top1_credit(
