@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "run_id": "full-60-4arch-20260828",
+  "run_kind": "full",
+  "source_commit": "d881541729dd89aba8d973bb6ae4663a5718f06c",
+  "case_selection": "F01-001 through F12-005, 60 canonical cases",
+  "variant_order": [
+    "single_prompt",
+    "react",
+    "state_graph_no_validator",
+    "full_harness"
+  ],
+  "model_provider": "openai",
+  "model_name": "gpt-5.6-luna",
+  "model_base_url": "https://sshzyu.com",
+  "model_timeout_seconds": 60.0,
+  "model_retries": 2,
+  "model_retry_base_delay_seconds": 0.5,
+  "per_case_timeout_seconds": 180.0,
+  "budgets": {
+    "max_agent_rounds": 20,
+    "max_tool_calls": 20,
+    "max_sql_calls": 15,
+    "max_result_rows": 1000,
+    "max_duplicate_calls": 1,
+    "max_planner_retries": 2
+  },
+  "input_cost_per_token": null,
+  "output_cost_per_token": null,
+  "credentials_included": false
+}

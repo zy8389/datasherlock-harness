@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "run_status": "SCIENTIFIC_RUN_VALID",
+  "taxonomy": [
+    "PROVIDER_INFRASTRUCTURE",
+    "CASE_DEADLINE_PROVIDER_LATENCY",
+    "GUARDRAIL_EXPECTED",
+    "MODEL_PLAN_INVALID",
+    "TOOL_RUNTIME_EXPECTED",
+    "IMPLEMENTATION_BUG",
+    "UNRESOLVED",
+    "OTHER"
+  ],
+  "provider_readiness": {
+    "attempts": 3,
+    "passed": 3,
+    "transport_retries": 0
+  },
+  "provider_infrastructure_failures": 0,
+  "case_deadline_provider_latency_failures": 0,
+  "counts_by_variant": {
+    "single_prompt": {},
+    "react": {
+      "GUARDRAIL_EXPECTED": 1,
+      "TOOL_RUNTIME_EXPECTED": 2
+    },
+    "state_graph_no_validator": {
+      "MODEL_PLAN_INVALID": 2,
+      "TOOL_RUNTIME_EXPECTED": 51
+    },
+    "full_harness": {
+      "MODEL_PLAN_INVALID": 2,
+      "TOOL_RUNTIME_EXPECTED": 51
+    }
+  },
+  "totals": {
+    "GUARDRAIL_EXPECTED": 1,
+    "MODEL_PLAN_INVALID": 4,
+    "TOOL_RUNTIME_EXPECTED": 104
+  },
+  "notes": [
+    "The known detect_schema_drift execution message requiring at least two schema snapshots for events is classified as TOOL_RUNTIME_EXPECTED.",
+    "The MODEL_PLAN_INVALID records are model-generated SQL statements rejected by DuckDB binder validation.",
+    "The GUARDRAIL_EXPECTED record is an unsafe SQL preflight block.",
+    "No accepted result contains an IMPLEMENTATION_BUG, PROVIDER_INFRASTRUCTURE, CASE_DEADLINE_PROVIDER_LATENCY, UNRESOLVED, or OTHER classification."
+  ]
+}
