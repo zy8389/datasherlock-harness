@@ -18,15 +18,21 @@ from benchmark.ablation import (
     AblationExecutionOutput,
     AblationRunner,
     AblationRuntimeInput,
+    StructuredReactAction,
     compute_metrics,
     recompute_report,
     score_execution,
     serialize_runtime_input,
+    structured_react_action_to_action,
     validate_fairness,
 )
 from benchmark.case_generator import load_case_manifest
 from llm.models import ModelCallResult, ModelUsage
-from tools.registry import build_default_tool_registry
+from tools.registry import (
+    ToolArgumentsError,
+    UnknownToolError,
+    build_default_tool_registry,
+)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -149,6 +155,7 @@ def test_react_loop_is_bounded_and_uses_current_guardrails(tmp_path: Path) -> No
                 "type": "tool",
                 "tool": "sql_query",
                 "arguments": {"sql": "SELECT 1"},
+                "ranked_root_causes": [],
             }
         ]
     )
@@ -187,13 +194,173 @@ def test_react_primary_prediction_is_first_final_label(tmp_path: Path) -> None:
     from benchmark.ablation import ReActAdapter
 
     client = _SequenceClient(
-        [{"type": "final", "ranked_root_causes": ["missing_partition", "data_delay"]}]
+        [
+            {
+                "type": "final",
+                "tool": None,
+                "arguments_json": "{}",
+                "ranked_root_causes": ["missing_partition", "data_delay"],
+            }
+        ]
     )
     output = ReActAdapter(
         _config(tmp_path), model_client_factory=lambda _runtime: client
     )(_runtime(tmp_path))
     assert output.primary_prediction == "missing_partition"
     assert output.ranked_root_causes[0] == output.primary_prediction
+
+
+def test_structured_react_schema_is_flat_strict_and_closed() -> None:
+    schema = StructuredReactAction.model_json_schema()
+
+    assert schema["type"] == "object"
+    assert "anyOf" not in schema
+    assert "oneOf" not in schema
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == {
+        "type",
+        "tool",
+        "arguments_json",
+        "ranked_root_causes",
+    }
+    assert schema["properties"]["arguments_json"]["type"] == "string"
+    assert "arguments" not in schema["properties"]
+
+    def assert_no_free_form_object(node: object) -> None:
+        if isinstance(node, dict):
+            if node.get("type") == "object":
+                assert node.get("additionalProperties") is False
+            for child in node.values():
+                assert_no_free_form_object(child)
+        elif isinstance(node, list):
+            for child in node:
+                assert_no_free_form_object(child)
+
+    assert_no_free_form_object(schema)
+
+
+def test_structured_react_accepts_local_canonical_arguments_payload() -> None:
+    structured = StructuredReactAction.model_validate(
+        {
+            "type": "tool",
+            "tool": "sql_query",
+            "arguments": {"sql": "SELECT 1"},
+            "ranked_root_causes": [],
+        }
+    )
+
+    assert structured.arguments_json == '{"sql":"SELECT 1"}'
+    assert "arguments" not in structured.model_dump()
+
+
+def test_structured_react_converter_validates_sql_and_nested_scope() -> None:
+    registry = build_default_tool_registry()
+    sql_action = structured_react_action_to_action(
+        StructuredReactAction(
+            type="tool",
+            tool="sql_query",
+            arguments_json='{"sql":"SELECT 1"}',
+            ranked_root_causes=[],
+        ),
+        registry,
+    )
+    assert sql_action.arguments == {"sql": "SELECT 1"}
+
+    nested_scope = {
+        "table": "events",
+        "column": "user_id",
+        "threshold": 0.01,
+        "scope": {
+            "equals": {"device": "android"},
+            "time_column": "event_time",
+            "start": "2026-01-30T00:00:00Z",
+            "end": "2026-01-31T00:00:00Z",
+        },
+    }
+    data_quality_action = structured_react_action_to_action(
+        StructuredReactAction(
+            type="tool",
+            tool="check_null_rate",
+            arguments_json=json.dumps(nested_scope, sort_keys=True),
+            ranked_root_causes=[],
+        ),
+        registry,
+    )
+    assert data_quality_action.arguments == nested_scope
+
+
+@pytest.mark.parametrize(
+    ("arguments_json", "message"),
+    [
+        ("{not-json", "valid JSON"),
+        ("[1, 2]", "JSON object"),
+    ],
+)
+def test_structured_react_rejects_invalid_argument_payloads(
+    arguments_json: str, message: str
+) -> None:
+    with pytest.raises((ValueError, TypeError), match=message):
+        StructuredReactAction(
+            type="tool",
+            tool="sql_query",
+            arguments_json=arguments_json,
+            ranked_root_causes=[],
+        )
+
+
+def test_structured_react_converter_uses_registry_for_tool_and_argument_checks() -> None:
+    registry = build_default_tool_registry()
+    with pytest.raises(ToolArgumentsError, match="unknown field"):
+        structured_react_action_to_action(
+            StructuredReactAction(
+                type="tool",
+                tool="sql_query",
+                arguments_json='{"sql":"SELECT 1","extra":true}',
+                ranked_root_causes=[],
+            ),
+            registry,
+        )
+    with pytest.raises(UnknownToolError, match="unknown tool"):
+        structured_react_action_to_action(
+            StructuredReactAction(
+                type="tool",
+                tool="not_registered",
+                arguments_json="{}",
+                ranked_root_causes=[],
+            ),
+            registry,
+        )
+
+
+def test_structured_react_final_action_contract() -> None:
+    final = structured_react_action_to_action(
+        StructuredReactAction(
+            type="final",
+            tool=None,
+            arguments_json="{}",
+            ranked_root_causes=["missing_partition"],
+        ),
+        build_default_tool_registry(),
+    )
+    assert final.type == "final"
+    assert final.tool is None
+    assert final.arguments == {}
+    assert final.ranked_root_causes == ["missing_partition"]
+
+    with pytest.raises((ValueError, TypeError), match="arguments_json"):
+        StructuredReactAction(
+            type="final",
+            tool=None,
+            arguments_json='{"sql":"SELECT 1"}',
+            ranked_root_causes=[],
+        )
+    with pytest.raises((ValueError, TypeError), match="ranked_root_causes"):
+        StructuredReactAction(
+            type="tool",
+            tool="sql_query",
+            arguments_json='{"sql":"SELECT 1"}',
+            ranked_root_causes=["missing_partition"],
+        )
 
 
 def test_state_graph_without_validator_never_sets_authoritative_root_cause(

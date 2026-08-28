@@ -261,6 +261,96 @@ class ReactAction(BaseModel):
         return self
 
 
+class StructuredReactAction(BaseModel):
+    """Strict provider-facing ReAct action with JSON arguments encoded as text."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    type: Literal["tool", "final"]
+    tool: str | None
+    arguments_json: str
+    ranked_root_causes: list[str] = Field(max_length=3)
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_canonical_action_payload(cls, value: object) -> object:
+        """Adapt local canonical actions without exposing object arguments."""
+
+        if isinstance(value, BaseModel) and not isinstance(value, cls):
+            value = value.model_dump(mode="json")
+        if not isinstance(value, Mapping):
+            return value
+
+        payload = dict(value)
+        if "arguments_json" not in payload and "arguments" in payload:
+            payload["arguments_json"] = json.dumps(
+                payload["arguments"],
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        payload.pop("arguments", None)
+        return payload
+
+    @model_validator(mode="after")
+    def validate_action(self) -> StructuredReactAction:
+        try:
+            decoded = json.loads(self.arguments_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("arguments_json must be valid JSON") from exc
+        if not isinstance(decoded, Mapping):
+            raise TypeError("arguments_json must decode to a JSON object")
+
+        if self.type == "tool":
+            if not self.tool:
+                raise ValueError("tool actions require a non-empty tool")
+            if self.ranked_root_causes:
+                raise ValueError("tool actions must have empty ranked_root_causes")
+            return self
+
+        if self.tool is not None:
+            raise ValueError("final actions must have tool=null")
+        if decoded != {}:
+            raise ValueError('final actions must have arguments_json="{}"')
+        return self
+
+
+def structured_react_action_to_action(
+    structured: StructuredReactAction,
+    registry: ToolRegistry,
+) -> ReactAction:
+    """Convert one provider DTO into a registry-validated canonical action."""
+
+    try:
+        decoded = json.loads(structured.arguments_json)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("arguments_json must be valid JSON") from exc
+    if not isinstance(decoded, Mapping):
+        raise TypeError("arguments_json must decode to a JSON object")
+
+    arguments = dict(decoded)
+    if structured.type == "tool":
+        if not structured.tool:
+            raise ValueError("tool actions require a non-empty tool")
+        registry.validate_arguments(structured.tool, arguments)
+        return ReactAction(
+            type="tool",
+            tool=structured.tool,
+            arguments=cast(dict[str, JsonValue], arguments),
+            ranked_root_causes=[],
+        )
+
+    if structured.tool is not None:
+        raise ValueError("final actions must have tool=null")
+    if arguments != {}:
+        raise ValueError('final actions must have arguments_json="{}"')
+    return ReactAction(
+        type="final",
+        tool=None,
+        arguments={},
+        ranked_root_causes=structured.ranked_root_causes,
+    )
+
+
 class AblationExecutionOutput(BaseModel):
     """Comparable observable result returned by every architecture adapter."""
 
@@ -581,9 +671,11 @@ def _mock_response_factory(
                     "null_value_anomaly",
                 ]
             )
-        if response_model is ReactAction:
-            return ReactAction(
+        if response_model is StructuredReactAction:
+            return StructuredReactAction(
                 type="final",
+                tool=None,
+                arguments_json="{}",
                 ranked_root_causes=[
                     "missing_partition",
                     "data_delay",
@@ -749,10 +841,18 @@ class AblationVariantExecutor:
                 action_result = self._call_model(
                     client,
                     system_prompt=(
-                        "You are a bounded ReAct diagnostician. On each turn return "
-                        "one public JSON action: type=tool with a registered read-only "
-                        "tool and arguments, or type=final with up to three ranked "
-                        "canonical root causes. Never provide private chain-of-thought."
+                        "You are a bounded ReAct diagnostician. Return all four fields "
+                        "on every turn: type, tool, arguments_json, and "
+                        "ranked_root_causes. For a tool action, set tool to one "
+                        "available tool name, arguments_json to a JSON-encoded object "
+                        "string matching that tool's advertised schema, and "
+                        "ranked_root_causes to []. For a final action, set tool to "
+                        "null, arguments_json to \"{}\", and ranked_root_causes to "
+                        "up to three canonical labels. Never provide private "
+                        "chain-of-thought. Example tool action: "
+                        "{\"type\":\"tool\",\"tool\":\"sql_query\","
+                        "\"arguments_json\":\"{\\\"sql\\\":\\\"SELECT COUNT(*) "
+                        "FROM events\\\"}\",\"ranked_root_causes\":[]}"
                     ),
                     user_prompt=json.dumps(
                         {
@@ -764,10 +864,13 @@ class AblationVariantExecutor:
                         },
                         sort_keys=True,
                     ),
-                    response_model=ReactAction,
+                    response_model=StructuredReactAction,
                 )
                 usages.append(action_result.usage)
-                action = ReactAction.model_validate(action_result.parsed)
+                structured_action = StructuredReactAction.model_validate(
+                    action_result.parsed
+                )
+                action = structured_react_action_to_action(structured_action, registry)
                 if action.type == "final":
                     status = "completed"
                     return _output(
@@ -2278,6 +2381,7 @@ __all__ = [
     "ReActAdapter",
     "SinglePromptAdapter",
     "StateGraphNoValidatorAdapter",
+    "StructuredReactAction",
     "compute_metrics",
     "execute_variant_with_timeout",
     "full_run_blocker",
@@ -2287,5 +2391,6 @@ __all__ = [
     "run_blocker",
     "score_execution",
     "serialize_runtime_input",
+    "structured_react_action_to_action",
     "validate_fairness",
 ]
