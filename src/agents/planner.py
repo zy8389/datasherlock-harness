@@ -371,6 +371,7 @@ def validate_plan_semantics(
         )
     validate_root_cause_types(plan)
     validate_plan_tools(plan, tool_registry)
+    validate_plan_diagnostic_tool_bindings(plan)
 
 
 def validate_root_cause_types(plan: InvestigationPlan) -> None:
@@ -388,6 +389,28 @@ def validate_root_cause_types(plan: InvestigationPlan) -> None:
         raise PlannerValidationError(
             "non-canonical root_cause_type value(s): " + ", ".join(invalid)
         )
+
+
+def validate_plan_diagnostic_tool_bindings(plan: InvestigationPlan) -> None:
+    """Require every step to use a tool mapped to its candidate fault family."""
+
+    tools_by_root_cause = {
+        fault.root_cause_type: frozenset(fault.diagnostic_tools)
+        for fault in load_fault_catalog().faults
+    }
+    hypotheses_by_id = {
+        hypothesis.hypothesis_id: hypothesis for hypothesis in plan.hypotheses
+    }
+
+    for step in plan.steps:
+        hypothesis = hypotheses_by_id[step.hypothesis_id]
+        allowed_tools = tools_by_root_cause[hypothesis.root_cause_type]
+        if step.tool not in allowed_tools:
+            allowed_text = ", ".join(sorted(allowed_tools))
+            raise PlannerValidationError(
+                f"tool {step.tool!r} is not mapped to root_cause_type "
+                f"{hypothesis.root_cause_type!r}; allowed tool(s): {allowed_text}"
+            )
 
 
 PLANNER_SYSTEM_PROMPT: Final[str] = """You are the DataSherlock investigation Planner.

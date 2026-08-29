@@ -38,7 +38,7 @@ metrics:
       - sql_query
       - check_null_rate
       - check_freshness
-      - detect_distribution_drift
+      - detect_schema_drift
 
   - id: new_users
     name: New Users
@@ -71,11 +71,7 @@ metrics:
       - users.register_time
       - users.region
       - users.device_type
-    diagnostic_tools:
-      - sql_query
-      - check_null_rate
-      - check_freshness
-      - detect_distribution_drift
+    diagnostic_tools: [sql_query]
 
   - id: paid_users
     name: Paid Users
@@ -130,7 +126,7 @@ metrics:
       - subscriptions.start_time
       - subscriptions.end_time
       - subscriptions.subscription_status
-    diagnostic_tools: [sql_query, check_null_rate]
+    diagnostic_tools: [sql_query]
 
   - id: ai_task_count
     name: AI Task Count
@@ -168,7 +164,6 @@ metrics:
       - experiment_assignments.user_id
     diagnostic_tools:
       - sql_query
-      - check_duplicate_rate
       - detect_distribution_drift
 
   - id: average_session_duration
@@ -265,4 +260,4 @@ metrics:
       - subscriptions.user_id
       - subscriptions.start_time
       - experiment_assignments.variant
-    diagnostic_tools: [sql_query, detect_distribution_drift]
+    diagnostic_tools: [sql_query]

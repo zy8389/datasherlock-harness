@@ -14,9 +14,10 @@
   `schema_snapshots`、`metric_versions` 或 `experiment_configs`。
 - `check_freshness`、`check_duplicate_rate`、`check_null_rate`、
   `detect_schema_drift` 和 `detect_distribution_drift` 是受注册表约束的只读补充检查：
-  F01/F04 使用 freshness，F02/F08 使用 duplicate-rate，F03 使用 null-rate，
-  F09/F12 使用 distribution-drift，F10 使用 schema-drift。它们提供结构化观察，
-  但不替代 metadata-dependent case 所需的独立证据路径。
+  F01 使用 freshness，F03 使用 null-rate，F09 使用 distribution-drift，F10 使用
+  schema-drift。F02/F04/F08/F12 使用 `sql_query`，因为当前 duplicate-rate 缺少事故范围，
+  freshness 无法识别部分延迟，而 distribution-drift 无法比较 F12 所需的故障前基线；它们不替代
+  metadata-dependent case 所需的独立证据路径。
 - F01/F04/F05/F10/F11/F12 的 `evidence_paths` 是验收合同；不要用两个业务查询冒充独立证据。
 - 所有查询必须是只读 SQL，并由 SQL Runner 校验。
 

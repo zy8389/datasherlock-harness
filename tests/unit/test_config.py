@@ -71,37 +71,32 @@ def test_metric_diagnostic_tools_match_supported_verification_signals() -> None:
         "sql_query",
         "check_null_rate",
         "check_freshness",
-        "detect_distribution_drift",
+        "detect_schema_drift",
     ]
-    assert metrics["new_users"].diagnostic_tools == [
-        "sql_query",
-        "check_null_rate",
-        "check_freshness",
-        "detect_distribution_drift",
-    ]
-    assert metrics["paid_users"].diagnostic_tools == ["sql_query", "check_null_rate"]
+    assert metrics["new_users"].diagnostic_tools == ["sql_query"]
+    assert metrics["paid_users"].diagnostic_tools == ["sql_query"]
     assert metrics["ai_task_count"].diagnostic_tools == [
         "sql_query",
-        "check_duplicate_rate",
         "detect_distribution_drift",
     ]
     assert metrics["average_session_duration"].diagnostic_tools == ["sql_query"]
-    assert metrics["conversion_rate"].diagnostic_tools == [
-        "sql_query",
-        "detect_distribution_drift",
-    ]
+    assert metrics["conversion_rate"].diagnostic_tools == ["sql_query"]
 
 
 def test_fault_catalog_has_queryable_verification_mappings() -> None:
     catalog = load_fault_catalog()
-    metric_ids = {metric.id for metric in load_metrics_config().metrics}
+    metrics = {metric.id: metric for metric in load_metrics_config().metrics}
     available_tools = set(build_default_tool_registry().names())
 
     for fault in catalog.faults:
-        assert set(fault.affected_metrics).issubset(metric_ids)
+        assert set(fault.affected_metrics).issubset(metrics)
         assert fault.verification_fields
         assert all("." in field for field in fault.verification_fields)
         assert set(fault.diagnostic_tools).issubset(available_tools)
+        for metric_id in fault.affected_metrics:
+            assert set(fault.diagnostic_tools).issubset(
+                metrics[metric_id].diagnostic_tools
+            )
 
     payload = catalog.model_dump()
     payload["faults"][0]["diagnostic_tools"].append("sql_query")
@@ -114,17 +109,17 @@ def test_fault_diagnostic_tools_match_supported_injector_signals() -> None:
 
     expected_tools = {
         "F01": ["sql_query", "check_freshness"],
-        "F02": ["sql_query", "check_duplicate_rate"],
+        "F02": ["sql_query"],
         "F03": ["sql_query", "check_null_rate"],
-        "F04": ["sql_query", "check_freshness"],
+        "F04": ["sql_query"],
         "F05": ["sql_query"],
         "F06": ["sql_query"],
         "F07": ["sql_query"],
-        "F08": ["sql_query", "check_duplicate_rate"],
+        "F08": ["sql_query"],
         "F09": ["sql_query", "detect_distribution_drift"],
         "F10": ["sql_query", "detect_schema_drift"],
         "F11": ["sql_query"],
-        "F12": ["sql_query", "detect_distribution_drift"],
+        "F12": ["sql_query"],
     }
 
     assert {

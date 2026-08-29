@@ -40,7 +40,7 @@ faults:
       - events.event_time
       - pipeline_runs.status
       - pipeline_runs.error_type
-    diagnostic_tools: [sql_query, check_duplicate_rate]
+    diagnostic_tools: [sql_query]
   - id: F03
     root_cause_type: null_value_anomaly
     affected_metrics: [daily_active_users]
@@ -80,7 +80,7 @@ faults:
       - partition_metadata.status
       - pipeline_runs.status
       - pipeline_runs.error_type
-    diagnostic_tools: [sql_query, check_freshness]
+    diagnostic_tools: [sql_query]
   - id: F05
     root_cause_type: timezone_error
     affected_metrics: [daily_active_users]
@@ -157,7 +157,7 @@ faults:
       - experiment_assignments.user_id
       - metric_versions.query
       - metric_versions.definition_hash
-    diagnostic_tools: [sql_query, check_duplicate_rate]
+    diagnostic_tools: [sql_query]
   - id: F09
     root_cause_type: field_drift
     affected_metrics: [ai_task_count]
@@ -237,4 +237,4 @@ faults:
       - experiment_configs.control_ratio
       - experiment_configs.treatment_ratio
       - subscriptions.start_time
-    diagnostic_tools: [sql_query, detect_distribution_drift]
+    diagnostic_tools: [sql_query]

@@ -13,6 +13,7 @@ from agents.planner import (
     build_fallback_plan,
     build_planner_prompt,
     load_metric_context,
+    validate_plan_semantics,
     validate_plan_tools,
 )
 from config.faults import load_fault_catalog
@@ -233,6 +234,61 @@ def test_planner_semantics_validate_a_data_quality_tool_against_registry() -> No
             fallback.model_copy(update={"steps": [invalid_step]}),
             build_default_tool_registry(),
         )
+
+
+def test_planner_semantics_rejects_tool_outside_fault_diagnostic_mapping() -> None:
+    alert, metric_context = _request_for(dict(PLANNER_ALERT_EXAMPLES[0]))
+    request = PlannerInput(alert=alert, metric_context=metric_context)
+    fallback = build_fallback_plan(request)
+    step = fallback.steps[0].model_copy(
+        update={
+            "tool": "check_null_rate",
+            "arguments": {
+                "table": "events",
+                "column": "user_id",
+                "threshold": 0.01,
+            },
+        }
+    )
+
+    with pytest.raises(
+        PlannerValidationError,
+        match="not mapped to root_cause_type 'missing_partition'",
+    ):
+        validate_plan_semantics(
+            fallback.model_copy(update={"steps": [step]}),
+            request,
+            build_default_tool_registry(),
+        )
+
+
+def test_planner_semantics_accepts_tool_mapped_to_fault_root_cause() -> None:
+    alert, metric_context = _request_for(dict(PLANNER_ALERT_EXAMPLES[0]))
+    request = PlannerInput(alert=alert, metric_context=metric_context)
+    fallback = build_fallback_plan(request)
+    step = fallback.steps[0].model_copy(
+        update={
+            "tool": "check_freshness",
+            "arguments": {
+                "table": "events",
+                "timestamp_column": "event_time",
+                "reference_time": "2026-01-31T00:00:00+00:00",
+                "max_age": 86400,
+                "scope": {
+                    "equals": {"device_type": "android"},
+                    "time_column": "event_time",
+                    "start": "2026-01-30T00:00:00+00:00",
+                    "end": "2026-01-31T00:00:00+00:00",
+                },
+            },
+        }
+    )
+
+    validate_plan_semantics(
+        fallback.model_copy(update={"steps": [step]}),
+        request,
+        build_default_tool_registry(),
+    )
 
 
 def test_semantic_unknown_tool_is_repaired_then_accepted() -> None:
