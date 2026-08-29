@@ -582,6 +582,59 @@ def test_production_adapter_selection_and_fail_closed_config(tmp_path: Path) -> 
         build_harness_executor(config.model_copy(update={"model_name": "unknown-model"}))
 
 
+def test_current_harness_binds_configured_model_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from benchmark import runner
+
+    config = _config(
+        tmp_path,
+        "F01-001",
+        model_provider="openai",
+        model_name="gpt-test",
+        model_base_url="  https://model.example/v1  ",
+        model_timeout_seconds=91.5,
+        model_retries=4,
+        model_retry_base_delay_seconds=1.25,
+    )
+    runtime_input = build_runtime_input(
+        load_case_manifest("F01-001", CASES_DIRECTORY),
+        tmp_path / "transport.duckdb",
+        run_id="transport-00001",
+        config=config,
+    )
+    captured: list[Any] = []
+    sentinel = object()
+    monkeypatch.setattr(
+        runner,
+        "create_model_client",
+        lambda settings: captured.append(settings) or sentinel,
+    )
+
+    assert CurrentHarnessExecutor(config)._model_client(runtime_input) is sentinel
+    assert len(captured) == 1
+    settings = captured[0]
+    assert settings.model_provider == "openai"
+    assert settings.openai_model == "gpt-test"
+    assert settings.openai_base_url == "https://model.example/v1"
+    assert settings.llm_timeout_seconds == 91.5
+    assert settings.llm_max_retries == 4
+    assert settings.llm_retry_base_delay_seconds == 1.25
+
+
+def test_benchmark_transport_defaults_and_validation(tmp_path: Path) -> None:
+    config = _config(tmp_path, "F01-001")
+    assert config.model_base_url is None
+    assert config.model_timeout_seconds == 60.0
+    assert config.model_retries == 2
+    assert config.model_retry_base_delay_seconds == 0.5
+
+    with pytest.raises(ValueError, match="finite"):
+        _config(tmp_path, "F01-001", model_timeout_seconds=float("inf"))
+    with pytest.raises(ValueError, match="finite"):
+        _config(tmp_path, "F01-001", model_retry_base_delay_seconds=float("nan"))
+
+
 def test_deterministic_harness_smoke_checks_runtime_wiring_and_includes_f11(
     tmp_path: Path,
 ) -> None:

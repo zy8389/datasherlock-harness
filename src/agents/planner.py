@@ -13,7 +13,7 @@ from collections.abc import Callable, Mapping
 from datetime import date, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Final, TypeAlias, cast
+from typing import Annotated, Any, Final, TypeAlias, cast
 
 from pydantic import (
     BaseModel,
@@ -45,8 +45,8 @@ from llm.base import (
     is_model_client,
 )
 from tools.registry import (
-    ToolArgumentsError,
     ToolRegistry,
+    ToolRegistryError,
     build_default_tool_registry,
 )
 from tools.sql_runner import SqlRunnerError, validate_readonly_sql
@@ -315,6 +315,117 @@ class InvestigationPlan(BaseModel):
         return self
 
 
+class StructuredInvestigationStep(BaseModel):
+    """Strict provider-facing step DTO with JSON arguments encoded as text."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    step_id: str = Field(min_length=1)
+    purpose: str = Field(min_length=1)
+    hypothesis_id: str = Field(min_length=1)
+    tool: str = Field(min_length=1)
+    arguments_json: str = Field(min_length=1)
+    expected_evidence: list[Annotated[str, Field(min_length=1)]] = Field(min_length=1)
+    stop_condition: str = Field(min_length=1)
+
+    @field_validator("tool")
+    @classmethod
+    def reject_repair_tools(cls, value: str) -> str:
+        """Keep provider-generated plans inside the read-only phase."""
+
+        if value in UNSAFE_INVESTIGATION_TOOLS:
+            raise ValueError(f"repair tool is not allowed in an investigation plan: {value}")
+        return value
+
+
+class StructuredInvestigationPlan(BaseModel):
+    """Provider-facing DTO whose schema contains no free-form object fields."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    incident_id: str = Field(min_length=1)
+    hypotheses: list[Hypothesis] = Field(
+        min_length=MIN_HYPOTHESES,
+        max_length=MAX_HYPOTHESES,
+    )
+    steps: list[StructuredInvestigationStep] = Field(min_length=1, max_length=MAX_STEPS)
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_canonical_plan_payload(cls, value: object) -> object:
+        """Adapt canonical Python payloads without exposing ``arguments`` to providers."""
+
+        if isinstance(value, BaseModel) and not isinstance(value, cls):
+            value = value.model_dump(mode="json")
+        if not isinstance(value, Mapping):
+            return value
+
+        payload = dict(value)
+        raw_steps = payload.get("steps")
+        if not isinstance(raw_steps, list):
+            return payload
+
+        converted_steps: list[object] = []
+        for raw_step in raw_steps:
+            if not isinstance(raw_step, Mapping):
+                converted_steps.append(raw_step)
+                continue
+            step = dict(raw_step)
+            if "arguments_json" not in step and "arguments" in step:
+                step["arguments_json"] = json.dumps(
+                    step["arguments"],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            step.pop("arguments", None)
+            converted_steps.append(step)
+        payload["steps"] = converted_steps
+        return payload
+
+
+def structured_plan_to_investigation_plan(
+    structured: StructuredInvestigationPlan,
+    tool_registry: ToolRegistry,
+) -> InvestigationPlan:
+    """Convert provider DTO arguments into validated canonical dictionaries."""
+
+    canonical_steps: list[InvestigationStep] = []
+    for step in structured.steps:
+        try:
+            decoded = json.loads(step.arguments_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise PlannerValidationError(
+                f"step {step.step_id} arguments_json is not valid JSON"
+            ) from exc
+        if not isinstance(decoded, Mapping):
+            raise PlannerValidationError(
+                f"step {step.step_id} arguments_json must decode to a JSON object"
+            )
+
+        arguments = dict(decoded)
+        try:
+            tool_registry.validate_arguments(step.tool, arguments)
+        except ToolRegistryError as exc:
+            raise PlannerValidationError(str(exc)) from exc
+        canonical_steps.append(
+            InvestigationStep(
+                step_id=step.step_id,
+                purpose=step.purpose,
+                hypothesis_id=step.hypothesis_id,
+                tool=step.tool,
+                arguments=cast(JsonObject, arguments),
+                expected_evidence=step.expected_evidence,
+                stop_condition=step.stop_condition,
+            )
+        )
+
+    return InvestigationPlan(
+        incident_id=structured.incident_id,
+        hypotheses=structured.hypotheses,
+        steps=canonical_steps,
+    )
+
+
 class PlannerRunResult(BaseModel):
     """Auditable outcome of one Planner run, including fallback metadata."""
 
@@ -339,7 +450,7 @@ def validate_plan_tools(plan: InvestigationPlan, tool_registry: ToolRegistry) ->
             raise PlannerValidationError(f"unknown tool in investigation plan: {step.tool}")
         try:
             tool_registry.validate_arguments(step.tool, step.arguments)
-        except ToolArgumentsError as exc:
+        except ToolRegistryError as exc:
             raise PlannerValidationError(str(exc)) from exc
 
         definition = tool_registry.get(step.tool)
@@ -422,14 +533,35 @@ invent metric semantics that are absent from the supplied context.
 Output only one valid JSON object as the InvestigationPlan structured response.
 Produce 3 to 5 distinct
 hypotheses and no more than 10 steps. Every step must contain purpose,
-hypothesis_id, tool, arguments, expected_evidence, and stop_condition. Use only
+hypothesis_id, tool, arguments_json, expected_evidence, and stop_condition. Use only
 the tools listed under Available tools. Never invent a tool name. Investigation
 must remain read-only: do not declare a final root cause, write data, or produce
-repair actions. The JSON object must contain the fields "incident_id",
-"hypotheses", and "steps". Each step must contain "purpose", "hypothesis_id",
-"tool", "arguments", "expected_evidence", and "stop_condition". Each step
+repair actions. Each step uses arguments_json, which must be a JSON-encoded
+object string. The decoded object must exactly match the selected tool's
+advertised Arguments schema. Do not place prose inside arguments_json and do not
+wrap the full plan in a string. For sql_query, use
+arguments_json = "{\"sql\":\"SELECT ...\"}". The JSON object must contain the fields
+"incident_id", "hypotheses", and "steps". Each step must contain "purpose",
+"hypothesis_id", "tool", "arguments_json", "expected_evidence", and
+"stop_condition". Each step
 must say what observation would stop that branch or move the investigation to
 the next branch.
+"""
+
+
+LEGACY_PLANNER_SYSTEM_PROMPT: Final[str] = """You are the DataSherlock investigation Planner.
+Turn one structured anomaly alert and its canonical metric context into a bounded
+investigation plan. You propose candidate explanations and evidence-producing
+checks; you do not declare a root cause, write data, generate a repair, or
+invent metric semantics that are absent from the supplied context.
+
+Output only one valid JSON object as the InvestigationPlan structured response.
+Produce 3 to 5 distinct hypotheses and no more than 10 steps. Every step must
+contain purpose, hypothesis_id, tool, arguments, expected_evidence, and
+stop_condition. Use only the tools listed under Available tools. Never invent a
+tool name. Investigation must remain read-only: do not declare a final root
+cause, write data, or produce repair actions. Each step must say what observation
+would stop that branch or move the investigation to the next branch.
 """
 
 
@@ -456,6 +588,7 @@ def _build_planner_user_prompt(
     tool_registry: ToolRegistry,
     *,
     include_schema: bool = False,
+    structured_output: bool = True,
 ) -> str:
     """Build the user message, including only tools in the injected registry."""
 
@@ -467,6 +600,15 @@ def _build_planner_user_prompt(
     input_payload = request.model_dump(mode="json")
     input_payload["metric_context"] = request.metric_context.planner_payload()
     input_text = json.dumps(input_payload, ensure_ascii=False, indent=2)
+    step_arguments = "arguments_json" if structured_output else "arguments"
+    argument_rules = (
+        "- Every step uses arguments_json, a JSON-encoded object string.\n"
+        "- The decoded object must exactly match the selected tool's advertised Arguments schema.\n"
+        "- Do not place prose inside arguments_json or wrap the full plan in a string.\n"
+        '- For sql_query, arguments_json = "{\\"sql\\":\\"SELECT ...\\"}".\n'
+        if structured_output
+        else "- Every step uses an arguments object matching the selected tool's advertised Arguments schema.\n"
+    )
     parts = [
         (
             "Canonical input:\n"
@@ -483,6 +625,8 @@ def _build_planner_user_prompt(
             "\nRules:\n"
             "- Only use tools listed above.\n"
             "- Every investigation step must reference one available tool.\n"
+            f"- Every investigation step must include {step_arguments}.\n"
+            f"{argument_rules}"
             "- Every SQL query must be read-only and will be checked by SQL Runner.\n"
             "- For root_cause_type, use only a canonical value from the supplied "
             "fault vocabulary; do not invent new values.\n"
@@ -518,7 +662,10 @@ def _available_tools_text(tool_registry: ToolRegistry) -> str:
 def _build_legacy_prompt(request: PlannerInput, tool_registry: ToolRegistry) -> str:
     """Keep the full schema only for the old raw-string callable adapter."""
 
-    return f"{PLANNER_SYSTEM_PROMPT}\n\n{_build_planner_user_prompt(request, tool_registry, include_schema=True)}"
+    return (
+        f"{LEGACY_PLANNER_SYSTEM_PROMPT}\n\n"
+        f"{_build_planner_user_prompt(request, tool_registry, include_schema=True, structured_output=False)}"
+    )
 
 
 # A few stable fixtures are kept close to the Planner contract so downstream
@@ -644,24 +791,29 @@ class Planner:
                 result = await self.model_client.generate_structured(
                     system_prompt=PLANNER_SYSTEM_PROMPT,
                     user_prompt=attempt_prompt,
-                    response_model=InvestigationPlan,
+                    response_model=StructuredInvestigationPlan,
                 )
                 transport_retry_count += result.transport_retry_count
                 last_provider = result.provider
                 last_model = result.model
                 last_latency_ms = result.latency_ms
-                plan = InvestigationPlan.model_validate(result.parsed)
+                structured = StructuredInvestigationPlan.model_validate(result.parsed)
+                plan = structured_plan_to_investigation_plan(
+                    structured, self.tool_registry
+                )
                 validate_plan_semantics(plan, request, self.tool_registry)
                 self.last_planner_repair_count = repair_count
-                annotated_result = ModelCallResult[InvestigationPlan].model_validate(
-                    result.model_dump(mode="python")
-                ).model_copy(
-                    update={
-                        "parsed": plan,
-                        "transport_retry_count": transport_retry_count,
-                        "planner_repair_count": repair_count,
-                        "retry_count": transport_retry_count + repair_count,
-                    }
+                annotated_result = ModelCallResult[InvestigationPlan](
+                    provider=result.provider,
+                    model=result.model,
+                    parsed=plan,
+                    raw_text=result.raw_text,
+                    request_id=result.request_id,
+                    usage=result.usage,
+                    latency_ms=result.latency_ms,
+                    transport_retry_count=transport_retry_count,
+                    planner_repair_count=repair_count,
+                    retry_count=transport_retry_count + repair_count,
                 )
                 self.last_model_result = annotated_result
                 return PlannerRunResult(

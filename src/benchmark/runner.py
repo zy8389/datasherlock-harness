@@ -9,6 +9,7 @@ and RootCauseValidator used by the application runtime.
 from __future__ import annotations
 
 import json
+import math
 import multiprocessing as mp
 import pickle
 import queue
@@ -45,7 +46,7 @@ from benchmark.evidence_interpreter import (
 from config.model_settings import ModelSettings
 from harness.checkpoint import CheckpointManager, FileCheckpointStore
 from harness.graph import HarnessGraph
-from harness.guardrails import GuardrailRuntime
+from harness.guardrails import GuardrailPolicy, GuardrailRuntime
 from harness.hypothesis import EvidenceReference, HypothesisManager
 from harness.state import IncidentState, IncidentStatus
 from llm.base import ModelClient
@@ -87,10 +88,19 @@ class BenchmarkRunConfig(BaseModel):
     output_dir: Path
     benchmark_run_id: str = "benchmark-run"
     model_provider: Literal["mock", "openai"] = "mock"
+    model_base_url: str | None = None
+    model_timeout_seconds: float = Field(default=60.0, gt=0)
+    model_retries: int = Field(default=2, ge=0)
+    model_retry_base_delay_seconds: float = Field(default=0.5, ge=0)
     mock_plan: dict[str, Any] | None = None
     checkpoint_enabled: bool = False
     overwrite: bool = False
     max_planner_retries: int = Field(default=2, ge=0)
+    max_agent_rounds: int = Field(default=20, gt=0)
+    max_tool_calls: int = Field(default=20, gt=0)
+    max_sql_calls: int = Field(default=15, gt=0)
+    max_result_rows: int = Field(default=1000, gt=0)
+    max_duplicate_calls: int = Field(default=1, gt=0)
     input_cost_per_token: float | None = Field(default=None, ge=0)
     output_cost_per_token: float | None = Field(default=None, ge=0)
 
@@ -115,6 +125,29 @@ class BenchmarkRunConfig(BaseModel):
             raise ValueError(
                 "benchmark_run_id must contain only letters, numbers, '.', '_' or '-'"
             )
+        return value
+
+    @field_validator("model_base_url", mode="before")
+    @classmethod
+    def normalize_model_base_url(cls, value: object) -> object:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+        return value
+
+    @field_validator(
+        "model_timeout_seconds", "model_retry_base_delay_seconds", mode="before"
+    )
+    @classmethod
+    def validate_finite_transport_values(cls, value: object) -> object:
+        try:
+            finite = math.isfinite(float(value))
+        except (TypeError, ValueError):
+            return value
+        if not finite:
+            raise ValueError("model transport values must be finite")
         return value
 
 
@@ -467,7 +500,16 @@ class CurrentHarnessExecutor:
             tool_executor=tool_executor,
             hypothesis_manager=HypothesisManager(),
             root_cause_validator=RootCauseValidator(),
-            guardrail_runtime=GuardrailRuntime(registry=registry),
+            guardrail_runtime=GuardrailRuntime(
+                policy=GuardrailPolicy(
+                    max_agent_rounds=config.max_agent_rounds,
+                    max_tool_calls=config.max_tool_calls,
+                    max_sql_calls=config.max_sql_calls,
+                    max_result_rows=config.max_result_rows,
+                    max_duplicate_calls=config.max_duplicate_calls,
+                ),
+                registry=registry,
+            ),
             checkpoint_manager=checkpoint_manager,
         )
         state = IncidentState(
@@ -525,6 +567,10 @@ class CurrentHarnessExecutor:
         settings = ModelSettings(
             model_provider=runtime_config.model_provider,
             openai_model=runtime_config.model_name,
+            openai_base_url=self.config.model_base_url,
+            llm_timeout_seconds=self.config.model_timeout_seconds,
+            llm_max_retries=self.config.model_retries,
+            llm_retry_base_delay_seconds=self.config.model_retry_base_delay_seconds,
         )
         return create_model_client(settings)
 

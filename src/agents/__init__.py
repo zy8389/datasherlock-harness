@@ -13,10 +13,13 @@ from .planner import (
     PlannerInput,
     PlannerRunResult,
     PlannerValidationError,
+    StructuredInvestigationPlan,
+    StructuredInvestigationStep,
     build_fallback_plan,
     build_planner_prompt,
     load_metric_context,
     parse_investigation_plan,
+    structured_plan_to_investigation_plan,
     validate_root_cause_types,
 )
 
@@ -33,9 +36,12 @@ __all__ = [
     "PlannerInput",
     "PlannerRunResult",
     "PlannerValidationError",
+    "StructuredInvestigationPlan",
+    "StructuredInvestigationStep",
     "build_fallback_plan",
     "build_planner_prompt",
     "load_metric_context",
     "parse_investigation_plan",
+    "structured_plan_to_investigation_plan",
     "validate_root_cause_types",
 ]
