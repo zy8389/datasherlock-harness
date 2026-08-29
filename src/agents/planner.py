@@ -524,6 +524,17 @@ def validate_plan_diagnostic_tool_bindings(plan: InvestigationPlan) -> None:
             )
 
 
+def _sanitize_planner_validation_error(error: PlannerValidationError) -> str:
+    """Bound validation feedback before returning it to a model for repair."""
+
+    message = " ".join(str(error).split())
+    if not message:
+        return "The previous plan failed Planner validation."
+    if len(message) > 500:
+        return message[:497] + "..."
+    return message
+
+
 PLANNER_SYSTEM_PROMPT: Final[str] = """You are the DataSherlock investigation Planner.
 Turn one structured anomaly alert and its canonical metric context into a bounded
 investigation plan. You propose candidate explanations and evidence-producing
@@ -627,6 +638,9 @@ def _build_planner_user_prompt(
             "- Every investigation step must reference one available tool.\n"
             f"- Every investigation step must include {step_arguments}.\n"
             f"{argument_rules}"
+            "- Each candidate fault entry includes diagnostic_tools. For a step attached "
+            "to a hypothesis, choose only a tool listed in that hypothesis "
+            "root_cause_type's diagnostic_tools.\n"
             "- Every SQL query must be read-only and will be checked by SQL Runner.\n"
             "- For root_cause_type, use only a canonical value from the supplied "
             "fault vocabulary; do not invent new values.\n"
@@ -776,6 +790,7 @@ class Planner:
         repair_count = 0
         transport_retry_count = 0
         last_repair_reason: PlannerFallbackReason | None = None
+        repair_feedback: str | None = None
         last_provider: str | None = None
         last_model: str | None = None
         last_latency_ms: float | None = None
@@ -787,6 +802,12 @@ class Planner:
                     "\n\nRetry this response. The previous response was not accepted "
                     "as valid InvestigationPlan JSON. Return only corrected JSON."
                 )
+                if repair_feedback is not None:
+                    attempt_prompt += (
+                        "\nValidation feedback: "
+                        f"{repair_feedback}\n"
+                        "Repair only the invalid plan contract; do not add hidden metadata."
+                    )
             try:
                 result = await self.model_client.generate_structured(
                     system_prompt=PLANNER_SYSTEM_PROMPT,
@@ -832,14 +853,17 @@ class Planner:
                 if exc.latency_ms is not None:
                     last_latency_ms = exc.latency_ms
                 last_repair_reason = PlannerFallbackReason.MODEL_RESPONSE_INVALID
+                repair_feedback = None
                 repair_count += 1
                 continue
-            except PlannerValidationError:
+            except PlannerValidationError as exc:
                 last_repair_reason = PlannerFallbackReason.PLANNER_VALIDATION_FAILED
+                repair_feedback = _sanitize_planner_validation_error(exc)
                 repair_count += 1
                 continue
             except ValueError:
                 last_repair_reason = PlannerFallbackReason.MODEL_RESPONSE_INVALID
+                repair_feedback = None
                 repair_count += 1
                 continue
             except ModelTimeoutError as exc:
@@ -997,6 +1021,7 @@ class Planner:
         request = _coerce_request(alert_or_request, metric_context)
         prompt = _build_legacy_prompt(request, self.tool_registry)
         repair_count = 0
+        repair_feedback: str | None = None
         for attempt in range(self.max_retries + 1):
             attempt_prompt = prompt
             if attempt:
@@ -1004,6 +1029,12 @@ class Planner:
                     "\n\nRetry this response. The previous response was not accepted "
                     "as valid InvestigationPlan JSON. Return only corrected JSON."
                 )
+                if repair_feedback is not None:
+                    attempt_prompt += (
+                        "\nValidation feedback: "
+                        f"{repair_feedback}\n"
+                        "Repair only the invalid plan contract; do not add hidden metadata."
+                    )
             try:
                 raw_output = self._legacy_generator(attempt_prompt)  # type: ignore[misc]
                 plan = parse_investigation_plan(raw_output)
@@ -1019,8 +1050,11 @@ class Planner:
                     plan=plan,
                     planner_repair_count=repair_count,
                 )
-            except Exception as exc:  # noqa: BLE001 - compatibility path mirrors v1 behavior
-                _ = exc
+            except PlannerValidationError as exc:
+                repair_feedback = _sanitize_planner_validation_error(exc)
+                repair_count += 1
+            except Exception:  # noqa: BLE001 - compatibility path mirrors v1 behavior
+                repair_feedback = None
                 repair_count += 1
         self.last_model_result = None
         self.last_planner_repair_count = repair_count
@@ -1118,7 +1152,7 @@ def build_fallback_plan(
         hypotheses=hypotheses,
         steps=steps,
     )
-    validate_plan_tools(plan, registry)
+    validate_plan_semantics(plan, request, registry)
     return plan
 
 
@@ -1158,6 +1192,7 @@ def _fault_context(metric_id: str) -> list[JsonObject]:
             "fault_id": fault.id,
             "root_cause_type": fault.root_cause_type,
             "affected_assets": fault.affected_assets,
+            "diagnostic_tools": fault.diagnostic_tools,
         }
         for fault in catalog.faults
         if metric_id in fault.affected_metrics

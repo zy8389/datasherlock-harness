@@ -6,7 +6,9 @@ from pydantic import ValidationError
 from agents.planner import (
     PLANNER_ALERT_EXAMPLES,
     Alert,
+    Hypothesis,
     InvestigationPlan,
+    InvestigationStep,
     Planner,
     PlannerFallbackReason,
     PlannerInput,
@@ -16,8 +18,9 @@ from agents.planner import (
     build_fallback_plan,
     build_planner_prompt,
     load_metric_context,
-    validate_plan_semantics,
     structured_plan_to_investigation_plan,
+    validate_plan_diagnostic_tool_bindings,
+    validate_plan_semantics,
     validate_plan_tools,
 )
 from config.faults import load_fault_catalog
@@ -55,9 +58,62 @@ def _walk_schema(value: object):
         yield value
         for child in value.values():
             yield from _walk_schema(child)
+
+
     elif isinstance(value, list):
         for child in value:
             yield from _walk_schema(child)
+
+
+def _binding_plan(root_cause_type: str, tool: str, metric_id: str) -> InvestigationPlan:
+    alert_payload = next(
+        (
+            payload
+            for payload in PLANNER_ALERT_EXAMPLES
+            if payload["metric"] == metric_id
+        ),
+        {
+            "incident_id": f"INC-{metric_id.upper()}",
+            "metric": metric_id,
+            "observed_at": "2026-01-30",
+            "expected_value": 100,
+            "observed_value": 75,
+            "change_rate": -0.25,
+            "severity": "medium",
+        },
+    )
+    alert = Alert.model_validate(alert_payload)
+    catalog = load_fault_catalog()
+    root_causes = [root_cause_type]
+    root_causes.extend(
+        fault.root_cause_type
+        for fault in catalog.faults
+        if fault.root_cause_type != root_cause_type
+    )
+    hypotheses = [
+        Hypothesis(
+            hypothesis_id=f"H{index:02d}",
+            root_cause_type=root,
+            description="candidate",
+            initial_confidence=0.2,
+        )
+        for index, root in enumerate(root_causes[:3], start=1)
+    ]
+    return InvestigationPlan(
+        incident_id=alert.incident_id,
+        hypotheses=hypotheses,
+        steps=[
+            InvestigationStep(
+                step_id="S01",
+                purpose="inspect candidate",
+                hypothesis_id="H01",
+                tool=tool,
+                arguments={"sql": "SELECT 1"},
+                expected_evidence=["structured evidence"],
+                stop_condition="continue if not supported",
+            )
+        ],
+    )
 
 
 def test_structured_planner_schema_is_strict_and_uses_string_arguments() -> None:
@@ -184,6 +240,65 @@ def test_malformed_arguments_json_enters_planner_repair_and_succeeds() -> None:
     assert isinstance(result.model_result.parsed, InvestigationPlan)
 
 
+def test_strict_model_client_repairs_fault_tool_binding_in_one_retry() -> None:
+    alert, metric_context = _request_for(dict(PLANNER_ALERT_EXAMPLES[0]))
+    invalid = _structured_plan(
+        json.dumps(
+            {
+                "table": "events",
+                "column": "user_id",
+                "threshold": 0.01,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        tool="check_null_rate",
+    )
+    valid = _structured_plan(
+        json.dumps(
+            {
+                "table": "events",
+                "timestamp_column": "event_time",
+                "reference_time": "2026-01-31T00:00:00+00:00",
+                "max_age": 86400,
+                "scope": {
+                    "equals": {"device_type": "android"},
+                    "time_column": "event_time",
+                    "start": "2026-01-30T00:00:00+00:00",
+                    "end": "2026-01-31T00:00:00+00:00",
+                },
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        tool="check_freshness",
+    )
+    prompts: list[str] = []
+
+    def response_factory(
+        response_model: type[StructuredInvestigationPlan],
+        _: str,
+        user_prompt: str,
+    ) -> StructuredInvestigationPlan:
+        prompts.append(user_prompt)
+        return response_model.model_validate(invalid if len(prompts) == 1 else valid)
+
+    result = Planner(MockModelClient(response_factory), max_retries=1).run(
+        alert, metric_context
+    )
+
+    assert result.fallback_used is False
+    assert result.planner_repair_count == 1
+    assert result.model_result is not None
+    assert result.plan.steps[0].tool == "check_freshness"
+    assert (
+        "tool 'check_null_rate' is not mapped to root_cause_type 'missing_partition'; "
+        "allowed tool(s): check_freshness, sql_query"
+    ) in prompts[1]
+    assert "Traceback" not in prompts[1]
+    assert "source_seed_case_id" not in prompts[1]
+
+
 def test_repeated_malformed_arguments_json_returns_audited_fallback() -> None:
     alert, metric_context = _request_for(dict(PLANNER_ALERT_EXAMPLES[0]))
     invalid = _structured_plan("{not-json")
@@ -292,8 +407,47 @@ def test_metric_diagnostics_stay_out_of_planner_context_and_prompt() -> None:
         *metric.verification_fields,
     ):
         assert diagnostic not in prompt
-    assert "diagnostic_tools" not in prompt
+    assert "diagnostic_tools" in prompt
     assert "Tool: sql_query" in prompt
+
+
+def test_prompt_shows_all_applicable_fault_capabilities_without_ground_truth() -> None:
+    examples_by_metric = {
+        str(payload["metric"]): payload for payload in PLANNER_ALERT_EXAMPLES
+    }
+
+    for metric_id, alert_payload in examples_by_metric.items():
+        prompt = build_planner_prompt(
+            alert_payload,
+            load_metric_context(metric_id),
+        )
+        catalog = load_fault_catalog()
+        applicable = [
+            fault for fault in catalog.faults if metric_id in fault.affected_metrics
+        ]
+
+        for fault in applicable:
+            assert f'"fault_id": "{fault.id}"' in prompt
+            assert f'"root_cause_type": "{fault.root_cause_type}"' in prompt
+            assert '"affected_assets"' in prompt
+            assert '"diagnostic_tools"' in prompt
+            for tool in fault.diagnostic_tools:
+                assert f'"{tool}"' in prompt
+            for evidence in fault.expected_evidence:
+                assert evidence not in prompt
+
+        for forbidden in (
+            "expected_root_cause",
+            "evidence_paths",
+            "injection_strategy",
+            "source_seed_case_id",
+            "benchmark case ID",
+            "Ground Truth",
+        ):
+            assert forbidden not in prompt
+        assert not any(
+            f"{fault.id}-001" in prompt for fault in catalog.faults
+        )
 
 
 def test_plan_schema_rejects_missing_fields_unknown_hypothesis_and_repairs() -> None:
@@ -380,6 +534,59 @@ def test_fallback_plan_uses_registered_readonly_sql_tool_only() -> None:
                 "DESCRIBE",
                 "EXPLAIN",
             }
+
+
+def test_fallback_plans_pass_full_planner_semantics() -> None:
+    registry = build_default_tool_registry()
+
+    for alert_payload in PLANNER_ALERT_EXAMPLES:
+        alert, metric_context = _request_for(dict(alert_payload))
+        request = PlannerInput(alert=alert, metric_context=metric_context)
+        plan = build_fallback_plan(request, tool_registry=registry)
+
+        validate_plan_semantics(plan, request, registry)
+
+
+@pytest.mark.parametrize(
+    ("root_cause_type", "tool", "metric_id"),
+    [
+        ("missing_partition", "check_freshness", "daily_active_users"),
+        ("null_value_anomaly", "check_null_rate", "daily_active_users"),
+        ("field_drift", "detect_distribution_drift", "ai_task_count"),
+        ("schema_change", "detect_schema_drift", "daily_active_users"),
+    ],
+)
+def test_diagnostic_tool_binding_accepts_catalog_mapping(
+    root_cause_type: str,
+    tool: str,
+    metric_id: str,
+) -> None:
+    validate_plan_diagnostic_tool_bindings(
+        _binding_plan(root_cause_type, tool, metric_id)
+    )
+
+
+@pytest.mark.parametrize(
+    "fault_id",
+    ["F02", "F04", "F05", "F06", "F07", "F08", "F11", "F12"],
+)
+def test_sql_only_fault_rejects_unrelated_data_quality_tool(fault_id: str) -> None:
+    fault = load_fault_catalog().by_id(fault_id)
+
+    with pytest.raises(
+        PlannerValidationError,
+        match=(
+            rf"tool 'check_null_rate' is not mapped to root_cause_type "
+            rf"'{fault.root_cause_type}'"
+        ),
+    ):
+        validate_plan_diagnostic_tool_bindings(
+            _binding_plan(
+                fault.root_cause_type,
+                "check_null_rate",
+                fault.affected_metrics[0],
+            )
+        )
 
 
 def test_planner_semantics_validate_a_data_quality_tool_against_registry() -> None:
