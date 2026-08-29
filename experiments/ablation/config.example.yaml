@@ -1,0 +1,83 @@
+# Replace the model settings with the one configured principal model before a
+# real run. Credentials are loaded from .env by the existing ModelSettings.
+case_ids:
+  - F01-001
+  - F01-002
+  - F01-003
+  - F01-004
+  - F01-005
+  - F02-001
+  - F02-002
+  - F02-003
+  - F02-004
+  - F02-005
+  - F03-001
+  - F03-002
+  - F03-003
+  - F03-004
+  - F03-005
+  - F04-001
+  - F04-002
+  - F04-003
+  - F04-004
+  - F04-005
+  - F05-001
+  - F05-002
+  - F05-003
+  - F05-004
+  - F05-005
+  - F06-001
+  - F06-002
+  - F06-003
+  - F06-004
+  - F06-005
+  - F07-001
+  - F07-002
+  - F07-003
+  - F07-004
+  - F07-005
+  - F08-001
+  - F08-002
+  - F08-003
+  - F08-004
+  - F08-005
+  - F09-001
+  - F09-002
+  - F09-003
+  - F09-004
+  - F09-005
+  - F10-001
+  - F10-002
+  - F10-003
+  - F10-004
+  - F10-005
+  - F11-001
+  - F11-002
+  - F11-003
+  - F11-004
+  - F11-005
+  - F12-001
+  - F12-002
+  - F12-003
+  - F12-004
+  - F12-005
+model_provider: openai
+model_name: gpt-4o-mini
+model_base_url: null
+model_timeout_seconds: 60
+model_retries: 2
+model_retry_base_delay_seconds: 0.5
+per_case_timeout_seconds: 30
+max_agent_rounds: 20
+max_tool_calls: 20
+max_sql_calls: 15
+max_result_rows: 1000
+max_duplicate_calls: 1
+max_planner_retries: 2
+input_cost_per_token: null
+output_cost_per_token: null
+output_dir: experiments/ablation/results
+run_id: four-architecture-ablation
+run_kind: full
+resume: false
+overwrite: false
