@@ -21,7 +21,7 @@ faults:
       - partition_metadata.row_count
       - partition_metadata.status
       - pipeline_runs.status
-    diagnostic_tools: [sql_query]
+    diagnostic_tools: [sql_query, check_freshness]
   - id: F02
     root_cause_type: duplicate_batch
     affected_metrics: [ai_task_count]
@@ -40,7 +40,7 @@ faults:
       - events.event_time
       - pipeline_runs.status
       - pipeline_runs.error_type
-    diagnostic_tools: [sql_query]
+    diagnostic_tools: [sql_query, check_duplicate_rate]
   - id: F03
     root_cause_type: null_value_anomaly
     affected_metrics: [daily_active_users]
@@ -59,7 +59,7 @@ faults:
       - events.device_type
       - pipeline_runs.status
       - pipeline_runs.error_type
-    diagnostic_tools: [sql_query]
+    diagnostic_tools: [sql_query, check_null_rate]
   - id: F04
     root_cause_type: data_delay
     affected_metrics: [daily_active_users]
@@ -80,7 +80,7 @@ faults:
       - partition_metadata.status
       - pipeline_runs.status
       - pipeline_runs.error_type
-    diagnostic_tools: [sql_query]
+    diagnostic_tools: [sql_query, check_freshness]
   - id: F05
     root_cause_type: timezone_error
     affected_metrics: [daily_active_users]
@@ -157,7 +157,7 @@ faults:
       - experiment_assignments.user_id
       - metric_versions.query
       - metric_versions.definition_hash
-    diagnostic_tools: [sql_query]
+    diagnostic_tools: [sql_query, check_duplicate_rate]
   - id: F09
     root_cause_type: field_drift
     affected_metrics: [ai_task_count]
@@ -175,7 +175,7 @@ faults:
       - events.app_build_number
       - events.event_time
       - schema_snapshots.schema_json
-    diagnostic_tools: [sql_query]
+    diagnostic_tools: [sql_query, detect_distribution_drift]
   - id: F10
     root_cause_type: schema_change
     affected_metrics: [daily_active_users]
@@ -196,7 +196,7 @@ faults:
       - partition_metadata.status
       - pipeline_runs.status
       - pipeline_runs.error_type
-    diagnostic_tools: [sql_query]
+    diagnostic_tools: [sql_query, detect_schema_drift]
   - id: F11
     root_cause_type: metric_definition_change
     affected_metrics: [daily_active_users]
@@ -237,4 +237,4 @@ faults:
       - experiment_configs.control_ratio
       - experiment_configs.treatment_ratio
       - subscriptions.start_time
-    diagnostic_tools: [sql_query]
+    diagnostic_tools: [sql_query, detect_distribution_drift]

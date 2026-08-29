@@ -1,443 +1,158 @@
-﻿# 小螺果酱负责的异常案例
-
-
-
-> 范围说明：项目 Notion 要求 Benchmark 最终覆盖 12 类故障和 60 个标准案例。本文件当前记录 F01-F06 的 6 个首批样例；F07-F12 及其余 54 个案例尚待补齐，不能视为完整 Benchmark 集。
-
-## F01：分区缺失
-
-
-
-### 案例编号
-
-
-
-INC-001
-
-
-
-### 异常类型
-
-
-
-missing_partition
-
-
-
-### 影响数据表
-
-
-
-events
-
-
-
-### 影响指标
-
-
-
-daily_active_users
-
-
-
-### 异常表现
-
-
-
-某一天的日活用户数突然明显下降，甚至接近于零。异常日期前后的日活用户数基本正常。
-
-
-
-### 预期根因
-
-
-
-events 表中某一天的数据分区没有成功生成或没有成功写入，导致当天的用户行为数据缺失。
-
-
-
-### 预期证据
-
-
-
-1\. 异常日期的 events 数据量明显低于前后日期。
-
-2\. 异常日期缺少对应的数据分区，或者该分区中的记录数量为零。
-
-3\. users 表在异常日期附近仍然存在正常用户数据。
-
-
-
-### 修复建议
-
-
-
-重新生成或补写缺失日期的 events 数据分区，然后重新计算 daily_active_users。
-
-
-
-### 修复后的预期结果
-
-
-
-events 表恢复异常日期的数据后，daily_active_users 应该恢复到接近异常日期前后的正常范围。
-
-
-
-## F02：批次重复导入
-
-
-
-### 案例编号
-
-
-
-INC-002
-
-
-
-### 异常类型
-
-
-
-duplicate_batch
-
-
-
-### 影响数据表
-
-
-
-events
-
-
-
-### 影响指标
-
-
-
-daily_active_users
-
-
-
-### 异常表现
-
-
-
-某一天的 events 数据量突然大幅增加，事件数量明显高于前后日期。原始事件量异常，但去重后的活跃用户数可能没有同步增加。
-
-
-
-### 预期根因
-
-
-
-同一个数据批次被重复导入，导致相同的 batch_id、event_id 或用户行为记录在 events 表中重复出现。
-
-
-
-### 预期证据
-
-
-
-1\. events 表中存在重复的 batch_id。
-
-2\. 相同的 event_id、user_id、event_time 和 event_name 组合重复出现。
-
-3\. 异常日期的原始事件量明显高于前后日期。
-
-
-
-### 修复建议
-
-
-
-根据 event_id 或 batch_id 去除重复记录，保留唯一的事件数据，然后重新计算相关指标。
-
-
-
-### 修复后的预期结果
-
-
-
-重复记录被清理后，events 数据量恢复到正常范围，相关指标不再受到重复数据影响。
-
-
-
-## F03：空值异常
-
-### 案例编号
-
-INC-003
-
-### 异常类型
-
-null_value_anomaly
-
-### 影响数据表
-
-events
-
-### 影响指标
-
-daily_active_users
-
-### 异常表现
-
-某一时间段内 events 表的关键字段出现大量空值，导致日活用户数突然下降，或者部分地区、设备的统计结果异常。
-
-### 预期根因
-
-events 表中的 user_id 或 event_time 出现空值，导致部分行为记录无法关联用户或无法归入正确日期。
-
-### 预期证据
-
-1. 异常时间段内 user_id 或 event_time 的空值比例明显升高。
-2. 空值记录主要集中在指标异常的日期或时间段。
-3. events 表总记录数没有明显下降，但有效去重用户数明显下降。
-
-### 修复建议
-
-检查上游数据写入逻辑，补充缺失字段；无法修复的记录应隔离处理，不能直接参与指标计算。
-
-### 修复后的预期结果
-
-关键字段空值率恢复到正常范围，daily_active_users 恢复到合理水平，地区和设备维度统计不再异常。
-
-## F04：数据延迟
-
-
-
-### 案例编号
-
-
-
-INC-004
-
-
-
-### 异常类型
-
-
-
-data_delay
-
-
-
-### 影响数据表
-
-
-
-users、events
-
-
-
-### 影响指标
-
-
-
-daily_active_users、new_users
-
-
-
-### 异常表现
-
-
-
-当天的新增用户数和日活用户数明显下降，但后续日期出现数据回补，指标重新上升。
-
-
-
-### 预期根因
-
-
-
-上游数据任务没有按时完成，用户数据或行为事件延迟写入数据仓库。
-
-
-
-### 预期证据
-
-
-
-1\. 异常日期的数据新鲜度低于正常阈值，数据最后更新时间明显延迟。
-
-2\. 异常日期的数据量低于前后日期。
-
-3\. 后续日期出现集中回补的数据，说明数据只是延迟到达而不是永久丢失。
-
-
-
-### 修复建议
-
-
-
-检查上游数据任务的执行状态和完成时间，等待任务完成或重新执行失败的数据任务。
-
-
-
-### 修复后的预期结果
-
-
-
-延迟数据完成写入后，异常日期的 users 和 events 数据恢复，相关指标回到合理范围。
-
-
-
-## F05：时区错误
-
-
-
-### 案例编号
-
-
-
-INC-005
-
-
-
-### 异常类型
-
-
-
-timezone_error
-
-
-
-### 影响数据表
-
-
-
-users、events、subscriptions
-
-
-
-### 影响指标
-
-
-
-daily_active_users、new_users、paid_users
-
-
-
-### 异常表现
-
-
-
-指标整体向前或向后偏移几个小时，导致部分用户被统计到错误日期，日边界附近的指标出现异常。
-
-
-
-### 预期根因
-
-
-
-不同数据表使用了不一致的时区，或者 UTC 时间和本地时间转换时发生错误。
-
-
-
-### 预期证据
-
-
-
-1\. event_time、register_time 或订阅时间与统计日期存在固定小时偏移。
-
-2\. 异常主要集中在每天的开始和结束时间附近。
-
-3\. 使用统一时区重新计算后，指标结果与原结果存在明显差异。
-
-
-
-### 修复建议
-
-
-
-统一所有数据表的时间字段和统计口径，明确使用的时区，并修正日期转换逻辑。
-
-
-
-### 修复后的预期结果
-
-
-
-用户行为、注册和订阅记录被统计到正确日期，日活、新增用户和付费用户指标恢复正常。
-
-
-
-## F06：单位错误
-
-
-
-### 案例编号
-
-
-
-INC-006
-
-
-
-### 异常类型
-
-
-
-unit_error
-
-
-
-### 影响数据表
-
-
-
-events
-
-
-
-### 影响指标
-
-
-
-average_session_duration
-
-
-
-### 异常表现
-
-
-
-平均会话时长整体被放大或缩小，数值明显偏离历史范围，例如秒被当成毫秒，或者毫秒被当成秒。
-
-
-
-### 预期根因
-
-
-
-上游数据和指标计算使用了不同的时间单位，导致 duration_seconds 字段转换错误。
-
-
-
-### 预期证据
-
-
-
-1\. duration_seconds 的数值分布与历史数据相比整体放大或缩小。
-
-2\. 数据字段名称、单位说明和实际计算逻辑不一致。
-
-3\. 使用正确单位重新换算后，平均会话时长恢复到合理范围。
-
-
-
-### 修复建议
-
-
-
-统一会话时长的存储单位和计算单位，明确使用秒作为最终统计单位，并修正单位转换逻辑。
-
-
-
-### 修复后的预期结果
-
-
-
-平均会话时长恢复到合理范围，指标不再出现整体放大或缩小的情况。
+# DataSherlock F01-F12 标准案例
+
+本文件是可读案例索引；机器可执行口径以 `config/fault_catalog.yaml`、
+`benchmark/ground_truth/F01-001.yaml` 至 `F12-001.yaml` 和生成的
+`benchmark/cases/Fxx-yyy.yaml` 为准。每个故障族有一份 canonical case 说明，并生成 5 个
+确定性变体，共 12 类故障 x 5 个可复现案例 = 60 个 manifest。每个案例都明确告警现象、
+样例查询方向、业务证据、独立元数据/配置证据和 canonical 根因。
+
+## 证据查询约定
+
+- 业务证据通过 `sql_query` 查询 `events`、`users`、`subscriptions` 或
+  `experiment_assignments`。
+- 独立证据通过 `sql_query` 查询 `partition_metadata`、`pipeline_runs`、
+  `schema_snapshots`、`metric_versions` 或 `experiment_configs`。
+- `check_freshness`、`check_duplicate_rate`、`check_null_rate`、
+  `detect_schema_drift` 和 `detect_distribution_drift` 是受注册表约束的只读补充检查：
+  F01/F04 使用 freshness，F02/F08 使用 duplicate-rate，F03 使用 null-rate，
+  F09/F12 使用 distribution-drift，F10 使用 schema-drift。它们提供结构化观察，
+  但不替代 metadata-dependent case 所需的独立证据路径。
+- F01/F04/F05/F10/F11/F12 的 `evidence_paths` 是验收合同；不要用两个业务查询冒充独立证据。
+- 所有查询必须是只读 SQL，并由 SQL Runner 校验。
+
+## F01 `missing_partition`
+
+- **Case / metric**: `F01-001`, `daily_active_users`
+- **告警现象**: 目标日 DAU 下降，目标日 Android 事件缺失，邻近日期仍有数据。
+- **注入**: 删除 Android 目标分区。
+- **业务查询**: 按目标日期和 `device_type = 'android'` 统计 `events` 行数与去重用户数。
+- **业务证据**: 目标日 Android 事件为零或显著减少。
+- **独立证据**: `partition_metadata` 的目标 Android 分区 `row_count = 0`、`status = missing`。
+- **标准根因**: `missing_partition`。
+
+## F02 `duplicate_batch`
+
+- **Case / metric**: `F02-001`, `ai_task_count`
+- **告警现象**: AI task count 上升，原始事件行数和重复 event_id 增加。
+- **注入**: 按比例重复 `run_ai_task` 事件批次。
+- **业务查询**: 按目标日检查总行数、`COUNT(DISTINCT event_id)`、重复 event_id 数量和 `ai_task_count`。
+- **业务证据**: 原始行数上升且 event_id 重复，任务次数增加。
+- **独立证据**: `pipeline_runs` 记录 `duplicate_batch` 运行异常。
+- **标准根因**: `duplicate_batch`。
+
+## F03 `null_value_anomaly`
+
+- **Case / metric**: `F03-001`, `daily_active_users`
+- **告警现象**: DAU 下降，事件总行数稳定，但移动端 `user_id` 空值率上升。
+- **注入**: 将目标日移动端事件的 `user_id` 置空。
+- **业务查询**: 统计目标日总行数、`user_id IS NULL` 行数和有效去重用户数。
+- **业务证据**: 行数稳定、空值率上升、DAU 下降。
+- **独立证据**: `pipeline_runs` 记录 `null_value_anomaly`。
+- **标准根因**: `null_value_anomaly`。
+
+## F04 `data_delay`
+
+- **Case / metric**: `F04-001`, `daily_active_users`
+- **告警现象**: 目标日 Android 事件减少，次日对应事件 rebound，DAU 目标日下降。
+- **注入**: 将 60% 的目标日 Android 事件延迟一天。
+- **业务查询**: 对目标日和次日按设备统计事件数。
+- **业务证据**: 目标日减少、次日增加。
+- **独立证据**: `pipeline_runs` 目标分区 `status = delayed` 或 `error_type = data_delay`。
+- **标准根因**: `data_delay`。
+
+## F05 `timezone_error`
+
+- **Case / metric**: `F05-001`, `daily_active_users`
+- **告警现象**: CN 日期边界附近小时分布改变，目标日 DAU 发生偏移。
+- **注入**: 将 CN 边界事件偏移 8 小时，并生成目标日期的新 metric version。
+- **业务查询**: 按 CN 用户和小时统计目标日事件分布。
+- **业务证据**: 小时分布发生固定偏移，目标日 DAU 改变。
+- **独立证据**: `metric_versions` 记录 `daily_active_users` `UTC -> Asia/Shanghai`。
+- **标准根因**: `timezone_error`。
+
+## F06 `unit_error`
+
+- **Case / metric**: `F06-001`, `average_session_duration`
+- **告警现象**: 平均会话时长出现千倍放大或极端 outlier。
+- **注入**: 将部分 `duration_seconds` 乘以 1000。
+- **业务查询**: 统计目标日时长的均值、最小值、最大值和分布分位数。
+- **业务证据**: 时长分布整体偏移，最大值出现千倍异常，平均值上升。
+- **独立证据**: 对照 `schema_snapshots.schema_json` 和字段单位说明，确认字段语义未支持该数量级。
+- **标准根因**: `unit_error`。
+
+## F07 `join_filter`
+
+- **Case / metric**: `F07-001`, `daily_active_users`
+- **告警现象**: DAU 下降，未订阅用户被错误过滤。
+- **注入**: 给 DAU 查询增加错误的 subscription inner join。
+- **业务查询**: 比较 `COUNT(DISTINCT events.user_id)` 与 join 后用户数，并按用户类型拆分。
+- **业务证据**: join 后用户数下降，free 用户损失更明显。
+- **独立证据**: `metric_versions.query` / `definition_hash` 记录异常 inner join。
+- **标准根因**: `join_filter`。
+
+## F08 `join_explosion`
+
+- **Case / metric**: `F08-001`, `ai_task_count`
+- **告警现象**: AI task count 和 joined event rows 膨胀。
+- **注入**: 重复实验 assignment，并使用 assignment join 计算任务数。
+- **业务查询**: 统计 assignment 每用户行数、joined rows 和 distinct event_id。
+- **业务证据**: assignment 一人多行，joined rows 超过 distinct event_id。
+- **独立证据**: `metric_versions.query` / `definition_hash` 记录异常 join 口径。
+- **标准根因**: `join_explosion`。
+
+## F09 `field_drift`
+
+- **Case / metric**: `F09-001`, `ai_task_count`
+- **告警现象**: `run_ai_task` 频率下降，`execute_ai_task` 新值出现，总事件量基本稳定。
+- **注入**: 将部分 `event_name` 从 `run_ai_task` 改为 `execute_ai_task`。
+- **业务查询**: 按 event_name 统计目标日事件频率。
+- **业务证据**: 旧值下降、新值出现、总事件量保持稳定。
+- **独立证据**: 结合 `events.app_build_number` 或 `schema_snapshots` 定位新版本字段值。
+- **标准根因**: `field_drift`。
+
+## F10 `schema_change`
+
+- **Case / metric**: `F10-001`, `daily_active_users`
+- **告警现象**: 目标日事件未物化，DAU 下降，pipeline/partition failed。
+- **注入**: 将 `app_build_number` 从 `BIGINT` 改为 `VARCHAR`，使兼容性检查失败。
+- **业务查询**: 统计目标日 events 行数和 DAU。
+- **业务证据**: 目标日业务数据未物化或显著减少。
+- **独立证据**: `schema_snapshots` 显示 `BIGINT -> VARCHAR`，`pipeline_runs.error_type = schema_change`，分区状态为 failed。
+- **标准根因**: `schema_change`。
+
+## F11 `metric_definition_change`
+
+- **Case / metric**: `F11-001`, `daily_active_users`
+- **告警现象**: raw events 行数稳定，但 DAU 下降。
+- **注入**: 将 DAU SQL 收窄为只统计 core task 事件。
+- **业务查询**: 分别查询目标日 raw event count 和 daily_metrics 的 DAU。
+- **业务证据**: raw event count 不变，DAU 下降。
+- **独立证据**: `metric_versions` 新版本的 version、query、definition_hash 均变化。
+- **标准根因**: `metric_definition_change`。
+
+## F12 `ab_split_anomaly`
+
+- **Case / metric**: `F12-001`, `conversion_rate`
+- **告警现象**: 实验分组从 50/50 变为 20/80，conversion rate 上升。
+- **注入**: 改变 assignment allocation，保留原 treatment 用户且保证用户唯一。
+- **业务查询**: 按 variant 统计 assignment，并比较目标日 conversion_rate。
+- **业务证据**: assignment 分布变化，conversion rate 达到 catalog 的最小 effect threshold。
+- **独立证据**: `experiment_configs` 新版本记录 `control_ratio = 0.20`、`treatment_ratio = 0.80`。
+- **标准根因**: `ab_split_anomaly`。
+
+## 60 个可复现案例与运行验收
+
+- `benchmark/cases/variants.yaml` 是 60 个 variant 的唯一参数来源；
+  `python -m benchmark.case_generator --check` 可验证已提交 manifest 没有漂移。
+- `F01-001` 至 `F12-001` 是每族默认变体；`Fxx-002` 至 `Fxx-005` 固定变化 baseline seed、
+  metric date 或注入强度，同时保持 catalog 的方向、effect 与 evidence contract。
+- `tests/benchmark/test_case_generation.py` 与
+  `tests/benchmark/test_case_materialization.py` 验证 60 个 manifest 均可确定性生成、物化，
+  且满足 effect 与 Evidence Contract。
+- F01/F11 的真实 runtime gate 在
+  `tests/benchmark/test_full_runtime_e2e_gate.py`：它通过 `HarnessGraph` 执行 Planner、
+  Tool Executor、只读 SQL、guardrail、checkpoint/resume、证据绑定与 authoritative
+  root-cause validation；测试输入不携带 Ground Truth 答案。
+- `benchmark.runner` 在同一组 60-case manifest 上持久化每个案例的结果与 trace，并输出评测摘要。
+
+这些范围已经落地在当前代码库；生产数据接入仍不在本地 Benchmark 的范围内。
