@@ -630,6 +630,9 @@ def _build_planner_user_prompt(
             "Canonical root_cause_type vocabulary (closed-set candidate labels; "
             "do not treat any item as confirmed):\n"
             f"{canonical_root_causes}\n\n"
+            "Canonical diagnostic capability map (generic tool policy for candidate "
+            "hypotheses; does not identify the true root cause):\n"
+            f"{json.dumps(_diagnostic_capability_context(), ensure_ascii=False, indent=2)}\n\n"
         ),
         _available_tools_text(tool_registry),
         (
@@ -638,9 +641,9 @@ def _build_planner_user_prompt(
             "- Every investigation step must reference one available tool.\n"
             f"- Every investigation step must include {step_arguments}.\n"
             f"{argument_rules}"
-            "- Each candidate fault entry includes diagnostic_tools. For a step attached "
-            "to a hypothesis, choose only a tool listed in that hypothesis "
-            "root_cause_type's diagnostic_tools.\n"
+            "- Each candidate fault entry includes diagnostic_tools. For every step, "
+            "use only a tool listed for that hypothesis root_cause_type in the "
+            "canonical diagnostic capability map.\n"
             "- Every SQL query must be read-only and will be checked by SQL Runner.\n"
             "- For root_cause_type, use only a canonical value from the supplied "
             "fault vocabulary; do not invent new values.\n"
@@ -1196,6 +1199,24 @@ def _fault_context(metric_id: str) -> list[JsonObject]:
         }
         for fault in catalog.faults
         if metric_id in fault.affected_metrics
+    ]
+
+
+def _diagnostic_capability_context() -> list[JsonObject]:
+    """Expose only the catalog-wide root-cause to tool capability policy."""
+
+    try:
+        catalog = load_fault_catalog(DEFAULT_FAULT_CATALOG_PATH)
+    except (OSError, ValueError) as exc:
+        raise PlannerValidationError(
+            f"could not load diagnostic capability catalog: {exc}"
+        ) from exc
+    return [
+        {
+            "root_cause_type": fault.root_cause_type,
+            "diagnostic_tools": fault.diagnostic_tools,
+        }
+        for fault in catalog.faults
     ]
 
 
