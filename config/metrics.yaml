@@ -34,7 +34,11 @@ metrics:
       - events.user_id
       - events.device_type
       - users.region
-    diagnostic_tools: [sql_query]
+    diagnostic_tools:
+      - sql_query
+      - check_null_rate
+      - check_freshness
+      - detect_schema_drift
 
   - id: new_users
     name: New Users
@@ -158,7 +162,9 @@ metrics:
       - events.event_name
       - events.event_time
       - experiment_assignments.user_id
-    diagnostic_tools: [sql_query]
+    diagnostic_tools:
+      - sql_query
+      - detect_distribution_drift
 
   - id: average_session_duration
     name: Average Session Duration

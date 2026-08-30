@@ -87,6 +87,6 @@ subscription outcome from fixed latent user data, and the evaluator independentl
 conversion-rate effect. The current F12-001 case satisfies the catalog threshold and Evidence
 Contract.
 
-The contract and SQL Runner tests currently cover only the six metadata-dependent seed cases.
-This does not claim that the 60-case Benchmark, Benchmark Runner, or later Harness modules are
-complete.
+These contract and SQL Runner tests intentionally focus on the six metadata-dependent seed
+cases. The 60-case materialization, Benchmark Runner, and runtime Harness coverage are verified
+by their dedicated benchmark and runtime test suites.
