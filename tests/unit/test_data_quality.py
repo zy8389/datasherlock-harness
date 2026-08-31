@@ -356,6 +356,29 @@ def test_detect_schema_drift_is_inconclusive_for_insufficient_history(
     }
 
 
+def test_detect_schema_drift_one_malformed_snapshot_is_error(
+    database_path: Path,
+) -> None:
+    _create_schema_snapshots(database_path)
+    with duckdb.connect(str(database_path)) as connection:
+        connection.execute(
+            """
+            INSERT INTO schema_snapshots VALUES
+            ('events', 1, '{bad json', '2026-01-30 00:00:00')
+            """
+        )
+
+    result = detect_schema_drift(database_path, "events")
+
+    assert result.status == "error"
+    assert result.passed is None
+    assert result.error == {
+        "type": "execution",
+        "message": "schema_json is not valid JSON",
+    }
+    assert result.evidence == []
+
+
 def test_detect_schema_drift_returns_error_when_snapshot_query_fails(
     database_path: Path,
 ) -> None:

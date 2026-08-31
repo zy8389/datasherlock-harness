@@ -782,6 +782,18 @@ def detect_schema_drift(
             },
         )
     snapshot_count = len(response.rows)
+    try:
+        parsed_schemas = [_parse_schema_json(row[1]) for row in response.rows]
+    except (TypeError, ValueError) as exc:
+        return DataQualityCheckResult(
+            check_name="detect_schema_drift",
+            status="error",
+            passed=None,
+            table=table,
+            threshold=0.0,
+            query_id=response.query_id,
+            error={"type": "execution", "message": str(exc)},
+        )
     if snapshot_count < 2:
         return DataQualityCheckResult(
             check_name="detect_schema_drift",
@@ -808,21 +820,9 @@ def detect_schema_drift(
             ],
         )
 
-    current_version, current_schema_json, current_effective_at = response.rows[0]
-    previous_version, previous_schema_json, previous_effective_at = response.rows[1]
-    try:
-        current_schema = _parse_schema_json(current_schema_json)
-        previous_schema = _parse_schema_json(previous_schema_json)
-    except (TypeError, ValueError) as exc:
-        return DataQualityCheckResult(
-            check_name="detect_schema_drift",
-            status="error",
-            passed=None,
-            table=table,
-            threshold=0.0,
-            query_id=response.query_id,
-            error={"type": "execution", "message": str(exc)},
-        )
+    current_version, _, current_effective_at = response.rows[0]
+    previous_version, _, previous_effective_at = response.rows[1]
+    current_schema, previous_schema = parsed_schemas
 
     added_columns = sorted(set(current_schema) - set(previous_schema))
     removed_columns = sorted(set(previous_schema) - set(current_schema))
