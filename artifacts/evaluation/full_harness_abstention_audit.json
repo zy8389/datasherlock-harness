@@ -1,0 +1,1841 @@
+{
+  "schema_version": 1,
+  "run_id": "full-60-4arch-post-pr14-20260831",
+  "variant": "full_harness",
+  "raw_result_path": "experiments/ablation/results/full-60-4arch-post-pr14-20260831/full_harness/results.jsonl",
+  "raw_result_sha256": "65bc8741a7baf92fbe6137b563e3ae1954bdce248ebebc00a74a5d23400d12ad",
+  "record_count": 60,
+  "excluded_runtime_error_cases": 36,
+  "eligible_case_count": 24,
+  "taxonomy_counts": {
+    "HYPOTHESIS_MISSING": 4,
+    "EVIDENCE_MISSING": 5,
+    "EVIDENCE_NEUTRALIZED": 15,
+    "CONFIDENCE_SHORTFALL": 0,
+    "VALIDATOR_REJECTED": 0,
+    "CONTRADICTION_BLOCKED": 0,
+    "PLAN_EXHAUSTED": 0,
+    "OTHER": 0
+  },
+  "component_counts": {
+    "Planner": 4,
+    "Tool coverage / plan": 5,
+    "EvidenceInterpreter": 15,
+    "HypothesisManager": 0,
+    "RootCauseValidator": 0,
+    "Other": 0
+  },
+  "hypothesis_coverage": {
+    "golden_hypothesis_proposed": 20,
+    "golden_hypothesis_missing": 4
+  },
+  "evidence_coverage": {
+    "0": 14,
+    "1": 6,
+    ">=2": 0
+  },
+  "source_type_coverage": {
+    "0": 14,
+    "1": 6,
+    ">=2": 0
+  },
+  "initial_confidence_distribution": {
+    "<0.50": 20,
+    "0.50-0.59": 0,
+    "0.60-0.74": 0,
+    ">=0.75": 0
+  },
+  "final_confidence_distribution": {
+    "<0.50": 20,
+    "0.50-0.59": 0,
+    "0.60-0.74": 0,
+    ">=0.75": 0
+  },
+  "validator_summary": {
+    "never_invoked": 4,
+    "invoked": 20,
+    "gate_eligible": 0,
+    "rejected": 0,
+    "validated": 0
+  },
+  "neutral_reasons": [
+    {
+      "reason": "the returned SQL values matched no evidence rule",
+      "count": 105
+    },
+    {
+      "reason": "passed data-quality checks are neutral by default",
+      "count": 11
+    },
+    {
+      "reason": "F01 partition observation is outside the metric scope",
+      "count": 4
+    },
+    {
+      "reason": "check_freshness is not compatible with missing_partition",
+      "count": 4
+    },
+    {
+      "reason": "null-rate observation has no rows; null rate is undefined",
+      "count": 4
+    },
+    {
+      "reason": "SQL result validation failed",
+      "count": 3
+    }
+  ],
+  "fault_families": [
+    {
+      "fault_id": "F01",
+      "no_error_abstentions": 0,
+      "dominant_cause": null,
+      "cause_counts": {
+        "HYPOTHESIS_MISSING": 0,
+        "EVIDENCE_MISSING": 0,
+        "EVIDENCE_NEUTRALIZED": 0,
+        "CONFIDENCE_SHORTFALL": 0,
+        "VALIDATOR_REJECTED": 0,
+        "CONTRADICTION_BLOCKED": 0,
+        "PLAN_EXHAUSTED": 0,
+        "OTHER": 0
+      }
+    },
+    {
+      "fault_id": "F02",
+      "no_error_abstentions": 3,
+      "dominant_cause": "EVIDENCE_NEUTRALIZED",
+      "cause_counts": {
+        "HYPOTHESIS_MISSING": 0,
+        "EVIDENCE_MISSING": 0,
+        "EVIDENCE_NEUTRALIZED": 3,
+        "CONFIDENCE_SHORTFALL": 0,
+        "VALIDATOR_REJECTED": 0,
+        "CONTRADICTION_BLOCKED": 0,
+        "PLAN_EXHAUSTED": 0,
+        "OTHER": 0
+      }
+    },
+    {
+      "fault_id": "F03",
+      "no_error_abstentions": 0,
+      "dominant_cause": null,
+      "cause_counts": {
+        "HYPOTHESIS_MISSING": 0,
+        "EVIDENCE_MISSING": 0,
+        "EVIDENCE_NEUTRALIZED": 0,
+        "CONFIDENCE_SHORTFALL": 0,
+        "VALIDATOR_REJECTED": 0,
+        "CONTRADICTION_BLOCKED": 0,
+        "PLAN_EXHAUSTED": 0,
+        "OTHER": 0
+      }
+    },
+    {
+      "fault_id": "F04",
+      "no_error_abstentions": 0,
+      "dominant_cause": null,
+      "cause_counts": {
+        "HYPOTHESIS_MISSING": 0,
+        "EVIDENCE_MISSING": 0,
+        "EVIDENCE_NEUTRALIZED": 0,
+        "CONFIDENCE_SHORTFALL": 0,
+        "VALIDATOR_REJECTED": 0,
+        "CONTRADICTION_BLOCKED": 0,
+        "PLAN_EXHAUSTED": 0,
+        "OTHER": 0
+      }
+    },
+    {
+      "fault_id": "F05",
+      "no_error_abstentions": 1,
+      "dominant_cause": "EVIDENCE_NEUTRALIZED",
+      "cause_counts": {
+        "HYPOTHESIS_MISSING": 0,
+        "EVIDENCE_MISSING": 0,
+        "EVIDENCE_NEUTRALIZED": 1,
+        "CONFIDENCE_SHORTFALL": 0,
+        "VALIDATOR_REJECTED": 0,
+        "CONTRADICTION_BLOCKED": 0,
+        "PLAN_EXHAUSTED": 0,
+        "OTHER": 0
+      }
+    },
+    {
+      "fault_id": "F06",
+      "no_error_abstentions": 4,
+      "dominant_cause": "EVIDENCE_NEUTRALIZED",
+      "cause_counts": {
+        "HYPOTHESIS_MISSING": 0,
+        "EVIDENCE_MISSING": 0,
+        "EVIDENCE_NEUTRALIZED": 4,
+        "CONFIDENCE_SHORTFALL": 0,
+        "VALIDATOR_REJECTED": 0,
+        "CONTRADICTION_BLOCKED": 0,
+        "PLAN_EXHAUSTED": 0,
+        "OTHER": 0
+      }
+    },
+    {
+      "fault_id": "F07",
+      "no_error_abstentions": 1,
+      "dominant_cause": "EVIDENCE_NEUTRALIZED",
+      "cause_counts": {
+        "HYPOTHESIS_MISSING": 0,
+        "EVIDENCE_MISSING": 0,
+        "EVIDENCE_NEUTRALIZED": 1,
+        "CONFIDENCE_SHORTFALL": 0,
+        "VALIDATOR_REJECTED": 0,
+        "CONTRADICTION_BLOCKED": 0,
+        "PLAN_EXHAUSTED": 0,
+        "OTHER": 0
+      }
+    },
+    {
+      "fault_id": "F08",
+      "no_error_abstentions": 3,
+      "dominant_cause": "EVIDENCE_NEUTRALIZED",
+      "cause_counts": {
+        "HYPOTHESIS_MISSING": 1,
+        "EVIDENCE_MISSING": 0,
+        "EVIDENCE_NEUTRALIZED": 2,
+        "CONFIDENCE_SHORTFALL": 0,
+        "VALIDATOR_REJECTED": 0,
+        "CONTRADICTION_BLOCKED": 0,
+        "PLAN_EXHAUSTED": 0,
+        "OTHER": 0
+      }
+    },
+    {
+      "fault_id": "F09",
+      "no_error_abstentions": 2,
+      "dominant_cause": "EVIDENCE_MISSING",
+      "cause_counts": {
+        "HYPOTHESIS_MISSING": 0,
+        "EVIDENCE_MISSING": 1,
+        "EVIDENCE_NEUTRALIZED": 1,
+        "CONFIDENCE_SHORTFALL": 0,
+        "VALIDATOR_REJECTED": 0,
+        "CONTRADICTION_BLOCKED": 0,
+        "PLAN_EXHAUSTED": 0,
+        "OTHER": 0
+      }
+    },
+    {
+      "fault_id": "F10",
+      "no_error_abstentions": 4,
+      "dominant_cause": "EVIDENCE_MISSING",
+      "cause_counts": {
+        "HYPOTHESIS_MISSING": 0,
+        "EVIDENCE_MISSING": 4,
+        "EVIDENCE_NEUTRALIZED": 0,
+        "CONFIDENCE_SHORTFALL": 0,
+        "VALIDATOR_REJECTED": 0,
+        "CONTRADICTION_BLOCKED": 0,
+        "PLAN_EXHAUSTED": 0,
+        "OTHER": 0
+      }
+    },
+    {
+      "fault_id": "F11",
+      "no_error_abstentions": 1,
+      "dominant_cause": "HYPOTHESIS_MISSING",
+      "cause_counts": {
+        "HYPOTHESIS_MISSING": 1,
+        "EVIDENCE_MISSING": 0,
+        "EVIDENCE_NEUTRALIZED": 0,
+        "CONFIDENCE_SHORTFALL": 0,
+        "VALIDATOR_REJECTED": 0,
+        "CONTRADICTION_BLOCKED": 0,
+        "PLAN_EXHAUSTED": 0,
+        "OTHER": 0
+      }
+    },
+    {
+      "fault_id": "F12",
+      "no_error_abstentions": 5,
+      "dominant_cause": "EVIDENCE_NEUTRALIZED",
+      "cause_counts": {
+        "HYPOTHESIS_MISSING": 2,
+        "EVIDENCE_MISSING": 0,
+        "EVIDENCE_NEUTRALIZED": 3,
+        "CONFIDENCE_SHORTFALL": 0,
+        "VALIDATOR_REJECTED": 0,
+        "CONTRADICTION_BLOCKED": 0,
+        "PLAN_EXHAUSTED": 0,
+        "OTHER": 0
+      }
+    }
+  ],
+  "worst_fault_families": [
+    "F12",
+    "F06",
+    "F10"
+  ],
+  "cases": [
+    {
+      "case_id": "F02-001",
+      "fault_id": "F02",
+      "golden_root_cause": "duplicate_batch",
+      "runtime_status": "UNRESOLVED",
+      "runtime_error": null,
+      "abstained": true,
+      "primary_abstention_cause": "EVIDENCE_NEUTRALIZED",
+      "secondary_causes": [
+        "VALIDATOR_REJECTED",
+        "PLAN_EXHAUSTED"
+      ],
+      "attributed_component": "EvidenceInterpreter",
+      "golden_hypothesis_present": true,
+      "golden_hypothesis_id": "H1",
+      "golden_hypothesis_rank": 1,
+      "initial_confidence": 0.3,
+      "final_confidence": 0.3,
+      "confidence_delta": 0.0,
+      "final_hypothesis_status": "PROPOSED",
+      "evidence_count": 0,
+      "supporting_evidence_count": 0,
+      "contradicting_evidence_count": 0,
+      "independent_source_types": [],
+      "validator_invoked": true,
+      "validator_invocation_count": 2,
+      "validator_validated": false,
+      "validator_missing_evidence": [],
+      "validator_contradictions": [],
+      "tool_calls": 5,
+      "sql_calls": 4,
+      "neutral_evidence_count": 4,
+      "neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "golden_neutral_evidence_count": 2,
+      "golden_neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "plan_steps": 5,
+      "executed_steps": 5,
+      "plan_exhausted": true,
+      "evidence_funnel": {
+        "observations_total": 5,
+        "evidence_registered": 1,
+        "supports_total": 1,
+        "contradicts_total": 0,
+        "neutral_total": 4,
+        "golden_supports": 0,
+        "golden_contradictions": 0,
+        "golden_eligible_for_validator": false
+      },
+      "cause_chain": [
+        "Planner proposed duplicate_batch as rank 1 (H1).",
+        "Tools executed 5 of 5 planned steps.",
+        "Golden evidence ended with 0 supports, 0 contradictions, and 2 neutral decisions.",
+        "Golden hypothesis ended PROPOSED at confidence 0.30.",
+        "Golden validator was invoked and validated=False.",
+        "Earliest bottleneck: EVIDENCE_NEUTRALIZED; recommended owner: EvidenceInterpreter."
+      ]
+    },
+    {
+      "case_id": "F02-002",
+      "fault_id": "F02",
+      "golden_root_cause": "duplicate_batch",
+      "runtime_status": "UNRESOLVED",
+      "runtime_error": null,
+      "abstained": true,
+      "primary_abstention_cause": "EVIDENCE_NEUTRALIZED",
+      "secondary_causes": [
+        "VALIDATOR_REJECTED",
+        "PLAN_EXHAUSTED"
+      ],
+      "attributed_component": "EvidenceInterpreter",
+      "golden_hypothesis_present": true,
+      "golden_hypothesis_id": "H1",
+      "golden_hypothesis_rank": 1,
+      "initial_confidence": 0.32,
+      "final_confidence": 0.32,
+      "confidence_delta": 0.0,
+      "final_hypothesis_status": "PROPOSED",
+      "evidence_count": 0,
+      "supporting_evidence_count": 0,
+      "contradicting_evidence_count": 0,
+      "independent_source_types": [],
+      "validator_invoked": true,
+      "validator_invocation_count": 1,
+      "validator_validated": false,
+      "validator_missing_evidence": [],
+      "validator_contradictions": [],
+      "tool_calls": 5,
+      "sql_calls": 4,
+      "neutral_evidence_count": 5,
+      "neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "passed data-quality checks are neutral by default",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "golden_neutral_evidence_count": 1,
+      "golden_neutral_reasons": [
+        "the returned SQL values matched no evidence rule"
+      ],
+      "plan_steps": 5,
+      "executed_steps": 5,
+      "plan_exhausted": true,
+      "evidence_funnel": {
+        "observations_total": 5,
+        "evidence_registered": 0,
+        "supports_total": 0,
+        "contradicts_total": 0,
+        "neutral_total": 5,
+        "golden_supports": 0,
+        "golden_contradictions": 0,
+        "golden_eligible_for_validator": false
+      },
+      "cause_chain": [
+        "Planner proposed duplicate_batch as rank 1 (H1).",
+        "Tools executed 5 of 5 planned steps.",
+        "Golden evidence ended with 0 supports, 0 contradictions, and 1 neutral decisions.",
+        "Golden hypothesis ended PROPOSED at confidence 0.32.",
+        "Golden validator was invoked and validated=False.",
+        "Earliest bottleneck: EVIDENCE_NEUTRALIZED; recommended owner: EvidenceInterpreter."
+      ]
+    },
+    {
+      "case_id": "F02-004",
+      "fault_id": "F02",
+      "golden_root_cause": "duplicate_batch",
+      "runtime_status": "UNRESOLVED",
+      "runtime_error": null,
+      "abstained": true,
+      "primary_abstention_cause": "EVIDENCE_NEUTRALIZED",
+      "secondary_causes": [
+        "VALIDATOR_REJECTED",
+        "PLAN_EXHAUSTED"
+      ],
+      "attributed_component": "EvidenceInterpreter",
+      "golden_hypothesis_present": true,
+      "golden_hypothesis_id": "H1",
+      "golden_hypothesis_rank": 1,
+      "initial_confidence": 0.3,
+      "final_confidence": 0.3,
+      "confidence_delta": 0.0,
+      "final_hypothesis_status": "PROPOSED",
+      "evidence_count": 0,
+      "supporting_evidence_count": 0,
+      "contradicting_evidence_count": 0,
+      "independent_source_types": [],
+      "validator_invoked": true,
+      "validator_invocation_count": 2,
+      "validator_validated": false,
+      "validator_missing_evidence": [],
+      "validator_contradictions": [],
+      "tool_calls": 6,
+      "sql_calls": 5,
+      "neutral_evidence_count": 6,
+      "neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "passed data-quality checks are neutral by default",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "golden_neutral_evidence_count": 2,
+      "golden_neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "plan_steps": 6,
+      "executed_steps": 6,
+      "plan_exhausted": true,
+      "evidence_funnel": {
+        "observations_total": 6,
+        "evidence_registered": 0,
+        "supports_total": 0,
+        "contradicts_total": 0,
+        "neutral_total": 6,
+        "golden_supports": 0,
+        "golden_contradictions": 0,
+        "golden_eligible_for_validator": false
+      },
+      "cause_chain": [
+        "Planner proposed duplicate_batch as rank 1 (H1).",
+        "Tools executed 6 of 6 planned steps.",
+        "Golden evidence ended with 0 supports, 0 contradictions, and 2 neutral decisions.",
+        "Golden hypothesis ended PROPOSED at confidence 0.30.",
+        "Golden validator was invoked and validated=False.",
+        "Earliest bottleneck: EVIDENCE_NEUTRALIZED; recommended owner: EvidenceInterpreter."
+      ]
+    },
+    {
+      "case_id": "F05-002",
+      "fault_id": "F05",
+      "golden_root_cause": "timezone_error",
+      "runtime_status": "UNRESOLVED",
+      "runtime_error": null,
+      "abstained": true,
+      "primary_abstention_cause": "EVIDENCE_NEUTRALIZED",
+      "secondary_causes": [
+        "VALIDATOR_REJECTED",
+        "PLAN_EXHAUSTED"
+      ],
+      "attributed_component": "EvidenceInterpreter",
+      "golden_hypothesis_present": true,
+      "golden_hypothesis_id": "H4",
+      "golden_hypothesis_rank": 4,
+      "initial_confidence": 0.15,
+      "final_confidence": 0.15,
+      "confidence_delta": 0.0,
+      "final_hypothesis_status": "PROPOSED",
+      "evidence_count": 0,
+      "supporting_evidence_count": 0,
+      "contradicting_evidence_count": 0,
+      "independent_source_types": [],
+      "validator_invoked": true,
+      "validator_invocation_count": 1,
+      "validator_validated": false,
+      "validator_missing_evidence": [],
+      "validator_contradictions": [],
+      "tool_calls": 5,
+      "sql_calls": 3,
+      "neutral_evidence_count": 5,
+      "neutral_reasons": [
+        "check_freshness is not compatible with missing_partition",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "passed data-quality checks are neutral by default",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "golden_neutral_evidence_count": 1,
+      "golden_neutral_reasons": [
+        "the returned SQL values matched no evidence rule"
+      ],
+      "plan_steps": 5,
+      "executed_steps": 5,
+      "plan_exhausted": true,
+      "evidence_funnel": {
+        "observations_total": 5,
+        "evidence_registered": 0,
+        "supports_total": 0,
+        "contradicts_total": 0,
+        "neutral_total": 5,
+        "golden_supports": 0,
+        "golden_contradictions": 0,
+        "golden_eligible_for_validator": false
+      },
+      "cause_chain": [
+        "Planner proposed timezone_error as rank 4 (H4).",
+        "Tools executed 5 of 5 planned steps.",
+        "Golden evidence ended with 0 supports, 0 contradictions, and 1 neutral decisions.",
+        "Golden hypothesis ended PROPOSED at confidence 0.15.",
+        "Golden validator was invoked and validated=False.",
+        "Earliest bottleneck: EVIDENCE_NEUTRALIZED; recommended owner: EvidenceInterpreter."
+      ]
+    },
+    {
+      "case_id": "F06-002",
+      "fault_id": "F06",
+      "golden_root_cause": "unit_error",
+      "runtime_status": "UNRESOLVED",
+      "runtime_error": null,
+      "abstained": true,
+      "primary_abstention_cause": "EVIDENCE_NEUTRALIZED",
+      "secondary_causes": [
+        "VALIDATOR_REJECTED",
+        "PLAN_EXHAUSTED"
+      ],
+      "attributed_component": "EvidenceInterpreter",
+      "golden_hypothesis_present": true,
+      "golden_hypothesis_id": "H01",
+      "golden_hypothesis_rank": 1,
+      "initial_confidence": 0.45,
+      "final_confidence": 0.45,
+      "confidence_delta": 0.0,
+      "final_hypothesis_status": "PROPOSED",
+      "evidence_count": 0,
+      "supporting_evidence_count": 0,
+      "contradicting_evidence_count": 0,
+      "independent_source_types": [],
+      "validator_invoked": true,
+      "validator_invocation_count": 1,
+      "validator_validated": false,
+      "validator_missing_evidence": [],
+      "validator_contradictions": [],
+      "tool_calls": 5,
+      "sql_calls": 5,
+      "neutral_evidence_count": 5,
+      "neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "F01 partition observation is outside the metric scope",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "golden_neutral_evidence_count": 1,
+      "golden_neutral_reasons": [
+        "the returned SQL values matched no evidence rule"
+      ],
+      "plan_steps": 5,
+      "executed_steps": 5,
+      "plan_exhausted": true,
+      "evidence_funnel": {
+        "observations_total": 5,
+        "evidence_registered": 0,
+        "supports_total": 0,
+        "contradicts_total": 0,
+        "neutral_total": 5,
+        "golden_supports": 0,
+        "golden_contradictions": 0,
+        "golden_eligible_for_validator": false
+      },
+      "cause_chain": [
+        "Planner proposed unit_error as rank 1 (H01).",
+        "Tools executed 5 of 5 planned steps.",
+        "Golden evidence ended with 0 supports, 0 contradictions, and 1 neutral decisions.",
+        "Golden hypothesis ended PROPOSED at confidence 0.45.",
+        "Golden validator was invoked and validated=False.",
+        "Earliest bottleneck: EVIDENCE_NEUTRALIZED; recommended owner: EvidenceInterpreter."
+      ]
+    },
+    {
+      "case_id": "F06-003",
+      "fault_id": "F06",
+      "golden_root_cause": "unit_error",
+      "runtime_status": "UNRESOLVED",
+      "runtime_error": null,
+      "abstained": true,
+      "primary_abstention_cause": "EVIDENCE_NEUTRALIZED",
+      "secondary_causes": [
+        "VALIDATOR_REJECTED",
+        "PLAN_EXHAUSTED"
+      ],
+      "attributed_component": "EvidenceInterpreter",
+      "golden_hypothesis_present": true,
+      "golden_hypothesis_id": "H01",
+      "golden_hypothesis_rank": 1,
+      "initial_confidence": 0.45,
+      "final_confidence": 0.45,
+      "confidence_delta": 0.0,
+      "final_hypothesis_status": "PROPOSED",
+      "evidence_count": 0,
+      "supporting_evidence_count": 0,
+      "contradicting_evidence_count": 0,
+      "independent_source_types": [],
+      "validator_invoked": true,
+      "validator_invocation_count": 1,
+      "validator_validated": false,
+      "validator_missing_evidence": [],
+      "validator_contradictions": [],
+      "tool_calls": 5,
+      "sql_calls": 5,
+      "neutral_evidence_count": 5,
+      "neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "F01 partition observation is outside the metric scope",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "golden_neutral_evidence_count": 1,
+      "golden_neutral_reasons": [
+        "the returned SQL values matched no evidence rule"
+      ],
+      "plan_steps": 5,
+      "executed_steps": 5,
+      "plan_exhausted": true,
+      "evidence_funnel": {
+        "observations_total": 5,
+        "evidence_registered": 0,
+        "supports_total": 0,
+        "contradicts_total": 0,
+        "neutral_total": 5,
+        "golden_supports": 0,
+        "golden_contradictions": 0,
+        "golden_eligible_for_validator": false
+      },
+      "cause_chain": [
+        "Planner proposed unit_error as rank 1 (H01).",
+        "Tools executed 5 of 5 planned steps.",
+        "Golden evidence ended with 0 supports, 0 contradictions, and 1 neutral decisions.",
+        "Golden hypothesis ended PROPOSED at confidence 0.45.",
+        "Golden validator was invoked and validated=False.",
+        "Earliest bottleneck: EVIDENCE_NEUTRALIZED; recommended owner: EvidenceInterpreter."
+      ]
+    },
+    {
+      "case_id": "F06-004",
+      "fault_id": "F06",
+      "golden_root_cause": "unit_error",
+      "runtime_status": "UNRESOLVED",
+      "runtime_error": null,
+      "abstained": true,
+      "primary_abstention_cause": "EVIDENCE_NEUTRALIZED",
+      "secondary_causes": [
+        "VALIDATOR_REJECTED",
+        "PLAN_EXHAUSTED"
+      ],
+      "attributed_component": "EvidenceInterpreter",
+      "golden_hypothesis_present": true,
+      "golden_hypothesis_id": "H01",
+      "golden_hypothesis_rank": 1,
+      "initial_confidence": 0.45,
+      "final_confidence": 0.45,
+      "confidence_delta": 0.0,
+      "final_hypothesis_status": "PROPOSED",
+      "evidence_count": 0,
+      "supporting_evidence_count": 0,
+      "contradicting_evidence_count": 0,
+      "independent_source_types": [],
+      "validator_invoked": true,
+      "validator_invocation_count": 1,
+      "validator_validated": false,
+      "validator_missing_evidence": [],
+      "validator_contradictions": [],
+      "tool_calls": 5,
+      "sql_calls": 5,
+      "neutral_evidence_count": 5,
+      "neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "F01 partition observation is outside the metric scope",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "golden_neutral_evidence_count": 1,
+      "golden_neutral_reasons": [
+        "the returned SQL values matched no evidence rule"
+      ],
+      "plan_steps": 5,
+      "executed_steps": 5,
+      "plan_exhausted": true,
+      "evidence_funnel": {
+        "observations_total": 5,
+        "evidence_registered": 0,
+        "supports_total": 0,
+        "contradicts_total": 0,
+        "neutral_total": 5,
+        "golden_supports": 0,
+        "golden_contradictions": 0,
+        "golden_eligible_for_validator": false
+      },
+      "cause_chain": [
+        "Planner proposed unit_error as rank 1 (H01).",
+        "Tools executed 5 of 5 planned steps.",
+        "Golden evidence ended with 0 supports, 0 contradictions, and 1 neutral decisions.",
+        "Golden hypothesis ended PROPOSED at confidence 0.45.",
+        "Golden validator was invoked and validated=False.",
+        "Earliest bottleneck: EVIDENCE_NEUTRALIZED; recommended owner: EvidenceInterpreter."
+      ]
+    },
+    {
+      "case_id": "F06-005",
+      "fault_id": "F06",
+      "golden_root_cause": "unit_error",
+      "runtime_status": "UNRESOLVED",
+      "runtime_error": null,
+      "abstained": true,
+      "primary_abstention_cause": "EVIDENCE_NEUTRALIZED",
+      "secondary_causes": [
+        "VALIDATOR_REJECTED",
+        "PLAN_EXHAUSTED"
+      ],
+      "attributed_component": "EvidenceInterpreter",
+      "golden_hypothesis_present": true,
+      "golden_hypothesis_id": "H01",
+      "golden_hypothesis_rank": 1,
+      "initial_confidence": 0.45,
+      "final_confidence": 0.45,
+      "confidence_delta": 0.0,
+      "final_hypothesis_status": "PROPOSED",
+      "evidence_count": 0,
+      "supporting_evidence_count": 0,
+      "contradicting_evidence_count": 0,
+      "independent_source_types": [],
+      "validator_invoked": true,
+      "validator_invocation_count": 1,
+      "validator_validated": false,
+      "validator_missing_evidence": [],
+      "validator_contradictions": [],
+      "tool_calls": 5,
+      "sql_calls": 5,
+      "neutral_evidence_count": 5,
+      "neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "F01 partition observation is outside the metric scope",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "golden_neutral_evidence_count": 1,
+      "golden_neutral_reasons": [
+        "the returned SQL values matched no evidence rule"
+      ],
+      "plan_steps": 5,
+      "executed_steps": 5,
+      "plan_exhausted": true,
+      "evidence_funnel": {
+        "observations_total": 5,
+        "evidence_registered": 0,
+        "supports_total": 0,
+        "contradicts_total": 0,
+        "neutral_total": 5,
+        "golden_supports": 0,
+        "golden_contradictions": 0,
+        "golden_eligible_for_validator": false
+      },
+      "cause_chain": [
+        "Planner proposed unit_error as rank 1 (H01).",
+        "Tools executed 5 of 5 planned steps.",
+        "Golden evidence ended with 0 supports, 0 contradictions, and 1 neutral decisions.",
+        "Golden hypothesis ended PROPOSED at confidence 0.45.",
+        "Golden validator was invoked and validated=False.",
+        "Earliest bottleneck: EVIDENCE_NEUTRALIZED; recommended owner: EvidenceInterpreter."
+      ]
+    },
+    {
+      "case_id": "F07-001",
+      "fault_id": "F07",
+      "golden_root_cause": "join_filter",
+      "runtime_status": "UNRESOLVED",
+      "runtime_error": null,
+      "abstained": true,
+      "primary_abstention_cause": "EVIDENCE_NEUTRALIZED",
+      "secondary_causes": [
+        "VALIDATOR_REJECTED",
+        "PLAN_EXHAUSTED"
+      ],
+      "attributed_component": "EvidenceInterpreter",
+      "golden_hypothesis_present": true,
+      "golden_hypothesis_id": "H04",
+      "golden_hypothesis_rank": 4,
+      "initial_confidence": 0.15,
+      "final_confidence": 0.15,
+      "confidence_delta": 0.0,
+      "final_hypothesis_status": "PROPOSED",
+      "evidence_count": 0,
+      "supporting_evidence_count": 0,
+      "contradicting_evidence_count": 0,
+      "independent_source_types": [],
+      "validator_invoked": true,
+      "validator_invocation_count": 1,
+      "validator_validated": false,
+      "validator_missing_evidence": [],
+      "validator_contradictions": [],
+      "tool_calls": 5,
+      "sql_calls": 5,
+      "neutral_evidence_count": 4,
+      "neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "golden_neutral_evidence_count": 1,
+      "golden_neutral_reasons": [
+        "the returned SQL values matched no evidence rule"
+      ],
+      "plan_steps": 5,
+      "executed_steps": 5,
+      "plan_exhausted": true,
+      "evidence_funnel": {
+        "observations_total": 5,
+        "evidence_registered": 1,
+        "supports_total": 0,
+        "contradicts_total": 1,
+        "neutral_total": 4,
+        "golden_supports": 0,
+        "golden_contradictions": 0,
+        "golden_eligible_for_validator": false
+      },
+      "cause_chain": [
+        "Planner proposed join_filter as rank 4 (H04).",
+        "Tools executed 5 of 5 planned steps.",
+        "Golden evidence ended with 0 supports, 0 contradictions, and 1 neutral decisions.",
+        "Golden hypothesis ended PROPOSED at confidence 0.15.",
+        "Golden validator was invoked and validated=False.",
+        "Earliest bottleneck: EVIDENCE_NEUTRALIZED; recommended owner: EvidenceInterpreter."
+      ]
+    },
+    {
+      "case_id": "F08-001",
+      "fault_id": "F08",
+      "golden_root_cause": "join_explosion",
+      "runtime_status": "UNRESOLVED",
+      "runtime_error": null,
+      "abstained": true,
+      "primary_abstention_cause": "HYPOTHESIS_MISSING",
+      "secondary_causes": [
+        "PLAN_EXHAUSTED"
+      ],
+      "attributed_component": "Planner",
+      "golden_hypothesis_present": false,
+      "golden_hypothesis_id": null,
+      "golden_hypothesis_rank": null,
+      "initial_confidence": null,
+      "final_confidence": null,
+      "confidence_delta": null,
+      "final_hypothesis_status": null,
+      "evidence_count": 0,
+      "supporting_evidence_count": 0,
+      "contradicting_evidence_count": 0,
+      "independent_source_types": [],
+      "validator_invoked": false,
+      "validator_invocation_count": 0,
+      "validator_validated": null,
+      "validator_missing_evidence": null,
+      "validator_contradictions": null,
+      "tool_calls": 6,
+      "sql_calls": 5,
+      "neutral_evidence_count": 6,
+      "neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "SQL result validation failed",
+        "passed data-quality checks are neutral by default",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "golden_neutral_evidence_count": 0,
+      "golden_neutral_reasons": [],
+      "plan_steps": 6,
+      "executed_steps": 6,
+      "plan_exhausted": true,
+      "evidence_funnel": {
+        "observations_total": 6,
+        "evidence_registered": 0,
+        "supports_total": 0,
+        "contradicts_total": 0,
+        "neutral_total": 6,
+        "golden_supports": 0,
+        "golden_contradictions": 0,
+        "golden_eligible_for_validator": null
+      },
+      "cause_chain": [
+        "Planner did not propose the golden root cause join_explosion.",
+        "Tools executed 6 of 6 planned steps.",
+        "Golden evidence ended with 0 supports, 0 contradictions, and 0 neutral decisions.",
+        "No golden hypothesis lifecycle existed.",
+        "Golden validator was never invoked.",
+        "Earliest bottleneck: HYPOTHESIS_MISSING; recommended owner: Planner."
+      ]
+    },
+    {
+      "case_id": "F08-003",
+      "fault_id": "F08",
+      "golden_root_cause": "join_explosion",
+      "runtime_status": "UNRESOLVED",
+      "runtime_error": null,
+      "abstained": true,
+      "primary_abstention_cause": "EVIDENCE_NEUTRALIZED",
+      "secondary_causes": [
+        "VALIDATOR_REJECTED",
+        "PLAN_EXHAUSTED"
+      ],
+      "attributed_component": "EvidenceInterpreter",
+      "golden_hypothesis_present": true,
+      "golden_hypothesis_id": "H2",
+      "golden_hypothesis_rank": 2,
+      "initial_confidence": 0.25,
+      "final_confidence": 0.25,
+      "confidence_delta": 0.0,
+      "final_hypothesis_status": "PROPOSED",
+      "evidence_count": 0,
+      "supporting_evidence_count": 0,
+      "contradicting_evidence_count": 0,
+      "independent_source_types": [],
+      "validator_invoked": true,
+      "validator_invocation_count": 1,
+      "validator_validated": false,
+      "validator_missing_evidence": [],
+      "validator_contradictions": [],
+      "tool_calls": 7,
+      "sql_calls": 6,
+      "neutral_evidence_count": 7,
+      "neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "SQL result validation failed",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "passed data-quality checks are neutral by default",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "golden_neutral_evidence_count": 1,
+      "golden_neutral_reasons": [
+        "the returned SQL values matched no evidence rule"
+      ],
+      "plan_steps": 7,
+      "executed_steps": 7,
+      "plan_exhausted": true,
+      "evidence_funnel": {
+        "observations_total": 7,
+        "evidence_registered": 0,
+        "supports_total": 0,
+        "contradicts_total": 0,
+        "neutral_total": 7,
+        "golden_supports": 0,
+        "golden_contradictions": 0,
+        "golden_eligible_for_validator": false
+      },
+      "cause_chain": [
+        "Planner proposed join_explosion as rank 2 (H2).",
+        "Tools executed 7 of 7 planned steps.",
+        "Golden evidence ended with 0 supports, 0 contradictions, and 1 neutral decisions.",
+        "Golden hypothesis ended PROPOSED at confidence 0.25.",
+        "Golden validator was invoked and validated=False.",
+        "Earliest bottleneck: EVIDENCE_NEUTRALIZED; recommended owner: EvidenceInterpreter."
+      ]
+    },
+    {
+      "case_id": "F08-005",
+      "fault_id": "F08",
+      "golden_root_cause": "join_explosion",
+      "runtime_status": "UNRESOLVED",
+      "runtime_error": null,
+      "abstained": true,
+      "primary_abstention_cause": "EVIDENCE_NEUTRALIZED",
+      "secondary_causes": [
+        "VALIDATOR_REJECTED",
+        "PLAN_EXHAUSTED"
+      ],
+      "attributed_component": "EvidenceInterpreter",
+      "golden_hypothesis_present": true,
+      "golden_hypothesis_id": "H2",
+      "golden_hypothesis_rank": 2,
+      "initial_confidence": 0.2,
+      "final_confidence": 0.2,
+      "confidence_delta": 0.0,
+      "final_hypothesis_status": "PROPOSED",
+      "evidence_count": 0,
+      "supporting_evidence_count": 0,
+      "contradicting_evidence_count": 0,
+      "independent_source_types": [],
+      "validator_invoked": true,
+      "validator_invocation_count": 1,
+      "validator_validated": false,
+      "validator_missing_evidence": [],
+      "validator_contradictions": [],
+      "tool_calls": 5,
+      "sql_calls": 4,
+      "neutral_evidence_count": 5,
+      "neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "SQL result validation failed",
+        "passed data-quality checks are neutral by default",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "golden_neutral_evidence_count": 1,
+      "golden_neutral_reasons": [
+        "SQL result validation failed"
+      ],
+      "plan_steps": 5,
+      "executed_steps": 5,
+      "plan_exhausted": true,
+      "evidence_funnel": {
+        "observations_total": 5,
+        "evidence_registered": 0,
+        "supports_total": 0,
+        "contradicts_total": 0,
+        "neutral_total": 5,
+        "golden_supports": 0,
+        "golden_contradictions": 0,
+        "golden_eligible_for_validator": false
+      },
+      "cause_chain": [
+        "Planner proposed join_explosion as rank 2 (H2).",
+        "Tools executed 5 of 5 planned steps.",
+        "Golden evidence ended with 0 supports, 0 contradictions, and 1 neutral decisions.",
+        "Golden hypothesis ended PROPOSED at confidence 0.20.",
+        "Golden validator was invoked and validated=False.",
+        "Earliest bottleneck: EVIDENCE_NEUTRALIZED; recommended owner: EvidenceInterpreter."
+      ]
+    },
+    {
+      "case_id": "F09-001",
+      "fault_id": "F09",
+      "golden_root_cause": "field_drift",
+      "runtime_status": "UNRESOLVED",
+      "runtime_error": null,
+      "abstained": true,
+      "primary_abstention_cause": "EVIDENCE_MISSING",
+      "secondary_causes": [
+        "VALIDATOR_REJECTED",
+        "PLAN_EXHAUSTED"
+      ],
+      "attributed_component": "Tool coverage / plan",
+      "golden_hypothesis_present": true,
+      "golden_hypothesis_id": "H5",
+      "golden_hypothesis_rank": 5,
+      "initial_confidence": 0.22,
+      "final_confidence": 0.37,
+      "confidence_delta": 0.15,
+      "final_hypothesis_status": "TESTING",
+      "evidence_count": 1,
+      "supporting_evidence_count": 1,
+      "contradicting_evidence_count": 0,
+      "independent_source_types": [
+        "business_data"
+      ],
+      "validator_invoked": true,
+      "validator_invocation_count": 1,
+      "validator_validated": false,
+      "validator_missing_evidence": [],
+      "validator_contradictions": [],
+      "tool_calls": 7,
+      "sql_calls": 5,
+      "neutral_evidence_count": 6,
+      "neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "passed data-quality checks are neutral by default",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "golden_neutral_evidence_count": 0,
+      "golden_neutral_reasons": [],
+      "plan_steps": 7,
+      "executed_steps": 7,
+      "plan_exhausted": true,
+      "evidence_funnel": {
+        "observations_total": 7,
+        "evidence_registered": 1,
+        "supports_total": 1,
+        "contradicts_total": 0,
+        "neutral_total": 6,
+        "golden_supports": 1,
+        "golden_contradictions": 0,
+        "golden_eligible_for_validator": false
+      },
+      "cause_chain": [
+        "Planner proposed field_drift as rank 5 (H5).",
+        "Tools executed 7 of 7 planned steps.",
+        "Golden evidence ended with 1 supports, 0 contradictions, and 0 neutral decisions.",
+        "Golden hypothesis ended TESTING at confidence 0.37.",
+        "Golden validator was invoked and validated=False.",
+        "Earliest bottleneck: EVIDENCE_MISSING; recommended owner: Tool coverage / plan."
+      ]
+    },
+    {
+      "case_id": "F09-003",
+      "fault_id": "F09",
+      "golden_root_cause": "field_drift",
+      "runtime_status": "UNRESOLVED",
+      "runtime_error": null,
+      "abstained": true,
+      "primary_abstention_cause": "EVIDENCE_NEUTRALIZED",
+      "secondary_causes": [
+        "VALIDATOR_REJECTED",
+        "PLAN_EXHAUSTED"
+      ],
+      "attributed_component": "EvidenceInterpreter",
+      "golden_hypothesis_present": true,
+      "golden_hypothesis_id": "H4",
+      "golden_hypothesis_rank": 4,
+      "initial_confidence": 0.2,
+      "final_confidence": 0.35,
+      "confidence_delta": 0.15,
+      "final_hypothesis_status": "TESTING",
+      "evidence_count": 1,
+      "supporting_evidence_count": 1,
+      "contradicting_evidence_count": 0,
+      "independent_source_types": [
+        "business_data"
+      ],
+      "validator_invoked": true,
+      "validator_invocation_count": 2,
+      "validator_validated": false,
+      "validator_missing_evidence": [],
+      "validator_contradictions": [],
+      "tool_calls": 5,
+      "sql_calls": 4,
+      "neutral_evidence_count": 4,
+      "neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "golden_neutral_evidence_count": 1,
+      "golden_neutral_reasons": [
+        "the returned SQL values matched no evidence rule"
+      ],
+      "plan_steps": 5,
+      "executed_steps": 5,
+      "plan_exhausted": true,
+      "evidence_funnel": {
+        "observations_total": 5,
+        "evidence_registered": 1,
+        "supports_total": 1,
+        "contradicts_total": 0,
+        "neutral_total": 4,
+        "golden_supports": 1,
+        "golden_contradictions": 0,
+        "golden_eligible_for_validator": false
+      },
+      "cause_chain": [
+        "Planner proposed field_drift as rank 4 (H4).",
+        "Tools executed 5 of 5 planned steps.",
+        "Golden evidence ended with 1 supports, 0 contradictions, and 1 neutral decisions.",
+        "Golden hypothesis ended TESTING at confidence 0.35.",
+        "Golden validator was invoked and validated=False.",
+        "Earliest bottleneck: EVIDENCE_NEUTRALIZED; recommended owner: EvidenceInterpreter."
+      ]
+    },
+    {
+      "case_id": "F10-001",
+      "fault_id": "F10",
+      "golden_root_cause": "schema_change",
+      "runtime_status": "UNRESOLVED",
+      "runtime_error": null,
+      "abstained": true,
+      "primary_abstention_cause": "EVIDENCE_MISSING",
+      "secondary_causes": [
+        "VALIDATOR_REJECTED",
+        "PLAN_EXHAUSTED"
+      ],
+      "attributed_component": "Tool coverage / plan",
+      "golden_hypothesis_present": true,
+      "golden_hypothesis_id": "H5",
+      "golden_hypothesis_rank": 5,
+      "initial_confidence": 0.1,
+      "final_confidence": 0.25,
+      "confidence_delta": 0.15,
+      "final_hypothesis_status": "TESTING",
+      "evidence_count": 1,
+      "supporting_evidence_count": 1,
+      "contradicting_evidence_count": 0,
+      "independent_source_types": [
+        "schema_metadata"
+      ],
+      "validator_invoked": true,
+      "validator_invocation_count": 1,
+      "validator_validated": false,
+      "validator_missing_evidence": [],
+      "validator_contradictions": [],
+      "tool_calls": 5,
+      "sql_calls": 2,
+      "neutral_evidence_count": 4,
+      "neutral_reasons": [
+        "check_freshness is not compatible with missing_partition",
+        "the returned SQL values matched no evidence rule",
+        "null-rate observation has no rows; null rate is undefined",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "golden_neutral_evidence_count": 0,
+      "golden_neutral_reasons": [],
+      "plan_steps": 5,
+      "executed_steps": 5,
+      "plan_exhausted": true,
+      "evidence_funnel": {
+        "observations_total": 5,
+        "evidence_registered": 1,
+        "supports_total": 1,
+        "contradicts_total": 0,
+        "neutral_total": 4,
+        "golden_supports": 1,
+        "golden_contradictions": 0,
+        "golden_eligible_for_validator": false
+      },
+      "cause_chain": [
+        "Planner proposed schema_change as rank 5 (H5).",
+        "Tools executed 5 of 5 planned steps.",
+        "Golden evidence ended with 1 supports, 0 contradictions, and 0 neutral decisions.",
+        "Golden hypothesis ended TESTING at confidence 0.25.",
+        "Golden validator was invoked and validated=False.",
+        "Earliest bottleneck: EVIDENCE_MISSING; recommended owner: Tool coverage / plan."
+      ]
+    },
+    {
+      "case_id": "F10-003",
+      "fault_id": "F10",
+      "golden_root_cause": "schema_change",
+      "runtime_status": "UNRESOLVED",
+      "runtime_error": null,
+      "abstained": true,
+      "primary_abstention_cause": "EVIDENCE_MISSING",
+      "secondary_causes": [
+        "VALIDATOR_REJECTED",
+        "PLAN_EXHAUSTED"
+      ],
+      "attributed_component": "Tool coverage / plan",
+      "golden_hypothesis_present": true,
+      "golden_hypothesis_id": "H5",
+      "golden_hypothesis_rank": 5,
+      "initial_confidence": 0.15,
+      "final_confidence": 0.3,
+      "confidence_delta": 0.15,
+      "final_hypothesis_status": "TESTING",
+      "evidence_count": 1,
+      "supporting_evidence_count": 1,
+      "contradicting_evidence_count": 0,
+      "independent_source_types": [
+        "schema_metadata"
+      ],
+      "validator_invoked": true,
+      "validator_invocation_count": 1,
+      "validator_validated": false,
+      "validator_missing_evidence": [],
+      "validator_contradictions": [],
+      "tool_calls": 6,
+      "sql_calls": 3,
+      "neutral_evidence_count": 5,
+      "neutral_reasons": [
+        "check_freshness is not compatible with missing_partition",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "null-rate observation has no rows; null rate is undefined",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "golden_neutral_evidence_count": 0,
+      "golden_neutral_reasons": [],
+      "plan_steps": 6,
+      "executed_steps": 6,
+      "plan_exhausted": true,
+      "evidence_funnel": {
+        "observations_total": 6,
+        "evidence_registered": 1,
+        "supports_total": 1,
+        "contradicts_total": 0,
+        "neutral_total": 5,
+        "golden_supports": 1,
+        "golden_contradictions": 0,
+        "golden_eligible_for_validator": false
+      },
+      "cause_chain": [
+        "Planner proposed schema_change as rank 5 (H5).",
+        "Tools executed 6 of 6 planned steps.",
+        "Golden evidence ended with 1 supports, 0 contradictions, and 0 neutral decisions.",
+        "Golden hypothesis ended TESTING at confidence 0.30.",
+        "Golden validator was invoked and validated=False.",
+        "Earliest bottleneck: EVIDENCE_MISSING; recommended owner: Tool coverage / plan."
+      ]
+    },
+    {
+      "case_id": "F10-004",
+      "fault_id": "F10",
+      "golden_root_cause": "schema_change",
+      "runtime_status": "UNRESOLVED",
+      "runtime_error": null,
+      "abstained": true,
+      "primary_abstention_cause": "EVIDENCE_MISSING",
+      "secondary_causes": [
+        "VALIDATOR_REJECTED",
+        "PLAN_EXHAUSTED"
+      ],
+      "attributed_component": "Tool coverage / plan",
+      "golden_hypothesis_present": true,
+      "golden_hypothesis_id": "H5",
+      "golden_hypothesis_rank": 5,
+      "initial_confidence": 0.15,
+      "final_confidence": 0.3,
+      "confidence_delta": 0.15,
+      "final_hypothesis_status": "TESTING",
+      "evidence_count": 1,
+      "supporting_evidence_count": 1,
+      "contradicting_evidence_count": 0,
+      "independent_source_types": [
+        "schema_metadata"
+      ],
+      "validator_invoked": true,
+      "validator_invocation_count": 1,
+      "validator_validated": false,
+      "validator_missing_evidence": [],
+      "validator_contradictions": [],
+      "tool_calls": 5,
+      "sql_calls": 3,
+      "neutral_evidence_count": 4,
+      "neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "null-rate observation has no rows; null rate is undefined",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "golden_neutral_evidence_count": 0,
+      "golden_neutral_reasons": [],
+      "plan_steps": 5,
+      "executed_steps": 5,
+      "plan_exhausted": true,
+      "evidence_funnel": {
+        "observations_total": 5,
+        "evidence_registered": 1,
+        "supports_total": 1,
+        "contradicts_total": 0,
+        "neutral_total": 4,
+        "golden_supports": 1,
+        "golden_contradictions": 0,
+        "golden_eligible_for_validator": false
+      },
+      "cause_chain": [
+        "Planner proposed schema_change as rank 5 (H5).",
+        "Tools executed 5 of 5 planned steps.",
+        "Golden evidence ended with 1 supports, 0 contradictions, and 0 neutral decisions.",
+        "Golden hypothesis ended TESTING at confidence 0.30.",
+        "Golden validator was invoked and validated=False.",
+        "Earliest bottleneck: EVIDENCE_MISSING; recommended owner: Tool coverage / plan."
+      ]
+    },
+    {
+      "case_id": "F10-005",
+      "fault_id": "F10",
+      "golden_root_cause": "schema_change",
+      "runtime_status": "UNRESOLVED",
+      "runtime_error": null,
+      "abstained": true,
+      "primary_abstention_cause": "EVIDENCE_MISSING",
+      "secondary_causes": [
+        "VALIDATOR_REJECTED",
+        "PLAN_EXHAUSTED"
+      ],
+      "attributed_component": "Tool coverage / plan",
+      "golden_hypothesis_present": true,
+      "golden_hypothesis_id": "H5",
+      "golden_hypothesis_rank": 5,
+      "initial_confidence": 0.15,
+      "final_confidence": 0.3,
+      "confidence_delta": 0.15,
+      "final_hypothesis_status": "TESTING",
+      "evidence_count": 1,
+      "supporting_evidence_count": 1,
+      "contradicting_evidence_count": 0,
+      "independent_source_types": [
+        "schema_metadata"
+      ],
+      "validator_invoked": true,
+      "validator_invocation_count": 1,
+      "validator_validated": false,
+      "validator_missing_evidence": [],
+      "validator_contradictions": [],
+      "tool_calls": 6,
+      "sql_calls": 3,
+      "neutral_evidence_count": 5,
+      "neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "check_freshness is not compatible with missing_partition",
+        "the returned SQL values matched no evidence rule",
+        "null-rate observation has no rows; null rate is undefined",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "golden_neutral_evidence_count": 0,
+      "golden_neutral_reasons": [],
+      "plan_steps": 6,
+      "executed_steps": 6,
+      "plan_exhausted": true,
+      "evidence_funnel": {
+        "observations_total": 6,
+        "evidence_registered": 1,
+        "supports_total": 1,
+        "contradicts_total": 0,
+        "neutral_total": 5,
+        "golden_supports": 1,
+        "golden_contradictions": 0,
+        "golden_eligible_for_validator": false
+      },
+      "cause_chain": [
+        "Planner proposed schema_change as rank 5 (H5).",
+        "Tools executed 6 of 6 planned steps.",
+        "Golden evidence ended with 1 supports, 0 contradictions, and 0 neutral decisions.",
+        "Golden hypothesis ended TESTING at confidence 0.30.",
+        "Golden validator was invoked and validated=False.",
+        "Earliest bottleneck: EVIDENCE_MISSING; recommended owner: Tool coverage / plan."
+      ]
+    },
+    {
+      "case_id": "F11-001",
+      "fault_id": "F11",
+      "golden_root_cause": "metric_definition_change",
+      "runtime_status": "UNRESOLVED",
+      "runtime_error": null,
+      "abstained": true,
+      "primary_abstention_cause": "HYPOTHESIS_MISSING",
+      "secondary_causes": [
+        "PLAN_EXHAUSTED"
+      ],
+      "attributed_component": "Planner",
+      "golden_hypothesis_present": false,
+      "golden_hypothesis_id": null,
+      "golden_hypothesis_rank": null,
+      "initial_confidence": null,
+      "final_confidence": null,
+      "confidence_delta": null,
+      "final_hypothesis_status": null,
+      "evidence_count": 0,
+      "supporting_evidence_count": 0,
+      "contradicting_evidence_count": 0,
+      "independent_source_types": [],
+      "validator_invoked": false,
+      "validator_invocation_count": 0,
+      "validator_validated": null,
+      "validator_missing_evidence": null,
+      "validator_contradictions": null,
+      "tool_calls": 5,
+      "sql_calls": 5,
+      "neutral_evidence_count": 4,
+      "neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "golden_neutral_evidence_count": 0,
+      "golden_neutral_reasons": [],
+      "plan_steps": 5,
+      "executed_steps": 5,
+      "plan_exhausted": true,
+      "evidence_funnel": {
+        "observations_total": 5,
+        "evidence_registered": 1,
+        "supports_total": 0,
+        "contradicts_total": 1,
+        "neutral_total": 4,
+        "golden_supports": 0,
+        "golden_contradictions": 0,
+        "golden_eligible_for_validator": null
+      },
+      "cause_chain": [
+        "Planner did not propose the golden root cause metric_definition_change.",
+        "Tools executed 5 of 5 planned steps.",
+        "Golden evidence ended with 0 supports, 0 contradictions, and 0 neutral decisions.",
+        "No golden hypothesis lifecycle existed.",
+        "Golden validator was never invoked.",
+        "Earliest bottleneck: HYPOTHESIS_MISSING; recommended owner: Planner."
+      ]
+    },
+    {
+      "case_id": "F12-001",
+      "fault_id": "F12",
+      "golden_root_cause": "ab_split_anomaly",
+      "runtime_status": "UNRESOLVED",
+      "runtime_error": null,
+      "abstained": true,
+      "primary_abstention_cause": "HYPOTHESIS_MISSING",
+      "secondary_causes": [
+        "PLAN_EXHAUSTED"
+      ],
+      "attributed_component": "Planner",
+      "golden_hypothesis_present": false,
+      "golden_hypothesis_id": null,
+      "golden_hypothesis_rank": null,
+      "initial_confidence": null,
+      "final_confidence": null,
+      "confidence_delta": null,
+      "final_hypothesis_status": null,
+      "evidence_count": 0,
+      "supporting_evidence_count": 0,
+      "contradicting_evidence_count": 0,
+      "independent_source_types": [],
+      "validator_invoked": false,
+      "validator_invocation_count": 0,
+      "validator_validated": null,
+      "validator_missing_evidence": null,
+      "validator_contradictions": null,
+      "tool_calls": 9,
+      "sql_calls": 7,
+      "neutral_evidence_count": 9,
+      "neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "passed data-quality checks are neutral by default",
+        "passed data-quality checks are neutral by default"
+      ],
+      "golden_neutral_evidence_count": 0,
+      "golden_neutral_reasons": [],
+      "plan_steps": 9,
+      "executed_steps": 9,
+      "plan_exhausted": true,
+      "evidence_funnel": {
+        "observations_total": 9,
+        "evidence_registered": 0,
+        "supports_total": 0,
+        "contradicts_total": 0,
+        "neutral_total": 9,
+        "golden_supports": 0,
+        "golden_contradictions": 0,
+        "golden_eligible_for_validator": null
+      },
+      "cause_chain": [
+        "Planner did not propose the golden root cause ab_split_anomaly.",
+        "Tools executed 9 of 9 planned steps.",
+        "Golden evidence ended with 0 supports, 0 contradictions, and 0 neutral decisions.",
+        "No golden hypothesis lifecycle existed.",
+        "Golden validator was never invoked.",
+        "Earliest bottleneck: HYPOTHESIS_MISSING; recommended owner: Planner."
+      ]
+    },
+    {
+      "case_id": "F12-002",
+      "fault_id": "F12",
+      "golden_root_cause": "ab_split_anomaly",
+      "runtime_status": "UNRESOLVED",
+      "runtime_error": null,
+      "abstained": true,
+      "primary_abstention_cause": "EVIDENCE_NEUTRALIZED",
+      "secondary_causes": [
+        "VALIDATOR_REJECTED",
+        "PLAN_EXHAUSTED"
+      ],
+      "attributed_component": "EvidenceInterpreter",
+      "golden_hypothesis_present": true,
+      "golden_hypothesis_id": "H5",
+      "golden_hypothesis_rank": 5,
+      "initial_confidence": 0.18,
+      "final_confidence": 0.18,
+      "confidence_delta": 0.0,
+      "final_hypothesis_status": "PROPOSED",
+      "evidence_count": 0,
+      "supporting_evidence_count": 0,
+      "contradicting_evidence_count": 0,
+      "independent_source_types": [],
+      "validator_invoked": true,
+      "validator_invocation_count": 2,
+      "validator_validated": false,
+      "validator_missing_evidence": [],
+      "validator_contradictions": [],
+      "tool_calls": 7,
+      "sql_calls": 7,
+      "neutral_evidence_count": 7,
+      "neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "golden_neutral_evidence_count": 2,
+      "golden_neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "plan_steps": 7,
+      "executed_steps": 7,
+      "plan_exhausted": true,
+      "evidence_funnel": {
+        "observations_total": 7,
+        "evidence_registered": 0,
+        "supports_total": 0,
+        "contradicts_total": 0,
+        "neutral_total": 7,
+        "golden_supports": 0,
+        "golden_contradictions": 0,
+        "golden_eligible_for_validator": false
+      },
+      "cause_chain": [
+        "Planner proposed ab_split_anomaly as rank 5 (H5).",
+        "Tools executed 7 of 7 planned steps.",
+        "Golden evidence ended with 0 supports, 0 contradictions, and 2 neutral decisions.",
+        "Golden hypothesis ended PROPOSED at confidence 0.18.",
+        "Golden validator was invoked and validated=False.",
+        "Earliest bottleneck: EVIDENCE_NEUTRALIZED; recommended owner: EvidenceInterpreter."
+      ]
+    },
+    {
+      "case_id": "F12-003",
+      "fault_id": "F12",
+      "golden_root_cause": "ab_split_anomaly",
+      "runtime_status": "UNRESOLVED",
+      "runtime_error": null,
+      "abstained": true,
+      "primary_abstention_cause": "HYPOTHESIS_MISSING",
+      "secondary_causes": [
+        "PLAN_EXHAUSTED"
+      ],
+      "attributed_component": "Planner",
+      "golden_hypothesis_present": false,
+      "golden_hypothesis_id": null,
+      "golden_hypothesis_rank": null,
+      "initial_confidence": null,
+      "final_confidence": null,
+      "confidence_delta": null,
+      "final_hypothesis_status": null,
+      "evidence_count": 0,
+      "supporting_evidence_count": 0,
+      "contradicting_evidence_count": 0,
+      "independent_source_types": [],
+      "validator_invoked": false,
+      "validator_invocation_count": 0,
+      "validator_validated": null,
+      "validator_missing_evidence": null,
+      "validator_contradictions": null,
+      "tool_calls": 7,
+      "sql_calls": 5,
+      "neutral_evidence_count": 7,
+      "neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "passed data-quality checks are neutral by default",
+        "passed data-quality checks are neutral by default",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "golden_neutral_evidence_count": 0,
+      "golden_neutral_reasons": [],
+      "plan_steps": 7,
+      "executed_steps": 7,
+      "plan_exhausted": true,
+      "evidence_funnel": {
+        "observations_total": 7,
+        "evidence_registered": 0,
+        "supports_total": 0,
+        "contradicts_total": 0,
+        "neutral_total": 7,
+        "golden_supports": 0,
+        "golden_contradictions": 0,
+        "golden_eligible_for_validator": null
+      },
+      "cause_chain": [
+        "Planner did not propose the golden root cause ab_split_anomaly.",
+        "Tools executed 7 of 7 planned steps.",
+        "Golden evidence ended with 0 supports, 0 contradictions, and 0 neutral decisions.",
+        "No golden hypothesis lifecycle existed.",
+        "Golden validator was never invoked.",
+        "Earliest bottleneck: HYPOTHESIS_MISSING; recommended owner: Planner."
+      ]
+    },
+    {
+      "case_id": "F12-004",
+      "fault_id": "F12",
+      "golden_root_cause": "ab_split_anomaly",
+      "runtime_status": "UNRESOLVED",
+      "runtime_error": null,
+      "abstained": true,
+      "primary_abstention_cause": "EVIDENCE_NEUTRALIZED",
+      "secondary_causes": [
+        "VALIDATOR_REJECTED",
+        "PLAN_EXHAUSTED"
+      ],
+      "attributed_component": "EvidenceInterpreter",
+      "golden_hypothesis_present": true,
+      "golden_hypothesis_id": "H5",
+      "golden_hypothesis_rank": 5,
+      "initial_confidence": 0.15,
+      "final_confidence": 0.15,
+      "confidence_delta": 0.0,
+      "final_hypothesis_status": "PROPOSED",
+      "evidence_count": 0,
+      "supporting_evidence_count": 0,
+      "contradicting_evidence_count": 0,
+      "independent_source_types": [],
+      "validator_invoked": true,
+      "validator_invocation_count": 1,
+      "validator_validated": false,
+      "validator_missing_evidence": [],
+      "validator_contradictions": [],
+      "tool_calls": 7,
+      "sql_calls": 7,
+      "neutral_evidence_count": 7,
+      "neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "golden_neutral_evidence_count": 1,
+      "golden_neutral_reasons": [
+        "the returned SQL values matched no evidence rule"
+      ],
+      "plan_steps": 7,
+      "executed_steps": 7,
+      "plan_exhausted": true,
+      "evidence_funnel": {
+        "observations_total": 7,
+        "evidence_registered": 0,
+        "supports_total": 0,
+        "contradicts_total": 0,
+        "neutral_total": 7,
+        "golden_supports": 0,
+        "golden_contradictions": 0,
+        "golden_eligible_for_validator": false
+      },
+      "cause_chain": [
+        "Planner proposed ab_split_anomaly as rank 5 (H5).",
+        "Tools executed 7 of 7 planned steps.",
+        "Golden evidence ended with 0 supports, 0 contradictions, and 1 neutral decisions.",
+        "Golden hypothesis ended PROPOSED at confidence 0.15.",
+        "Golden validator was invoked and validated=False.",
+        "Earliest bottleneck: EVIDENCE_NEUTRALIZED; recommended owner: EvidenceInterpreter."
+      ]
+    },
+    {
+      "case_id": "F12-005",
+      "fault_id": "F12",
+      "golden_root_cause": "ab_split_anomaly",
+      "runtime_status": "UNRESOLVED",
+      "runtime_error": null,
+      "abstained": true,
+      "primary_abstention_cause": "EVIDENCE_NEUTRALIZED",
+      "secondary_causes": [
+        "VALIDATOR_REJECTED",
+        "PLAN_EXHAUSTED"
+      ],
+      "attributed_component": "EvidenceInterpreter",
+      "golden_hypothesis_present": true,
+      "golden_hypothesis_id": "H5",
+      "golden_hypothesis_rank": 5,
+      "initial_confidence": 0.15,
+      "final_confidence": 0.15,
+      "confidence_delta": 0.0,
+      "final_hypothesis_status": "PROPOSED",
+      "evidence_count": 0,
+      "supporting_evidence_count": 0,
+      "contradicting_evidence_count": 0,
+      "independent_source_types": [],
+      "validator_invoked": true,
+      "validator_invocation_count": 2,
+      "validator_validated": false,
+      "validator_missing_evidence": [],
+      "validator_contradictions": [],
+      "tool_calls": 7,
+      "sql_calls": 7,
+      "neutral_evidence_count": 7,
+      "neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "golden_neutral_evidence_count": 2,
+      "golden_neutral_reasons": [
+        "the returned SQL values matched no evidence rule",
+        "the returned SQL values matched no evidence rule"
+      ],
+      "plan_steps": 7,
+      "executed_steps": 7,
+      "plan_exhausted": true,
+      "evidence_funnel": {
+        "observations_total": 7,
+        "evidence_registered": 0,
+        "supports_total": 0,
+        "contradicts_total": 0,
+        "neutral_total": 7,
+        "golden_supports": 0,
+        "golden_contradictions": 0,
+        "golden_eligible_for_validator": false
+      },
+      "cause_chain": [
+        "Planner proposed ab_split_anomaly as rank 5 (H5).",
+        "Tools executed 7 of 7 planned steps.",
+        "Golden evidence ended with 0 supports, 0 contradictions, and 2 neutral decisions.",
+        "Golden hypothesis ended PROPOSED at confidence 0.15.",
+        "Golden validator was invoked and validated=False.",
+        "Earliest bottleneck: EVIDENCE_NEUTRALIZED; recommended owner: EvidenceInterpreter."
+      ]
+    }
+  ]
+}
