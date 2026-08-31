@@ -149,6 +149,391 @@ def test_sql_validation_success_does_not_create_evidence_by_itself() -> None:
 
 
 @pytest.mark.parametrize(
+    ("target_date", "columns", "rows", "sql"),
+    [
+        (
+            date(2026, 1, 30),
+            ["rows_on_date", "distinct_event_ids", "duplicate_event_id_rows"],
+            [[126, 90, 36]],
+            (
+                "SELECT COUNT(*) AS rows_on_date, "
+                "COUNT(DISTINCT event_id) AS distinct_event_ids, "
+                "COUNT(*) - COUNT(DISTINCT event_id) AS duplicate_event_id_rows "
+                "FROM events WHERE event_name = 'run_ai_task' "
+                "AND CAST(event_time AS DATE) = DATE '2026-01-30'"
+            ),
+        ),
+        (
+            date(2026, 1, 29),
+            [
+                "metric_date",
+                "row_count",
+                "distinct_event_id_count",
+                "repeated_event_id_rows",
+            ],
+            [
+                ["2026-01-28", 81, 81, 0],
+                ["2026-01-29", 118, 84, 34],
+                ["2026-01-30", 90, 90, 0],
+            ],
+            (
+                "SELECT CAST(event_time AS DATE) AS metric_date, "
+                "COUNT(*) AS row_count, "
+                "COUNT(DISTINCT event_id) AS distinct_event_id_count, "
+                "COUNT(*) - COUNT(DISTINCT event_id) AS repeated_event_id_rows "
+                "FROM events WHERE event_name = 'run_ai_task' "
+                "AND CAST(event_time AS DATE) BETWEEN DATE '2026-01-28' "
+                "AND DATE '2026-01-30' GROUP BY metric_date"
+            ),
+        ),
+        (
+            date(2026, 1, 27),
+            ["row_count", "distinct_event_id_count", "repeated_row_excess"],
+            [[112, 86, 26]],
+            (
+                "SELECT COUNT(*) AS row_count, "
+                "COUNT(DISTINCT event_id) AS distinct_event_id_count, "
+                "COUNT(*) - COUNT(DISTINCT event_id) AS repeated_row_excess "
+                "FROM events WHERE event_name = 'run_ai_task' "
+                "AND event_time >= TIMESTAMP '2026-01-27 00:00:00' "
+                "AND event_time < TIMESTAMP '2026-01-28 00:00:00'"
+            ),
+        ),
+    ],
+)
+def test_f02_scoped_duplicate_identity_counts_support(
+    target_date: date,
+    columns: list[str],
+    rows: list[list[Any]],
+    sql: str,
+) -> None:
+    interpretation = _interpret(
+        "duplicate_batch",
+        _step(sql),
+        _sql_result(columns, rows, sql=sql),
+        context=_context(metric_id="ai_task_count", target_date=target_date),
+    )
+
+    decision = _decision(interpretation)
+    assert decision.polarity is EvidencePolarity.SUPPORTS
+    assert decision.evidence.source_type == "business_data"
+    assert decision.evidence.observation["rule"] == "f02_duplicate_identity_counts"
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected_reason"),
+    [
+        ([[90, 90, 0]], "no duplicate excess"),
+        ([[126, 90, 35]], "inconsistent"),
+        ([[126, "ninety", 36]], "valid nonnegative counts"),
+    ],
+)
+def test_f02_normal_inconsistent_or_nonnumeric_counts_are_neutral(
+    rows: list[list[Any]], expected_reason: str
+) -> None:
+    sql = (
+        "SELECT COUNT(*) AS row_count, "
+        "COUNT(DISTINCT event_id) AS distinct_event_id_count, "
+        "COUNT(*) - COUNT(DISTINCT event_id) AS repeated_row_excess "
+        "FROM events WHERE event_name = 'run_ai_task' "
+        "AND CAST(event_time AS DATE) = DATE '2026-01-30'"
+    )
+    interpretation = _interpret(
+        "duplicate_batch",
+        _step(sql),
+        _sql_result(
+            ["row_count", "distinct_event_id_count", "repeated_row_excess"],
+            rows,
+            sql=sql,
+        ),
+    )
+
+    assert interpretation.polarity is EvidencePolarity.NEUTRAL
+    assert interpretation.evidence is None
+    assert expected_reason in (interpretation.neutral_reason or "")
+
+
+@pytest.mark.parametrize(
+    ("sql", "context"),
+    [
+        (
+            (
+                "SELECT COUNT(*) AS row_count, "
+                "COUNT(DISTINCT event_id) AS distinct_event_id_count "
+                "FROM events WHERE event_name = 'run_ai_task' "
+                "AND CAST(event_time AS DATE) = DATE '2026-01-29'"
+            ),
+            _context(metric_id="ai_task_count"),
+        ),
+        (
+            (
+                "SELECT COUNT(*) AS row_count, "
+                "COUNT(DISTINCT event_id) AS distinct_event_id_count "
+                "FROM events WHERE event_name = 'execute_ai_task' "
+                "AND CAST(event_time AS DATE) = DATE '2026-01-30'"
+            ),
+            _context(metric_id="ai_task_count"),
+        ),
+        (
+            (
+                "SELECT COUNT(*) AS row_count, "
+                "COUNT(DISTINCT event_id) AS distinct_event_id_count "
+                "FROM events WHERE event_name = 'run_ai_task' "
+                "AND device_type = 'ios' "
+                "AND CAST(event_time AS DATE) = DATE '2026-01-30'"
+            ),
+            _context(metric_id="ai_task_count", device_type="android"),
+        ),
+    ],
+)
+def test_f02_wrong_date_population_or_segment_is_neutral(
+    sql: str, context: IncidentEvidenceContext
+) -> None:
+    interpretation = _interpret(
+        "duplicate_batch",
+        _step(sql),
+        _sql_result(
+            ["row_count", "distinct_event_id_count"], [[126, 90]], sql=sql
+        ),
+        context=context,
+    )
+
+    assert interpretation.polarity is EvidencePolarity.NEUTRAL
+    assert interpretation.evidence is None
+
+
+def test_f02_duplicate_shape_does_not_support_wrong_metric_or_hypothesis() -> None:
+    sql = (
+        "SELECT COUNT(*) AS row_count, "
+        "COUNT(DISTINCT event_id) AS distinct_event_id_count "
+        "FROM events WHERE event_name = 'run_ai_task' "
+        "AND CAST(event_time AS DATE) = DATE '2026-01-30'"
+    )
+    result = _sql_result(
+        ["row_count", "distinct_event_id_count"], [[126, 90]], sql=sql
+    )
+
+    wrong_metric = _interpret(
+        "duplicate_batch",
+        _step(sql),
+        result,
+        context=_context(metric_id="daily_active_users"),
+    )
+    wrong_hypothesis = _interpret(
+        "field_drift",
+        _step(sql),
+        result,
+        context=_context(metric_id="ai_task_count"),
+    )
+
+    assert wrong_metric.evidence is None
+    assert wrong_hypothesis.evidence is None
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        (
+            "SELECT 126 AS row_count, 90 AS distinct_event_id_count "
+            "FROM events WHERE event_name = 'run_ai_task' "
+            "AND CAST(event_time AS DATE) = DATE '2026-01-30'"
+        ),
+        (
+            "SELECT COUNT(*) AS row_count, "
+            "COUNT(DISTINCT e.event_id) AS distinct_event_id_count "
+            "FROM events AS e JOIN experiment_assignments AS a "
+            "ON e.user_id = a.user_id WHERE e.event_name = 'run_ai_task' "
+            "AND CAST(e.event_time AS DATE) = DATE '2026-01-30'"
+        ),
+    ],
+)
+def test_f02_alias_spoof_or_joined_counts_are_neutral(sql: str) -> None:
+    interpretation = _interpret(
+        "duplicate_batch",
+        _step(sql),
+        _sql_result(
+            ["row_count", "distinct_event_id_count"], [[126, 90]], sql=sql
+        ),
+    )
+
+    assert interpretation.polarity is EvidencePolarity.NEUTRAL
+    assert interpretation.evidence is None
+
+
+def test_f07_scoped_join_survivor_counts_support() -> None:
+    sql = (
+        "SELECT COUNT(DISTINCT e.user_id) AS event_users, "
+        "COUNT(DISTINCT s.user_id) AS subscribed_users "
+        "FROM events AS e LEFT JOIN subscriptions AS s ON e.user_id = s.user_id "
+        "WHERE CAST(e.event_time AS DATE) = DATE '2026-01-30'"
+    )
+    interpretation = _interpret(
+        "join_filter",
+        _step(sql),
+        _sql_result(["event_users", "subscribed_users"], [[111, 26]], sql=sql),
+    )
+
+    decision = _decision(interpretation)
+    assert decision.polarity is EvidencePolarity.SUPPORTS
+    assert decision.evidence.source_type == "business_data"
+    assert decision.evidence.observation["rule"] == "f07_join_filter_survivor_counts"
+
+
+@pytest.mark.parametrize(
+    ("sql", "rows", "context"),
+    [
+        (
+            (
+                "SELECT COUNT(DISTINCT e.user_id) AS event_users, "
+                "COUNT(DISTINCT s.user_id) AS subscribed_users "
+                "FROM events AS e LEFT JOIN subscriptions AS s "
+                "ON e.user_id = s.user_id "
+                "WHERE CAST(e.event_time AS DATE) = DATE '2026-01-30'"
+            ),
+            [[111, 111]],
+            _context(),
+        ),
+        (
+            (
+                "SELECT COUNT(DISTINCT e.user_id) AS event_users, "
+                "COUNT(DISTINCT s.user_id) AS subscribed_users "
+                "FROM events AS e INNER JOIN subscriptions AS s "
+                "ON e.user_id = s.user_id "
+                "WHERE CAST(e.event_time AS DATE) = DATE '2026-01-30'"
+            ),
+            [[111, 26]],
+            _context(),
+        ),
+        (
+            (
+                "SELECT COUNT(DISTINCT e.user_id) AS event_users, "
+                "COUNT(DISTINCT s.user_id) AS subscribed_users "
+                "FROM events AS e LEFT JOIN subscriptions AS s "
+                "ON e.user_id = s.user_id "
+                "WHERE CAST(e.event_time AS DATE) = DATE '2026-01-29'"
+            ),
+            [[111, 26]],
+            _context(),
+        ),
+        (
+            (
+                "SELECT COUNT(DISTINCT e.user_id) AS event_users, "
+                "COUNT(DISTINCT s.user_id) AS subscribed_users "
+                "FROM events AS e LEFT JOIN subscriptions AS s "
+                "ON e.user_id = s.user_id "
+                "WHERE CAST(e.event_time AS DATE) = DATE '2026-01-30'"
+            ),
+            [[111, 26]],
+            _context(metric_id="ai_task_count"),
+        ),
+        (
+            (
+                "SELECT COUNT(DISTINCT e.user_id) AS event_users, "
+                "COUNT(DISTINCT s.user_id) AS subscribed_users "
+                "FROM events AS e LEFT JOIN subscriptions AS s ON 1 = 1 "
+                "WHERE CAST(e.event_time AS DATE) = DATE '2026-01-30'"
+            ),
+            [[111, 26]],
+            _context(),
+        ),
+        (
+            (
+                "SELECT COUNT(DISTINCT e.user_id) AS event_users, "
+                "COUNT(DISTINCT s.user_id) AS subscribed_users "
+                "FROM events AS e LEFT JOIN subscriptions AS s "
+                "ON e.user_id = s.user_id "
+                "WHERE CAST(e.event_time AS DATE) = DATE '2026-01-30' "
+                "AND s.subscription_status = 'active'"
+            ),
+            [[111, 26]],
+            _context(),
+        ),
+    ],
+)
+def test_f07_normal_or_wrong_scope_results_are_neutral(
+    sql: str, rows: list[list[Any]], context: IncidentEvidenceContext
+) -> None:
+    interpretation = _interpret(
+        "join_filter",
+        _step(sql),
+        _sql_result(["event_users", "subscribed_users"], rows, sql=sql),
+        context=context,
+    )
+
+    assert interpretation.polarity is EvidencePolarity.NEUTRAL
+    assert interpretation.evidence is None
+
+
+@pytest.mark.parametrize(
+    ("hypothesis", "metric_id", "columns", "rows", "sql"),
+    [
+        (
+            "timezone_error",
+            "daily_active_users",
+            ["cast_date", "distinct_users", "first_event_time", "last_event_time"],
+            [["2026-01-30", 120, "2026-01-30T00:14:38", "2026-01-30T23:45:00"]],
+            (
+                "SELECT CAST(event_time AS DATE) AS cast_date, "
+                "COUNT(DISTINCT user_id) AS distinct_users, "
+                "MIN(event_time) AS first_event_time, "
+                "MAX(event_time) AS last_event_time FROM events "
+                "WHERE CAST(event_time AS DATE) = DATE '2026-01-30' "
+                "GROUP BY cast_date"
+            ),
+        ),
+        (
+            "unit_error",
+            "average_session_duration",
+            ["total_rows", "average_duration", "minimum_duration", "maximum_duration"],
+            [[348, 68098.5, 10.33, 1509560.0]],
+            (
+                "SELECT COUNT(*) AS total_rows, "
+                "AVG(duration_seconds) AS average_duration, "
+                "MIN(duration_seconds) AS minimum_duration, "
+                "MAX(duration_seconds) AS maximum_duration FROM events "
+                "WHERE CAST(event_time AS DATE) = DATE '2026-01-30'"
+            ),
+        ),
+        (
+            "field_drift",
+            "ai_task_count",
+            ["event_name", "event_count"],
+            [["run_ai_task", 127], ["execute_ai_task", 40]],
+            (
+                "SELECT event_name, COUNT(*) AS event_count FROM events "
+                "WHERE event_time >= TIMESTAMP '2026-01-29 00:00:00' "
+                "AND event_time < TIMESTAMP '2026-01-31 00:00:00' "
+                "GROUP BY event_name"
+            ),
+        ),
+        (
+            "ab_split_anomaly",
+            "conversion_rate",
+            ["table_name", "column_name", "data_type"],
+            [["experiment_assignments", "variant", "VARCHAR"]],
+            "SELECT table_name, column_name, data_type FROM information_schema.columns",
+        ),
+    ],
+)
+def test_blocked_inventory_shapes_remain_neutral(
+    hypothesis: str,
+    metric_id: str,
+    columns: list[str],
+    rows: list[list[Any]],
+    sql: str,
+) -> None:
+    interpretation = _interpret(
+        hypothesis,
+        _step(sql),
+        _sql_result(columns, rows, sql=sql),
+        context=_context(metric_id=metric_id),
+    )
+
+    assert interpretation.polarity is EvidencePolarity.NEUTRAL
+    assert interpretation.evidence is None
+
+
+@pytest.mark.parametrize(
     ("validation_passed", "usable", "rows", "truncated"),
     [
         (False, True, [[0]], False),
