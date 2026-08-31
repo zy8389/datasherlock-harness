@@ -17,6 +17,7 @@ from tools.sql_runner import execute_readonly_sql
 QualityCheckStatus = Literal["success", "error"]
 ScopeFilterValue = str | int | float | bool | None
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+SCHEMA_DRIFT_ASSESSMENT_INSUFFICIENT_HISTORY = "insufficient_history"
 
 
 class DataQualityEvidence(BaseModel):
@@ -767,19 +768,6 @@ def detect_schema_drift(
             error=response.error,
         )
 
-    if len(response.rows) < 2:
-        return DataQualityCheckResult(
-            check_name="detect_schema_drift",
-            status="error",
-            passed=None,
-            table=table,
-            threshold=0.0,
-            query_id=response.query_id,
-            error={
-                "type": "execution",
-                "message": f"at least two schema snapshots are required for {table}",
-            },
-        )
     if any(len(row) != 3 for row in response.rows):
         return DataQualityCheckResult(
             check_name="detect_schema_drift",
@@ -793,12 +781,9 @@ def detect_schema_drift(
                 "message": "schema-drift query returned an unexpected result shape",
             },
         )
-
-    current_version, current_schema_json, current_effective_at = response.rows[0]
-    previous_version, previous_schema_json, previous_effective_at = response.rows[1]
+    snapshot_count = len(response.rows)
     try:
-        current_schema = _parse_schema_json(current_schema_json)
-        previous_schema = _parse_schema_json(previous_schema_json)
+        parsed_schemas = [_parse_schema_json(row[1]) for row in response.rows]
     except (TypeError, ValueError) as exc:
         return DataQualityCheckResult(
             check_name="detect_schema_drift",
@@ -809,6 +794,35 @@ def detect_schema_drift(
             query_id=response.query_id,
             error={"type": "execution", "message": str(exc)},
         )
+    if snapshot_count < 2:
+        return DataQualityCheckResult(
+            check_name="detect_schema_drift",
+            status="success",
+            passed=None,
+            table=table,
+            threshold=0.0,
+            query_id=response.query_id,
+            evidence=[
+                DataQualityEvidence(
+                    finding=(
+                        f"{table} schema drift could not be evaluated because only "
+                        f"{snapshot_count} schema snapshot(s) are available"
+                    ),
+                    query_id=response.query_id,
+                    details={
+                        "assessment": (
+                            SCHEMA_DRIFT_ASSESSMENT_INSUFFICIENT_HISTORY
+                        ),
+                        "snapshot_count": snapshot_count,
+                        "required_snapshot_count": 2,
+                    },
+                )
+            ],
+        )
+
+    current_version, _, current_effective_at = response.rows[0]
+    previous_version, _, previous_effective_at = response.rows[1]
+    current_schema, previous_schema = parsed_schemas
 
     added_columns = sorted(set(current_schema) - set(previous_schema))
     removed_columns = sorted(set(previous_schema) - set(current_schema))

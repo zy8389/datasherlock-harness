@@ -498,6 +498,39 @@ def test_executor_returns_structured_data_quality_tool_failure(tmp_path) -> None
     assert result.error is not None
 
 
+def test_executor_treats_insufficient_schema_history_as_success(tmp_path) -> None:
+    database_path = tmp_path / "insufficient-schema-history.duckdb"
+    with duckdb.connect(str(database_path)) as connection:
+        connection.execute(
+            """
+            CREATE TABLE schema_snapshots (
+                table_name VARCHAR,
+                version INTEGER,
+                schema_json VARCHAR,
+                effective_at TIMESTAMP
+            )
+            """
+        )
+
+    result = ToolExecutor(database_path).execute_step(
+        _quality_step("detect_schema_drift", {"table": "events"}),
+        incident_id="INC-DQ-INCONCLUSIVE",
+    )
+
+    assert result.success is True
+    assert result.error is None
+    assert result.result["status"] == "success"
+    assert result.result["passed"] is None
+    assert result.result["error"] is None
+    assert result.evidence[0].observation["passed"] is None
+    assert result.evidence[0].observation["details"] == {
+        "assessment": "insufficient_history",
+        "snapshot_count": 0,
+        "required_snapshot_count": 2,
+    }
+    assert result.model_validate_json(result.model_dump_json()) == result
+
+
 def test_data_quality_evidence_id_is_deterministic_for_same_observation() -> None:
     result = DataQualityCheckResult(
         check_name="check_null_rate",

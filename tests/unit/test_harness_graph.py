@@ -1,5 +1,6 @@
 import json
 
+import duckdb
 import pytest
 
 from agents.planner import (
@@ -17,7 +18,7 @@ from harness.graph import (
     HarnessTransitionError,
 )
 from harness.guardrails import GuardrailPolicy
-from harness.hypothesis import EvidenceReference, HypothesisStatus
+from harness.hypothesis import EvidenceReference, HypothesisManager, HypothesisStatus
 from harness.state import IncidentState, IncidentStatus
 from tools.executor import ToolExecutionResult, ToolExecutor
 from tools.sql_runner import SqlExecutionResponse
@@ -284,6 +285,78 @@ def _execute_two_steps(
     graph.enter_hypothesis_testing(state)
     graph.request_more_evidence(state)
     graph.execute_next_step(state, second)
+
+
+def test_inconclusive_schema_drift_keeps_investigation_executable(tmp_path) -> None:
+    database_path = tmp_path / "insufficient-schema-history.duckdb"
+    with duckdb.connect(str(database_path)) as connection:
+        connection.execute(
+            """
+            CREATE TABLE schema_snapshots (
+                table_name VARCHAR,
+                version INTEGER,
+                schema_json VARCHAR,
+                effective_at TIMESTAMP
+            )
+            """
+        )
+
+    manager = HypothesisManager()
+    hypothesis = manager.create_hypothesis(
+        Hypothesis(
+            hypothesis_id="H01",
+            root_cause_type="schema_change",
+            description="The events schema may have changed.",
+            initial_confidence=0.5,
+        )
+    )
+    graph = HarnessGraph(
+        tool_executor=ToolExecutor(database_path),
+        hypothesis_manager=manager,
+    )
+    state = IncidentState(
+        alert=_alert(),
+        hypotheses=[hypothesis.model_dump(mode="json")],
+        status=IncidentStatus.EXECUTING,
+    )
+    first = _guardrail_step(
+        "S01", "detect_schema_drift", {"table": "events"}
+    )
+    second = _guardrail_step("S02", "sql_query", {"sql": "SELECT 1"})
+    confidence_before = hypothesis.confidence
+
+    graph.execute_next_step(state, first)
+
+    assert state.status is IncidentStatus.VALIDATING
+    assert state.root_cause is None
+    assert state.tool_trace[0]["success"] is True
+    assert state.tool_trace[0]["result"]["passed"] is None
+    assert state.tool_trace[0]["result"]["evidence"][0]["details"] == {
+        "assessment": "insufficient_history",
+        "snapshot_count": 0,
+        "required_snapshot_count": 2,
+    }
+    assert hypothesis.confidence == confidence_before
+    assert hypothesis.supporting_evidence_ids == []
+    assert hypothesis.contradicting_evidence_ids == []
+    assert hypothesis.status is HypothesisStatus.PROPOSED
+
+    restored = IncidentState.from_json(state.to_json())
+    assert restored.tool_trace[0]["result"]["passed"] is None
+    graph.enter_hypothesis_testing(restored)
+    graph.request_more_evidence(restored)
+    graph.execute_next_step(restored, second)
+
+    assert restored.status is IncidentStatus.VALIDATING
+    assert [item["tool_name"] for item in restored.tool_trace] == [
+        "detect_schema_drift",
+        "sql_query",
+    ]
+    assert restored.tool_trace[1]["success"] is True
+    assert restored.root_cause is None
+    assert hypothesis.confidence == confidence_before
+    assert hypothesis.supporting_evidence_ids == []
+    assert hypothesis.contradicting_evidence_ids == []
 
 
 def test_graph_budget_blocks_second_sql_before_adapter_and_preserves_evidence() -> None:
