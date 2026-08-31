@@ -38,8 +38,12 @@ does not implement a second benchmark runner or SQL executor.
 
 For each selected case, the runner calls `materialize_case` once and writes a
 single base DuckDB. It then makes four independent filesystem copies. SHA-256
-hashes are recorded in `case_inputs.jsonl` and `fairness.json`; the run fails
-its fairness gate if the hashes differ.
+hashes of the physical files and versioned logical fixture fingerprints are
+recorded in `case_inputs.jsonl` and `fairness.json`. Physical hashes diagnose
+artifact-byte identity. The scientific fairness gate uses the logical fixture
+fingerprints, which include benchmark-owned schemas and row multisets while
+normalizing storage and insertion order. Runs created before logical
+fingerprints were introduced remain readable and fall back to physical SHA.
 
 Ground Truth stays outside adapters. Adapter inputs contain only an opaque run
 identifier, sanitized detector alert, metric semantics, allowed taxonomy, and
@@ -94,7 +98,9 @@ python experiments/ablation/run.py \
 
 The full run requires exactly 60 cases and produces 240 case/variant pairs in
 case-major interleaving. `--resume` reuses completed pairs after validating the
-stored config/model/variant fingerprint. A fingerprint mismatch fails closed.
+stored config/model/variant fingerprint and persisted fixture identities. New
+runs validate both physical hashes and logical fingerprint contracts; legacy
+runs without logical fields validate physical hashes. A mismatch fails closed.
 
 ## Artifacts
 

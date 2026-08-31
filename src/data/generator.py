@@ -31,6 +31,19 @@ PLANS = ["free", "basic", "pro", "enterprise"]
 
 APP_BUILD_BY_VERSION = {"1.0.0": 100, "1.1.0": 110, "1.2.0": 120, "2.0.0": 200}
 
+BENCHMARK_FIXTURE_TABLES = (
+    "users",
+    "events",
+    "subscriptions",
+    "experiment_assignments",
+    "daily_metrics",
+    "pipeline_runs",
+    "partition_metadata",
+    "schema_snapshots",
+    "metric_versions",
+    "experiment_configs",
+)
+
 
 def compute_definition_hash(query: str) -> str:
     """Return the canonical SHA256 hash for a metric definition."""
@@ -446,7 +459,8 @@ def materialize_daily_metrics(
     )
     metrics = metric_dates.copy()
 
-    with duckdb.connect(":memory:") as conn:
+    # Floating aggregates need a stable reduction order for fixture identity.
+    with duckdb.connect(":memory:", config={"threads": "1"}) as conn:
         for table_name, frame in tables.items():
             if table_name not in {
                 "users", "events", "subscriptions", "experiment_assignments", "metric_dates"

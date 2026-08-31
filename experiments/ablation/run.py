@@ -65,10 +65,20 @@ def main(argv: list[str] | None = None) -> int:
     result = AblationRunner(config).run()
     print(f"artifacts: {result.run_dir}")
     print(f"pairs: {result.fairness.attempted_pairs}/{result.fairness.expected_pairs}")
-    print(
-        f"fairness: {result.fairness.complete_pair_matrix and result.fairness.same_db_hash and not result.fairness.gt_runtime_leakage}"
+    fairness_passed = (
+        result.fairness.complete_pair_matrix
+        and result.fairness.fixture_identity_matches
+        and result.fairness.same_model_fingerprint
+        and not result.fairness.gt_runtime_leakage
     )
-    return 0 if result.fairness.complete_pair_matrix else 2
+    print(f"fixture identity: {result.fairness.fixture_identity_matches}")
+    print(f"physical database SHA equality: {result.fairness.same_db_hash}")
+    print(
+        "logical fixture equality: "
+        f"{result.fairness.same_logical_fixture_fingerprint}"
+    )
+    print(f"fairness: {fairness_passed}")
+    return 0 if fairness_passed else 2
 
 
 if __name__ == "__main__":

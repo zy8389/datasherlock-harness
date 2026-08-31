@@ -95,6 +95,29 @@ def _runtime(tmp_path: Path) -> AblationRuntimeInput:
     )
 
 
+def _logical_fingerprint_payload(fill: str = "a") -> dict[str, Any]:
+    digest = f"sha256:{fill * 64}"
+    return {
+        "schema_version": 1,
+        "algorithm": "sha256",
+        "database_logical_hash": digest,
+        "tables": [
+            {
+                "table_name": "users",
+                "columns": [
+                    {
+                        "ordinal_position": 1,
+                        "column_name": "value",
+                        "column_type": "INTEGER",
+                    }
+                ],
+                "row_count": 1,
+                "table_hash": digest,
+            }
+        ],
+    }
+
+
 def test_contract_has_exact_canonical_case_set_and_four_variants(
     tmp_path: Path,
 ) -> None:
@@ -848,8 +871,69 @@ def test_fairness_requires_complete_pairs_and_equal_hashes() -> None:
     )
     assert fairness.complete_pair_matrix
     assert fairness.same_db_hash
+    assert fairness.same_logical_fixture_fingerprint is None
+    assert fairness.fixture_identity_matches
     assert fairness.same_model_fingerprint
     assert not fairness.gt_runtime_leakage
+
+
+def test_fairness_uses_logical_fixture_gate_and_reports_mismatch() -> None:
+    logical_fingerprints = {
+        variant: _logical_fingerprint_payload() for variant in VARIANT_ORDER
+    }
+    logical_fingerprints["react"] = _logical_fingerprint_payload("b")
+    case_inputs = [
+        {
+            "case_id": "F01-001",
+            "database_sha256": {
+                variant: f"physical-{variant}" for variant in VARIANT_ORDER
+            },
+            "logical_fixture_fingerprints": logical_fingerprints,
+        }
+    ]
+
+    fairness = validate_fairness(
+        case_inputs,
+        [],
+        model_fingerprint="same-model",
+    )
+
+    assert not fairness.same_db_hash
+    assert fairness.same_logical_fixture_fingerprint is False
+    assert not fairness.fixture_identity_matches
+    assert fairness.logical_fixture_mismatches[0].case_id == "F01-001"
+    assert fairness.logical_fixture_mismatches[0].variant == "react"
+    assert (
+        fairness.logical_fixture_mismatches[0]
+        .comparison.changed_table_hashes[0]
+        .table_name
+        == "users"
+    )
+
+
+def test_logical_match_overrides_physical_hash_difference() -> None:
+    case_inputs = [
+        {
+            "case_id": "F01-001",
+            "database_sha256": {
+                variant: f"physical-{variant}" for variant in VARIANT_ORDER
+            },
+            "logical_fixture_fingerprints": {
+                variant: _logical_fingerprint_payload() for variant in VARIANT_ORDER
+            },
+        }
+    ]
+
+    fairness = validate_fairness(
+        case_inputs,
+        [],
+        model_fingerprint="same-model",
+    )
+
+    assert not fairness.same_db_hash
+    assert fairness.same_logical_fixture_fingerprint is True
+    assert fairness.fixture_identity_matches
+    assert not fairness.logical_fixture_mismatches
 
 
 def test_runner_persists_all_pairs_and_resume_reuses_them(tmp_path: Path) -> None:
@@ -858,6 +942,8 @@ def test_runner_persists_all_pairs_and_resume_reuses_them(tmp_path: Path) -> Non
     assert len(first.results) == 4
     assert first.fairness.complete_pair_matrix
     assert first.fairness.same_db_hash
+    assert first.fairness.same_logical_fixture_fingerprint is True
+    assert first.fairness.fixture_identity_matches
     assert (first.run_dir / "comparison.csv").is_file()
     assert (first.run_dir / "report.md").is_file()
     assert (
@@ -866,9 +952,32 @@ def test_runner_persists_all_pairs_and_resume_reuses_them(tmp_path: Path) -> Non
     )
     assert recompute_report(first.run_dir) == first.metrics
 
+    input_path = first.run_dir / "case_inputs.jsonl"
+    payload = json.loads(input_path.read_text(encoding="utf-8"))
+    assert set(payload["logical_fixture_fingerprints"]) == set(VARIANT_ORDER)
+    assert all(
+        fingerprint["schema_version"] == 1
+        for fingerprint in payload["logical_fixture_fingerprints"].values()
+    )
+
     resumed = AblationRunner(config.model_copy(update={"resume": True})).run()
     assert len(resumed.results) == 4
     assert resumed.fairness.complete_pair_matrix
+
+    tampered = json.loads(input_path.read_text(encoding="utf-8"))
+    tampered["logical_fixture_fingerprints"]["single_prompt"][
+        "database_logical_hash"
+    ] = f"sha256:{'f' * 64}"
+    input_path.write_text(json.dumps(tampered) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="logical fixture fingerprint differs"):
+        AblationRunner(config.model_copy(update={"resume": True})).run()
+
+    payload.pop("logical_fixture_fingerprints")
+    input_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    legacy_resumed = AblationRunner(config.model_copy(update={"resume": True})).run()
+    assert legacy_resumed.fairness.same_logical_fixture_fingerprint is None
+    assert legacy_resumed.fairness.fixture_identity_matches
+
     with pytest.raises(ValueError, match="fingerprint mismatch"):
         AblationRunner(
             config.model_copy(update={"resume": True, "max_tool_calls": 19})

@@ -55,6 +55,12 @@ from benchmark.evidence_interpreter import (
     IncidentEvidenceContext,
     RuntimeEvidenceInterpreter,
 )
+from benchmark.fixture_fingerprint import (
+    FixtureFingerprintComparison,
+    LogicalFixtureFingerprint,
+    compare_fixture_fingerprints,
+    fingerprint_fixture,
+)
 from benchmark.runner import (
     BenchmarkRunConfig,
     CurrentHarnessExecutor,
@@ -444,6 +450,19 @@ class AblationMetrics(BaseModel):
     known_cost_cases: int = Field(ge=0)
 
 
+class LogicalFixtureMismatch(BaseModel):
+    """One variant whose logical fixture differs from the case reference."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    case_id: str
+    reference_variant: str
+    reference_hash: str
+    variant: str
+    variant_hash: str
+    comparison: FixtureFingerprintComparison
+
+
 class FairnessValidation(BaseModel):
     """Machine-checkable fairness and completeness audit."""
 
@@ -455,12 +474,25 @@ class FairnessValidation(BaseModel):
     attempted_pairs: int = Field(ge=0)
     complete_pair_matrix: bool
     same_db_hash: bool
+    same_logical_fixture_fingerprint: bool | None = None
     same_model_fingerprint: bool
     gt_runtime_leakage: bool
     duplicate_pairs: int = Field(default=0, ge=0)
     missing_pairs: list[str] = Field(default_factory=list)
     model_fingerprint: str
     db_hashes: dict[str, dict[str, str]] = Field(default_factory=dict)
+    logical_fixture_hashes: dict[str, dict[str, str]] = Field(default_factory=dict)
+    logical_fixture_mismatches: list[LogicalFixtureMismatch] = Field(
+        default_factory=list
+    )
+
+    @property
+    def fixture_identity_matches(self) -> bool:
+        """Use logical fixture identity when the run records that contract."""
+
+        if self.same_logical_fixture_fingerprint is not None:
+            return self.same_logical_fixture_fingerprint
+        return self.same_db_hash
 
 
 class AblationRun:
@@ -1790,6 +1822,9 @@ def _case_input_payload(
     db_paths: Mapping[str, Path],
     model_fingerprint: str,
 ) -> dict[str, Any]:
+    logical_fingerprints = {
+        variant: fingerprint_fixture(path) for variant, path in db_paths.items()
+    }
     payload = {
         "case_id": manifest.case_id,
         "case_index": index,
@@ -1797,6 +1832,10 @@ def _case_input_payload(
         "model_fingerprint": model_fingerprint,
         "database_sha256": {
             variant: _sha256(path) for variant, path in db_paths.items()
+        },
+        "logical_fixture_fingerprints": {
+            variant: fingerprint.model_dump(mode="json")
+            for variant, fingerprint in logical_fingerprints.items()
         },
         "database_paths": {variant: str(path) for variant, path in db_paths.items()},
     }
@@ -1833,6 +1872,55 @@ def validate_fairness(
         for case in case_inputs
     }
     same_hash = all(len(set(hashes.values())) == 1 for hashes in hash_map.values())
+    has_logical_fingerprints = any(
+        "logical_fixture_fingerprints" in case for case in case_inputs
+    )
+    logical_hash_map: dict[str, dict[str, str]] = {}
+    logical_mismatches: list[LogicalFixtureMismatch] = []
+    same_logical: bool | None = None
+    if has_logical_fingerprints:
+        same_logical = True
+        expected_variant_set = set(expected_variants)
+        for case in case_inputs:
+            case_id = str(case["case_id"])
+            raw_fingerprints = case.get("logical_fixture_fingerprints")
+            if not isinstance(raw_fingerprints, Mapping) or set(
+                raw_fingerprints
+            ) != expected_variant_set:
+                raise ValueError(
+                    f"incomplete logical fixture fingerprints for case {case_id}"
+                )
+            fingerprints = {
+                variant: LogicalFixtureFingerprint.model_validate(
+                    raw_fingerprints[variant]
+                )
+                for variant in expected_variants
+            }
+            logical_hash_map[case_id] = {
+                variant: fingerprint.database_logical_hash
+                for variant, fingerprint in fingerprints.items()
+            }
+            if not expected_variants:
+                continue
+            reference_variant = expected_variants[0]
+            reference = fingerprints[reference_variant]
+            for variant in expected_variants[1:]:
+                comparison = compare_fixture_fingerprints(
+                    reference, fingerprints[variant]
+                )
+                if comparison.equal:
+                    continue
+                same_logical = False
+                logical_mismatches.append(
+                    LogicalFixtureMismatch(
+                        case_id=case_id,
+                        reference_variant=reference_variant,
+                        reference_hash=reference.database_logical_hash,
+                        variant=variant,
+                        variant_hash=fingerprints[variant].database_logical_hash,
+                        comparison=comparison,
+                    )
+                )
     leakage = False
     for result in results:
         try:
@@ -1877,13 +1965,91 @@ def validate_fairness(
         and duplicate_pairs == 0
         and len(results) == len(expected_keys),
         same_db_hash=same_hash,
+        same_logical_fixture_fingerprint=same_logical,
         same_model_fingerprint=same_model,
         gt_runtime_leakage=leakage,
         duplicate_pairs=duplicate_pairs,
         missing_pairs=missing,
         model_fingerprint=model_fingerprint,
         db_hashes=hash_map,
+        logical_fixture_hashes=logical_hash_map,
+        logical_fixture_mismatches=logical_mismatches,
     )
+
+
+def _validate_resume_case_inputs(
+    payloads: Sequence[Mapping[str, Any]],
+    manifests: Sequence[CaseManifest],
+    *,
+    model_fingerprint: str,
+) -> None:
+    """Fail closed when persisted fixture inputs no longer match runtime files."""
+
+    expected_case_ids = [manifest.case_id for manifest in manifests]
+    if [payload.get("case_id") for payload in payloads] != expected_case_ids:
+        raise ValueError("cannot resume ablation run: case input IDs differ")
+
+    logical_presence = [
+        "logical_fixture_fingerprints" in payload for payload in payloads
+    ]
+    if any(logical_presence) and not all(logical_presence):
+        raise ValueError(
+            "cannot resume ablation run: logical fixture metadata is incomplete"
+        )
+
+    expected_variants = set(VARIANT_ORDER)
+    for payload in payloads:
+        case_id = str(payload["case_id"])
+        database_paths = payload.get("database_paths")
+        database_hashes = payload.get("database_sha256")
+        if (
+            not isinstance(database_paths, Mapping)
+            or set(database_paths) != expected_variants
+            or not isinstance(database_hashes, Mapping)
+            or set(database_hashes) != expected_variants
+            or payload.get("model_fingerprint") != model_fingerprint
+            or not isinstance(payload.get("runtime_alert"), Mapping)
+        ):
+            raise ValueError(
+                f"cannot resume ablation run: invalid case input metadata for {case_id}"
+            )
+        _assert_no_ground_truth_fields(payload["runtime_alert"])
+
+        has_logical_fingerprints = "logical_fixture_fingerprints" in payload
+        logical_fingerprints = payload.get("logical_fixture_fingerprints")
+        if has_logical_fingerprints and (
+            not isinstance(logical_fingerprints, Mapping)
+            or set(logical_fingerprints) != expected_variants
+        ):
+            raise ValueError(
+                f"cannot resume ablation run: invalid logical fingerprints for {case_id}"
+            )
+
+        for variant in VARIANT_ORDER:
+            path = Path(str(database_paths[variant]))
+            if not path.is_file():
+                raise ValueError(
+                    f"cannot resume ablation run: fixture database is missing for "
+                    f"{case_id}/{variant}"
+                )
+            if _sha256(path) != database_hashes[variant]:
+                raise ValueError(
+                    f"cannot resume ablation run: physical database hash differs for "
+                    f"{case_id}/{variant}"
+                )
+            if not has_logical_fingerprints:
+                continue
+            assert isinstance(logical_fingerprints, Mapping)
+            stored = LogicalFixtureFingerprint.model_validate(
+                logical_fingerprints[variant]
+            )
+            current = fingerprint_fixture(path)
+            comparison = compare_fixture_fingerprints(stored, current)
+            if not comparison.equal:
+                raise ValueError(
+                    f"cannot resume ablation run: logical fixture fingerprint differs "
+                    f"for {case_id}/{variant}"
+                )
 
 
 def _load_manifests(
@@ -2048,23 +2214,12 @@ class AblationRunner:
                 for line in input_path.read_text(encoding="utf-8").splitlines()
                 if line.strip()
             ]
-            if [payload["case_id"] for payload in payloads] == [
-                manifest.case_id for manifest in manifests
-            ] and all(
-                set(payload.get("database_paths", {})) == set(VARIANT_ORDER)
-                and set(payload.get("database_sha256", {})) == set(VARIANT_ORDER)
-                and payload.get("model_fingerprint") == _model_fingerprint(self.config)
-                and isinstance(payload.get("runtime_alert"), Mapping)
-                and all(
-                    Path(path).is_file()
-                    and _sha256(Path(path)) == payload["database_sha256"][variant]
-                    for variant, path in payload["database_paths"].items()
-                )
-                for payload in payloads
-            ):
-                for payload in payloads:
-                    _assert_no_ground_truth_fields(payload["runtime_alert"])
-                return payloads
+            _validate_resume_case_inputs(
+                payloads,
+                manifests,
+                model_fingerprint=_model_fingerprint(self.config),
+            )
+            return payloads
         if input_path.exists() and not self.config.resume and not self.config.overwrite:
             raise FileExistsError(
                 f"case inputs already exist; set resume=true: {input_path}"
@@ -2253,6 +2408,19 @@ def render_report(
         f"Model: `{config.model_provider}/{config.model_name}`",
         f"Attempted pairs: {fairness.attempted_pairs}/{fairness.expected_pairs}",
         "",
+        "## Fairness",
+        "",
+        f"Fixture identity gate: {'PASS' if fairness.fixture_identity_matches else 'FAIL'}",
+        (
+            "Logical fixture equality: not recorded (physical SHA fallback)"
+            if fairness.same_logical_fixture_fingerprint is None
+            else "Logical fixture equality: "
+            + ("PASS" if fairness.same_logical_fixture_fingerprint else "FAIL")
+        ),
+        f"Physical DuckDB byte equality: {'PASS' if fairness.same_db_hash else 'FAIL'}",
+        f"Model fingerprint equality: {'PASS' if fairness.same_model_fingerprint else 'FAIL'}",
+        f"Ground Truth runtime leakage: {'YES' if fairness.gt_runtime_leakage else 'NO'}",
+        "",
         "## Aggregate Metrics",
         "",
         "| Variant | Top-1 | Top-3 | Invalid SQL rate | Unsafe operation rate | Duplicate operation rate | Avg tool calls | Avg SQL calls | Mean latency | P50 latency | P95 latency | Known avg cost | Errors | Timeouts | Abstentions |",
@@ -2377,6 +2545,7 @@ __all__ = [
     "AblationRuntimeInput",
     "FairnessValidation",
     "FullHarnessAdapter",
+    "LogicalFixtureMismatch",
     "RankedRootCauseResponse",
     "ReActAdapter",
     "SinglePromptAdapter",
