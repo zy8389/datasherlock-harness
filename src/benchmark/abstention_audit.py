@@ -229,7 +229,11 @@ def classify_abstention(signals: AbstentionSignals) -> AbstentionCause:
         and signals.final_confidence < SUPPORTED_CONFIDENCE_THRESHOLD
     ):
         return AbstentionCause.CONFIDENCE_SHORTFALL
-    if signals.validator_invoked and signals.validator_validated is False:
+    if (
+        signals.final_hypothesis_status is HypothesisStatus.SUPPORTED
+        and signals.validator_invoked
+        and signals.validator_validated is False
+    ):
         return AbstentionCause.VALIDATOR_REJECTED
     if signals.plan_exhausted:
         return AbstentionCause.PLAN_EXHAUSTED
@@ -714,7 +718,8 @@ def _eligible_for_validator(golden: HypothesisState | None) -> bool | None:
         or golden.confidence <= REJECTED_CONFIDENCE_THRESHOLD
     )
     return (
-        not rejected
+        golden.status is HypothesisStatus.SUPPORTED
+        and not rejected
         and len(golden.supporting_evidence_ids) >= SUPPORTED_EVIDENCE_COUNT
         and golden.confidence >= SUPPORTED_CONFIDENCE_THRESHOLD
     )
@@ -736,7 +741,11 @@ def _secondary_causes(
             candidates.append(AbstentionCause.CONFIDENCE_SHORTFALL)
         if signals.contradicting_evidence_count > 0:
             candidates.append(AbstentionCause.CONTRADICTION_BLOCKED)
-        if signals.validator_invoked and signals.validator_validated is False:
+        if (
+            signals.final_hypothesis_status is HypothesisStatus.SUPPORTED
+            and signals.validator_invoked
+            and signals.validator_validated is False
+        ):
             candidates.append(AbstentionCause.VALIDATOR_REJECTED)
     if signals.plan_exhausted:
         candidates.append(AbstentionCause.PLAN_EXHAUSTED)

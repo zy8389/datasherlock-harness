@@ -190,7 +190,9 @@ The runner calls `RootCauseValidator.validate()` after each successful step,
 including for `PROPOSED` or `TESTING` hypotheses. Therefore the 20
 `validated=False` function results are not 20 validator rejections. A true
 `VALIDATOR_REJECTED` attribution requires a gate-eligible supported hypothesis
-that the validator then rejects. No audited case reached that state.
+that the validator then rejects. This requirement applies to both primary and
+secondary taxonomy labels; mechanical pre-gate calls are never classified as
+validator rejection. No audited case reached that state.
 
 RootCauseValidator is not the first bottleneck in this frozen run.
 
