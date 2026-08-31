@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "run_id": "full-60-4arch-post-pr14-20260831",
+  "source_commit": "35562c1b5963a7c2f5a67d209f2b0bdeca057a13",
+  "run_status": "MEASUREMENT_COMPLETE_COMPARATIVE_ACCEPTANCE_BLOCKED",
+  "validity": {
+    "standalone_measurement": "PASS",
+    "comparative_causal_acceptance": "BLOCKED",
+    "accuracy_comparison_mode": "DESCRIPTIVE_ONLY",
+    "reasons": [
+      "Eight provider connection failures affected four Single Prompt and the same four ReAct attempts.",
+      "Only 32 of 60 DuckDB byte hashes match the accepted old run, so the requested cross-run database fingerprint equality check fails."
+    ]
+  },
+  "taxonomy": [
+    "PROVIDER_INFRASTRUCTURE",
+    "CASE_DEADLINE_PROVIDER_LATENCY",
+    "GUARDRAIL_EXPECTED",
+    "MODEL_PLAN_INVALID",
+    "TOOL_RUNTIME_EXPECTED",
+    "IMPLEMENTATION_BUG",
+    "UNRESOLVED",
+    "OTHER"
+  ],
+  "counts_by_variant": {
+    "single_prompt": {
+      "PROVIDER_INFRASTRUCTURE": 4
+    },
+    "react": {
+      "PROVIDER_INFRASTRUCTURE": 4,
+      "GUARDRAIL_EXPECTED": 1,
+      "MODEL_PLAN_INVALID": 4,
+      "TOOL_RUNTIME_EXPECTED": 1
+    },
+    "state_graph_no_validator": {
+      "MODEL_PLAN_INVALID": 3,
+      "TOOL_RUNTIME_EXPECTED": 39
+    },
+    "full_harness": {
+      "GUARDRAIL_EXPECTED": 1,
+      "MODEL_PLAN_INVALID": 1,
+      "TOOL_RUNTIME_EXPECTED": 34
+    }
+  },
+  "totals": {
+    "PROVIDER_INFRASTRUCTURE": 8,
+    "CASE_DEADLINE_PROVIDER_LATENCY": 0,
+    "GUARDRAIL_EXPECTED": 2,
+    "MODEL_PLAN_INVALID": 8,
+    "TOOL_RUNTIME_EXPECTED": 74,
+    "IMPLEMENTATION_BUG": 0,
+    "UNRESOLVED": 0,
+    "OTHER": 0
+  },
+  "known_failure_details": {
+    "detect_schema_drift_two_snapshot_precondition": {
+      "old_all_tool_variants": 104,
+      "new_all_tool_variants": 74,
+      "old_graph_variants": 102,
+      "new_graph_variants": 73
+    },
+    "provider_connection_failures": {
+      "single_prompt": ["F06-003", "F06-004", "F06-005", "F07-001"],
+      "react": ["F06-003", "F06-004", "F06-005", "F07-001"]
+    },
+    "model_generated_sql_failures": {
+      "react": ["F01-002", "F08-004"],
+      "state_graph_no_validator": ["F06-001", "F09-001", "F10-005"],
+      "full_harness": ["F06-001"]
+    },
+    "structured_output_failures": {
+      "react": ["F10-005", "F12-004"]
+    },
+    "guardrail_blocks": {
+      "react": ["F07-002: unsafe_sql"],
+      "full_harness": ["F10-002: duplicate_tool_call"]
+    }
+  },
+  "engineering_view": {
+    "planning_model_failures": 8,
+    "tool_failures": 74,
+    "data_fixture_case_failures": 0,
+    "data_fixture_cross_run_hash_blocker": true,
+    "validator_abstentions": 60,
+    "full_harness_non_error_unresolved": 24,
+    "guardrail_failures": 2,
+    "budget_exceeded": 0,
+    "provider_failures": 8
+  },
+  "notes": [
+    "All 92 error records are classified exactly once in counts_by_variant and totals.",
+    "TOOL_RUNTIME_EXPECTED consists of detect_schema_drift calls made without the required second schema snapshot.",
+    "MODEL_PLAN_INVALID includes six model-generated SQL binder failures and two strict ReAct structured-output validation failures.",
+    "The two guardrail blocks are expected policy enforcement, not implementation defects.",
+    "Full Harness abstention and unresolved counters are outcome metrics and are not added to the mutually exclusive error taxonomy.",
+    "No accepted record contains evidence of an IMPLEMENTATION_BUG, CASE_DEADLINE_PROVIDER_LATENCY, UNRESOLVED-taxonomy error, or OTHER error."
+  ]
+}
