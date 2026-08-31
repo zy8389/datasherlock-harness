@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from datetime import date
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal
+from types import MappingProxyType
+from typing import Final, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -36,6 +38,52 @@ class EvidenceSourceType(StrEnum):
     SCHEMA_METADATA = "schema_metadata"
     METRIC_VERSION = "metric_version"
     EXPERIMENT_CONFIG = "experiment_config"
+
+
+# This is the single runtime provenance policy for benchmark-owned assets.
+# Unknown assets intentionally remain unclassified instead of being treated as
+# business data.
+EVIDENCE_SOURCE_BY_ASSET: Final[Mapping[str, EvidenceSourceType]] = MappingProxyType(
+    {
+        "events": EvidenceSourceType.BUSINESS_DATA,
+        "users": EvidenceSourceType.BUSINESS_DATA,
+        "subscriptions": EvidenceSourceType.BUSINESS_DATA,
+        "experiment_assignments": EvidenceSourceType.BUSINESS_DATA,
+        "daily_metrics": EvidenceSourceType.BUSINESS_DATA,
+        "partition_metadata": EvidenceSourceType.OPERATIONAL_METADATA,
+        "pipeline_runs": EvidenceSourceType.OPERATIONAL_METADATA,
+        "schema_snapshots": EvidenceSourceType.SCHEMA_METADATA,
+        "metric_versions": EvidenceSourceType.METRIC_VERSION,
+        "experiment_configs": EvidenceSourceType.EXPERIMENT_CONFIG,
+    }
+)
+
+
+def evidence_source_for_asset(asset: str) -> EvidenceSourceType | None:
+    """Return canonical provenance for one physical asset, failing closed."""
+
+    normalized = asset.strip().lower().rsplit(".", maxsplit=1)[-1].strip('"')
+    return EVIDENCE_SOURCE_BY_ASSET.get(normalized)
+
+
+def evidence_source_for_data_quality_result(
+    tool_name: str,
+    table: str,
+) -> EvidenceSourceType | None:
+    """Classify a DQ result using the same policy used for planned steps."""
+
+    if tool_name == "detect_schema_drift":
+        return EvidenceSourceType.SCHEMA_METADATA
+    return evidence_source_for_asset(table)
+
+
+def evidence_assets_by_source() -> dict[str, list[str]]:
+    """Render the canonical source-to-assets view used in Planner prompts."""
+
+    grouped = {source.value: [] for source in EvidenceSourceType}
+    for asset, source in EVIDENCE_SOURCE_BY_ASSET.items():
+        grouped[source.value].append(asset)
+    return grouped
 
 
 class EvidencePath(BaseModel):

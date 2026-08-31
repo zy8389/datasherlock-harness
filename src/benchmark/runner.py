@@ -1372,11 +1372,58 @@ def _smoke_plan(alert: Alert, root_cause: str, second_sql: str) -> Investigation
             "FROM events "
             f"WHERE CAST(event_time AS DATE) = DATE '{date_literal}'"
         )
+    elif root_cause == "duplicate_batch":
+        first_sql = (
+            "SELECT COUNT(*) AS row_count, "
+            "COUNT(DISTINCT event_id) AS distinct_event_id_count, "
+            "COUNT(*) - COUNT(DISTINCT event_id) AS duplicate_count "
+            "FROM events WHERE event_name = 'run_ai_task' "
+            f"AND CAST(event_time AS DATE) = DATE '{date_literal}'"
+        )
+    elif root_cause == "ab_split_anomaly":
+        first_sql = (
+            "SELECT variant, COUNT(*) AS assignment_count "
+            "FROM experiment_assignments GROUP BY variant ORDER BY variant"
+        )
     else:
         first_sql = (
             "SELECT COUNT(*) AS event_count FROM events "
             f"WHERE CAST(event_time AS DATE) = DATE '{date_literal}'"
         )
+    steps = [
+        {
+            "step_id": "S01",
+            "purpose": "Inspect business activity for the alert date.",
+            "hypothesis_id": "H01",
+            "tool": "sql_query",
+            "arguments": {"sql": first_sql},
+            "expected_evidence": ["business activity observation"],
+            "stop_condition": "retain the business observation",
+        },
+        {
+            "step_id": "S02",
+            "purpose": "Inspect an independent operational or metadata signal.",
+            "hypothesis_id": "H01",
+            "tool": "sql_query",
+            "arguments": {"sql": second_sql},
+            "expected_evidence": ["independent metadata observation"],
+            "stop_condition": "validate the strongest candidate",
+        },
+    ]
+    for hypothesis_index, candidate in enumerate(candidates[1:], start=2):
+        for sql in _smoke_candidate_sqls(candidate, date_literal):
+            step_index = len(steps) + 1
+            steps.append(
+                {
+                    "step_id": f"S{step_index:02d}",
+                    "purpose": f"Inspect one bounded path for {candidate}.",
+                    "hypothesis_id": f"H{hypothesis_index:02d}",
+                    "tool": "sql_query",
+                    "arguments": {"sql": sql},
+                    "expected_evidence": ["one bounded candidate observation"],
+                    "stop_condition": "retain the observation and continue",
+                }
+            )
     return InvestigationPlan.model_validate(
         {
             "incident_id": alert.incident_id,
@@ -1389,28 +1436,37 @@ def _smoke_plan(alert: Alert, root_cause: str, second_sql: str) -> Investigation
                 }
                 for index, candidate in enumerate(candidates, start=1)
             ],
-            "steps": [
-                {
-                    "step_id": "S01",
-                    "purpose": "Inspect business activity for the alert date.",
-                    "hypothesis_id": "H01",
-                    "tool": "sql_query",
-                    "arguments": {"sql": first_sql},
-                    "expected_evidence": ["business activity observation"],
-                    "stop_condition": "retain the business observation",
-                },
-                {
-                    "step_id": "S02",
-                    "purpose": "Inspect an independent operational or metadata signal.",
-                    "hypothesis_id": "H01",
-                    "tool": "sql_query",
-                    "arguments": {"sql": second_sql},
-                    "expected_evidence": ["independent metadata observation"],
-                    "stop_condition": "validate the strongest candidate",
-                },
-            ],
+            "steps": steps,
         }
     )
+
+
+def _smoke_candidate_sqls(candidate: str, date_literal: str) -> list[str]:
+    """Return deterministic source-complete paths for a smoke-plan decoy."""
+
+    business_sql = (
+        "SELECT COUNT(*) AS event_count FROM events "
+        f"WHERE CAST(event_time AS DATE) = DATE '{date_literal}'"
+    )
+    if candidate == "missing_partition":
+        return [
+            business_sql,
+            (
+                "SELECT partition_value, row_count, status FROM partition_metadata "
+                "WHERE table_name = 'events' "
+                f"AND partition_value LIKE '{date_literal}/%'"
+            ),
+        ]
+    if candidate == "data_delay":
+        return [
+            business_sql,
+            (
+                "SELECT status, error_type FROM pipeline_runs "
+                "WHERE target_table = 'events' "
+                f"AND target_partition = '{date_literal}'"
+            ),
+        ]
+    return [business_sql]
 
 
 __all__ = [

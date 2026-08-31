@@ -569,3 +569,110 @@ def test_data_quality_evidence_id_is_deterministic_for_same_observation() -> Non
     assert first.evidence_id.startswith("dq-")
     assert first.query_id == "Q-DQ-001"
     assert first.observation["details"] == {"null_rate": 0.5}
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "table", "expected_source"),
+    [
+        ("detect_schema_drift", "events", "schema_metadata"),
+        ("check_null_rate", "partition_metadata", "operational_metadata"),
+        ("check_null_rate", "pipeline_runs", "operational_metadata"),
+        ("check_null_rate", "metric_versions", "metric_version"),
+        ("check_null_rate", "experiment_configs", "experiment_config"),
+        ("check_null_rate", "events", "business_data"),
+    ],
+)
+def test_data_quality_provenance_uses_the_canonical_asset_policy(
+    tool_name: str,
+    table: str,
+    expected_source: str,
+) -> None:
+    evidence = DataQualityEvidence(
+        finding="one deterministic finding",
+        query_id="Q-PROVENANCE",
+        details={},
+    )
+    result = DataQualityCheckResult(
+        check_name=tool_name,
+        status="success",
+        passed=False,
+        table=table,
+        query_id="Q-PROVENANCE",
+        evidence=[evidence],
+    )
+
+    reference = data_quality_evidence_to_reference(
+        evidence,
+        result=result,
+        tool_name=tool_name,
+        incident_id="INC-PROVENANCE",
+        sequence=1,
+    )
+
+    assert reference.source_type == expected_source
+
+
+def test_data_quality_provenance_rejects_unknown_assets() -> None:
+    evidence = DataQualityEvidence(
+        finding="one deterministic finding",
+        query_id="Q-UNKNOWN",
+        details={},
+    )
+    result = DataQualityCheckResult(
+        check_name="check_null_rate",
+        status="success",
+        passed=False,
+        table="unknown_asset",
+        query_id="Q-UNKNOWN",
+        evidence=[evidence],
+    )
+
+    with pytest.raises(ValueError, match="unknown source asset"):
+        data_quality_evidence_to_reference(
+            evidence,
+            result=result,
+            tool_name="check_null_rate",
+            incident_id="INC-PROVENANCE",
+            sequence=1,
+        )
+
+
+def test_executor_normalizes_unknown_data_quality_asset_as_contract_failure() -> None:
+    def fake_check_null_rate(
+        _: str,
+        table: str,
+        column: str,
+        **__: object,
+    ) -> DataQualityCheckResult:
+        return DataQualityCheckResult(
+            check_name="check_null_rate",
+            status="success",
+            passed=False,
+            table="unknown_asset",
+            column=column,
+            query_id="Q-UNKNOWN-ASSET",
+            evidence=[
+                DataQualityEvidence(
+                    finding=f"unexpected provenance for {table}",
+                    query_id="Q-UNKNOWN-ASSET",
+                    details={},
+                )
+            ],
+        )
+
+    result = ToolExecutor(
+        "unused.duckdb",
+        data_quality_execution={"check_null_rate": fake_check_null_rate},
+    ).execute_step(
+        _quality_step(
+            "check_null_rate",
+            {"table": "events", "column": "user_id"},
+        )
+    )
+
+    assert result.success is False
+    assert result.query_id == "Q-UNKNOWN-ASSET"
+    assert result.error is not None
+    assert result.error["type"] == "tool_contract"
+    assert "unknown source asset" in result.error["message"]
+    assert result.evidence == []

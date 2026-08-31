@@ -130,11 +130,13 @@ def _step(
     step_id: str,
     purpose: str,
     arguments: dict[str, object],
+    *,
+    hypothesis_id: str = "H01",
 ) -> dict[str, object]:
     return {
         "step_id": step_id,
         "purpose": purpose,
-        "hypothesis_id": "H01",
+        "hypothesis_id": hypothesis_id,
         "tool": "sql_query",
         "arguments": arguments,
         "expected_evidence": ["the bounded SQL observation"],
@@ -188,6 +190,41 @@ def _f01_plan_payload() -> dict[str, object]:
                         "AND partition_value = '2026-01-30/android'"
                     )
                 },
+            ),
+            _step(
+                "S03",
+                "Measure target-date events for the delay decoy.",
+                {
+                    "sql": (
+                        "SELECT COUNT(*) AS event_count FROM events "
+                        "WHERE CAST(event_time AS DATE) = DATE '2026-01-30'"
+                    )
+                },
+                hypothesis_id="H02",
+            ),
+            _step(
+                "S04",
+                "Inspect pipeline metadata for the delay decoy.",
+                {
+                    "sql": (
+                        "SELECT status, error_type FROM pipeline_runs "
+                        "WHERE target_table = 'events' "
+                        "AND target_partition = '2026-01-30'"
+                    )
+                },
+                hypothesis_id="H02",
+            ),
+            _step(
+                "S05",
+                "Measure null user identifiers for the null-value decoy.",
+                {
+                    "sql": (
+                        "SELECT COUNT(*) AS row_count FROM events "
+                        "WHERE user_id IS NULL AND CAST(event_time AS DATE) = "
+                        "DATE '2026-01-30'"
+                    )
+                },
+                hypothesis_id="H03",
             ),
         ],
     }
@@ -243,6 +280,51 @@ def _f11_plan_payload() -> dict[str, object]:
                         "ORDER BY version"
                     )
                 },
+            ),
+            _step(
+                "S03",
+                "Measure target-date events for the partition decoy.",
+                {
+                    "sql": (
+                        "SELECT COUNT(*) AS event_count FROM events "
+                        "WHERE CAST(event_time AS DATE) = DATE '2026-01-30'"
+                    )
+                },
+                hypothesis_id="H02",
+            ),
+            _step(
+                "S04",
+                "Inspect partition metadata for the partition decoy.",
+                {
+                    "sql": (
+                        "SELECT partition_value, row_count, status "
+                        "FROM partition_metadata WHERE table_name = 'events'"
+                    )
+                },
+                hypothesis_id="H02",
+            ),
+            _step(
+                "S05",
+                "Measure target-date events for the delay decoy.",
+                {
+                    "sql": (
+                        "SELECT COUNT(*) AS event_count FROM events "
+                        "WHERE CAST(event_time AS DATE) = DATE '2026-01-30'"
+                    )
+                },
+                hypothesis_id="H03",
+            ),
+            _step(
+                "S06",
+                "Inspect pipeline metadata for the delay decoy.",
+                {
+                    "sql": (
+                        "SELECT status, error_type FROM pipeline_runs "
+                        "WHERE target_table = 'events' "
+                        "AND target_partition = '2026-01-30'"
+                    )
+                },
+                hypothesis_id="H03",
             ),
         ],
     }
