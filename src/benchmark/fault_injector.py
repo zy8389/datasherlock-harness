@@ -20,24 +20,14 @@ from config.faults import (
     validate_ground_truth_case,
 )
 from data.generator import (
+    BENCHMARK_FIXTURE_TABLES,
     compute_definition_hash,
     generate_subscriptions,
     logical_dtype,
     materialize_daily_metrics,
 )
 
-REQUIRED_TABLES = {
-    "users",
-    "events",
-    "subscriptions",
-    "experiment_assignments",
-    "daily_metrics",
-    "pipeline_runs",
-    "partition_metadata",
-    "schema_snapshots",
-    "metric_versions",
-    "experiment_configs",
-}
+REQUIRED_TABLES = set(BENCHMARK_FIXTURE_TABLES)
 
 _GROUND_TRUTH_DIRECTORY = Path(__file__).parents[2] / "benchmark" / "ground_truth"
 _F12_FREE_TREATMENT_CONVERSION_PROBABILITY = 0.20
