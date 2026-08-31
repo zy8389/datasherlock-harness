@@ -4,7 +4,9 @@ from pathlib import Path
 import duckdb
 import pytest
 
+from tools import data_quality
 from tools.data_quality import (
+    SCHEMA_DRIFT_ASSESSMENT_INSUFFICIENT_HISTORY,
     DataQualityScope,
     check_duplicate_rate,
     check_freshness,
@@ -12,6 +14,7 @@ from tools.data_quality import (
     detect_distribution_drift,
     detect_schema_drift,
 )
+from tools.sql_runner import SqlExecutionResponse
 
 
 @pytest.fixture
@@ -325,6 +328,73 @@ def _create_schema_snapshots(database_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize("snapshot_count", [0, 1])
+def test_detect_schema_drift_is_inconclusive_for_insufficient_history(
+    database_path: Path,
+    snapshot_count: int,
+) -> None:
+    _create_schema_snapshots(database_path)
+    if snapshot_count:
+        with duckdb.connect(str(database_path)) as connection:
+            connection.execute(
+                """
+                INSERT INTO schema_snapshots VALUES
+                ('events', 1, '{"event_id": "BIGINT"}', '2026-01-30 00:00:00')
+                """
+            )
+
+    result = detect_schema_drift(database_path, "events")
+
+    assert result.status == "success"
+    assert result.passed is None
+    assert result.error is None
+    assert result.observed_value is None
+    assert result.evidence[0].details == {
+        "assessment": SCHEMA_DRIFT_ASSESSMENT_INSUFFICIENT_HISTORY,
+        "snapshot_count": snapshot_count,
+        "required_snapshot_count": 2,
+    }
+
+
+def test_detect_schema_drift_returns_error_when_snapshot_query_fails(
+    database_path: Path,
+) -> None:
+    result = detect_schema_drift(database_path, "events")
+
+    assert result.status == "error"
+    assert result.passed is None
+    assert result.error is not None
+    assert result.error["type"] == "execution"
+    assert result.evidence == []
+
+
+def test_detect_schema_drift_rejects_invalid_result_shape(
+    database_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        data_quality,
+        "execute_readonly_sql",
+        lambda *_args, **_kwargs: SqlExecutionResponse(
+            query_id="Q-BAD-SHAPE",
+            status="success",
+            statement_type="SELECT",
+            columns=["version", "schema_json", "effective_at"],
+            rows=[[1]],
+            row_count=1,
+        ),
+    )
+
+    result = detect_schema_drift(database_path, "events")
+
+    assert result.status == "error"
+    assert result.passed is None
+    assert result.error == {
+        "type": "execution",
+        "message": "schema-drift query returned an unexpected result shape",
+    }
+
+
 def test_detect_schema_drift_passes_for_unchanged_schema(database_path: Path) -> None:
     _create_schema_snapshots(database_path)
     with duckdb.connect(str(database_path)) as connection:
@@ -373,6 +443,10 @@ def test_detect_schema_drift_fails_for_f10_type_change(database_path: Path) -> N
             "current_type": "VARCHAR",
         }
     ]
+    assert (
+        result.evidence[0].details.get("assessment")
+        != SCHEMA_DRIFT_ASSESSMENT_INSUFFICIENT_HISTORY
+    )
 
 
 def test_detect_schema_drift_returns_structured_error_for_invalid_schema_json(

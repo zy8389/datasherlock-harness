@@ -187,7 +187,7 @@ def test_fingerprinting_does_not_modify_database(tmp_path: Path) -> None:
     assert database.read_bytes() == before
 
 
-@pytest.mark.parametrize("case_id", ["F01-001", "F06-001"])
+@pytest.mark.parametrize("case_id", ["F01-001", "F06-001", "F10-001"])
 def test_canonical_case_rematerialization_is_logically_stable(
     tmp_path: Path, case_id: str
 ) -> None:

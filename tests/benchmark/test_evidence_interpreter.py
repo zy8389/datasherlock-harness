@@ -578,6 +578,7 @@ def _dq_tool_reference(
     observed_value: float | None = None,
     threshold: float | None = None,
     details: dict[str, Any] | None = None,
+    passed: bool | None = False,
 ) -> EvidenceReference:
     return EvidenceReference(
         evidence_id=evidence_id,
@@ -587,7 +588,7 @@ def _dq_tool_reference(
         observation={
             "check_name": tool_name,
             "status": "success",
-            "passed": False,
+            "passed": passed,
             "table": table,
             "column": column,
             "columns": columns or ([column] if column is not None else []),
@@ -602,7 +603,7 @@ def _dq_tool_result(
     tool_name: str,
     references: list[EvidenceReference],
     *,
-    passed: bool = False,
+    passed: bool | None = False,
 ) -> ToolExecutionResult:
     observation = references[0].observation if references else {}
     return ToolExecutionResult(
@@ -837,16 +838,43 @@ def test_schema_drift_without_actual_change_is_neutral() -> None:
         observed_value=0.0,
         threshold=0.0,
         details=_schema_details(),
+        passed=True,
     )
     interpretation = RuntimeEvidenceInterpreter(context=_context()).interpret(
         hypothesis=_hypothesis("schema_change"),
         step=_step("", tool="detect_schema_drift"),
-        tool_result=_dq_tool_result("detect_schema_drift", [reference]),
+        tool_result=_dq_tool_result("detect_schema_drift", [reference], passed=True),
     )
 
     decision = _decision(interpretation)
     assert decision.polarity is EvidencePolarity.NEUTRAL
-    assert "no actual schema change" in decision.reason
+    assert decision.reason == "passed data-quality checks are neutral by default"
+
+
+def test_schema_drift_insufficient_history_is_neutral() -> None:
+    reference = _dq_tool_reference(
+        evidence_id="dq-schema-insufficient-history",
+        tool_name="detect_schema_drift",
+        source_type="schema_metadata",
+        details={
+            "assessment": "insufficient_history",
+            "snapshot_count": 1,
+            "required_snapshot_count": 2,
+        },
+        passed=None,
+    )
+    interpretation = RuntimeEvidenceInterpreter(context=_context()).interpret(
+        hypothesis=_hypothesis("schema_change"),
+        step=_step("", tool="detect_schema_drift"),
+        tool_result=_dq_tool_result(
+            "detect_schema_drift", [reference], passed=None
+        ),
+    )
+
+    decision = _decision(interpretation)
+    assert decision.polarity is EvidencePolarity.NEUTRAL
+    assert interpretation.polarity is not EvidencePolarity.SUPPORTS
+    assert interpretation.polarity is not EvidencePolarity.CONTRADICTS
 
 
 def test_schema_drift_with_actual_change_supports_schema_change() -> None:
@@ -856,7 +884,15 @@ def test_schema_drift_with_actual_change_supports_schema_change() -> None:
         source_type="schema_metadata",
         observed_value=1.0,
         threshold=0.0,
-        details=_schema_details(added_columns=["new_field"]),
+        details=_schema_details(
+            type_changes=[
+                {
+                    "column": "app_build_number",
+                    "previous_type": "BIGINT",
+                    "current_type": "VARCHAR",
+                }
+            ]
+        ),
     )
     interpretation = RuntimeEvidenceInterpreter(context=_context()).interpret(
         hypothesis=_hypothesis("schema_change"),
