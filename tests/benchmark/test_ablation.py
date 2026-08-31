@@ -399,19 +399,19 @@ def test_state_graph_without_validator_never_sets_authoritative_root_cause(
                 "hypotheses": [
                     {
                         "hypothesis_id": "H01",
-                        "root_cause_type": "missing_partition",
+                        "root_cause_type": "duplicate_batch",
                         "description": "A candidate explanation.",
                         "initial_confidence": 0.6,
                     },
                     {
                         "hypothesis_id": "H02",
-                        "root_cause_type": "data_delay",
+                        "root_cause_type": "null_value_anomaly",
                         "description": "Another candidate explanation.",
                         "initial_confidence": 0.2,
                     },
                     {
                         "hypothesis_id": "H03",
-                        "root_cause_type": "null_value_anomaly",
+                        "root_cause_type": "unit_error",
                         "description": "A third candidate explanation.",
                         "initial_confidence": 0.1,
                     },
@@ -425,7 +425,25 @@ def test_state_graph_without_validator_never_sets_authoritative_root_cause(
                         "arguments": {"sql": "SELECT 1 AS observed"},
                         "expected_evidence": ["the bounded observation"],
                         "stop_condition": "retain the result",
-                    }
+                    },
+                    {
+                        "step_id": "S02",
+                        "purpose": "Collect a second bounded observation.",
+                        "hypothesis_id": "H02",
+                        "tool": "sql_query",
+                        "arguments": {"sql": "SELECT 2 AS observed"},
+                        "expected_evidence": ["the bounded observation"],
+                        "stop_condition": "retain the result",
+                    },
+                    {
+                        "step_id": "S03",
+                        "purpose": "Collect a third bounded observation.",
+                        "hypothesis_id": "H03",
+                        "tool": "sql_query",
+                        "arguments": {"sql": "SELECT 3 AS observed"},
+                        "expected_evidence": ["the bounded observation"],
+                        "stop_condition": "retain the result",
+                    },
                 ],
             }
         ]
@@ -436,8 +454,8 @@ def test_state_graph_without_validator_never_sets_authoritative_root_cause(
     assert client.calls == 1
     assert output.completion_status == "unresolved"
     assert output.trace_payload["state"]["root_cause"] is None
-    assert output.primary_prediction == "missing_partition"
-    assert output.tool_call_count == 1
+    assert output.primary_prediction == "duplicate_batch"
+    assert output.tool_call_count == 3
 
 
 def test_full_harness_adapter_reuses_production_builder(

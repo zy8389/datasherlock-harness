@@ -2,10 +2,19 @@ import inspect
 import json
 from dataclasses import dataclass
 
+import duckdb
 import pytest
 from pydantic import ValidationError
 
-from agents.planner import Hypothesis, InvestigationPlan, InvestigationStep
+from agents.planner import (
+    Alert,
+    Hypothesis,
+    InvestigationPlan,
+    InvestigationStep,
+    PlannerInput,
+    load_metric_context,
+    validate_plan_semantics,
+)
 from benchmark.evidence_interpreter import (
     EvidenceInterpretation,
     EvidencePolarity,
@@ -20,7 +29,8 @@ from harness.hypothesis import (
     HypothesisState,
     HypothesisStatus,
 )
-from tools.executor import ToolExecutionResult
+from tools.executor import ToolExecutionResult, ToolExecutor
+from tools.registry import build_default_tool_registry
 from validators.root_cause_validator import (
     MIN_INDEPENDENT_SOURCE_TYPES,
     MIN_SUPPORTING_EVIDENCE,
@@ -326,3 +336,148 @@ def test_validator_contract_still_rejects_two_supports_from_one_source_type() ->
     assert validation.independent_source_types == ["business_data"]
     assert validation.validated is False
     assert validation.recommended_next_state == "HYPOTHESIS_TESTING"
+
+
+def test_f11_real_sql_reaches_supported_and_validated_without_a_model(tmp_path) -> None:
+    database_path = tmp_path / "f11-evidence.duckdb"
+    with duckdb.connect(str(database_path)) as connection:
+        connection.execute(
+            "CREATE TABLE events (event_time TIMESTAMP, user_id INTEGER)"
+        )
+        connection.execute(
+            "INSERT INTO events VALUES "
+            "('2026-01-30 01:00:00', 1), ('2026-01-30 02:00:00', 2), "
+            "('2026-01-30 03:00:00', 3), ('2026-01-30 04:00:00', 4)"
+        )
+        connection.execute(
+            "CREATE TABLE daily_metrics (metric_date DATE, daily_active_users BIGINT)"
+        )
+        connection.execute("INSERT INTO daily_metrics VALUES (DATE '2026-01-30', 2)")
+        connection.execute(
+            "CREATE TABLE metric_versions (metric_id VARCHAR, version INTEGER, "
+            "definition_hash VARCHAR, query VARCHAR, effective_at TIMESTAMP)"
+        )
+        connection.execute(
+            "INSERT INTO metric_versions VALUES "
+            "('daily_active_users', 1, 'hash-1', 'SELECT old', '2026-01-01'), "
+            "('daily_active_users', 2, 'hash-2', 'SELECT new', '2026-01-30')"
+        )
+
+    hypotheses = [
+        Hypothesis(
+            hypothesis_id="H01",
+            root_cause_type="metric_definition_change",
+            description="The metric definition changed at the target date.",
+            initial_confidence=0.45,
+        ),
+        Hypothesis(
+            hypothesis_id="H02",
+            root_cause_type="duplicate_batch",
+            description="Deterministic decoy one.",
+            initial_confidence=0.2,
+        ),
+        Hypothesis(
+            hypothesis_id="H03",
+            root_cause_type="null_value_anomaly",
+            description="Deterministic decoy two.",
+            initial_confidence=0.1,
+        ),
+    ]
+    steps = [
+        _step(
+            "S01",
+            (
+                "SELECT COUNT(*) AS raw_event_count, "
+                "COUNT(DISTINCT user_id) AS raw_user_count, "
+                "(SELECT daily_active_users FROM daily_metrics "
+                "WHERE metric_date = DATE '2026-01-30') AS daily_active_users "
+                "FROM events WHERE CAST(event_time AS DATE) = DATE '2026-01-30'"
+            ),
+        ),
+        _step(
+            "S02",
+            (
+                "SELECT metric_id, version, definition_hash, query, effective_at "
+                "FROM metric_versions WHERE metric_id = 'daily_active_users' "
+                "ORDER BY version"
+            ),
+        ),
+        InvestigationStep(
+            step_id="S03",
+            purpose="Inspect the first decoy.",
+            hypothesis_id="H02",
+            tool="sql_query",
+            arguments={"sql": "SELECT COUNT(*) FROM events"},
+            expected_evidence=["one structured SQL result"],
+            stop_condition="stop after the bounded observation",
+        ),
+        InvestigationStep(
+            step_id="S04",
+            purpose="Inspect the second decoy.",
+            hypothesis_id="H03",
+            tool="sql_query",
+            arguments={"sql": "SELECT COUNT(*) FROM events WHERE user_id IS NULL"},
+            expected_evidence=["one structured SQL result"],
+            stop_condition="stop after the bounded observation",
+        ),
+    ]
+    plan = InvestigationPlan(
+        incident_id="INC-SCOPED-SQL",
+        hypotheses=hypotheses,
+        steps=steps,
+    )
+    request = PlannerInput(
+        alert=Alert(
+            incident_id="INC-SCOPED-SQL",
+            metric="daily_active_users",
+            observed_at="2026-01-30T00:00:00+00:00",
+            expected_value=4,
+            observed_value=2,
+            change_rate=-0.5,
+            severity="high",
+        ),
+        metric_context=load_metric_context("daily_active_users"),
+    )
+    registry = build_default_tool_registry()
+    validate_plan_semantics(plan, request, registry)
+
+    manager = HypothesisManager()
+    for hypothesis in plan.hypotheses:
+        manager.create_hypothesis(hypothesis)
+    interpreter = RuntimeEvidenceInterpreter(context=_context("daily_active_users"))
+    executor = ToolExecutor(database_path, registry=registry)
+    support_sources: list[str] = []
+
+    for step in plan.steps[:2]:
+        result = executor.execute_step(
+            step,
+            incident_id=plan.incident_id,
+            metric_id="daily_active_users",
+        )
+        assert result.success is True
+        assert result.sql_validation is not None
+        assert result.sql_validation.passed is True
+        interpretation = interpreter.interpret(
+            hypothesis=manager.get_hypothesis("H01"),
+            step=step,
+            tool_result=result,
+        )
+        assert len(interpretation.decisions) == 1
+        decision = interpretation.decisions[0]
+        assert decision.polarity is EvidencePolarity.SUPPORTS
+        manager.register_evidence(decision.evidence)
+        manager.attach_evidence("H01", decision.evidence.evidence_id, supports=True)
+        support_sources.append(decision.evidence.source_type)
+
+    hypothesis = manager.get_hypothesis("H01")
+    validation = RootCauseValidator().validate(hypothesis, manager.evidence())
+
+    assert support_sources == ["business_data", "metric_version"]
+    assert len(hypothesis.supporting_evidence_ids) == 2
+    assert hypothesis.confidence == pytest.approx(0.75)
+    assert hypothesis.status is HypothesisStatus.SUPPORTED
+    assert validation.validated is True
+    assert validation.independent_source_types == [
+        "business_data",
+        "metric_version",
+    ]

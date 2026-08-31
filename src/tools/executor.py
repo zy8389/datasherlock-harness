@@ -19,7 +19,7 @@ from typing import Any, Protocol, cast
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from agents.planner import InvestigationStep
-from config.faults import EvidenceSourceType
+from config.faults import evidence_source_for_data_quality_result
 from config.metrics import MetricDefinition, load_metrics_config
 from harness.hypothesis import EvidenceReference
 from tools.data_quality import (
@@ -335,16 +335,24 @@ class ToolExecutor:
                 or {"type": "execution", "message": "data quality check failed"},
             )
 
-        evidence = [
-            data_quality_evidence_to_reference(
-                evidence_item,
-                result=result,
-                tool_name=tool_name,
-                incident_id=incident_id,
-                sequence=index,
+        try:
+            evidence = [
+                data_quality_evidence_to_reference(
+                    evidence_item,
+                    result=result,
+                    tool_name=tool_name,
+                    incident_id=incident_id,
+                    sequence=index,
+                )
+                for index, evidence_item in enumerate(result.evidence, start=1)
+            ]
+        except (TypeError, ValueError) as exc:
+            return self._failure(
+                tool_name,
+                "tool_contract",
+                str(exc),
+                query_id=result.query_id,
             )
-            for index, evidence_item in enumerate(result.evidence, start=1)
-        ]
         return ToolExecutionResult(
             tool_name=tool_name,
             success=True,
@@ -437,16 +445,12 @@ def data_quality_evidence_to_reference(
 ) -> EvidenceReference:
     """Convert a real Data Quality finding to the shared Harness evidence model."""
 
-    if tool_name == "detect_schema_drift":
-        source_type = EvidenceSourceType.SCHEMA_METADATA.value
-    elif result.table in {"partition_metadata", "pipeline_runs"}:
-        source_type = EvidenceSourceType.OPERATIONAL_METADATA.value
-    elif result.table == "metric_versions":
-        source_type = EvidenceSourceType.METRIC_VERSION.value
-    elif result.table == "experiment_configs":
-        source_type = EvidenceSourceType.EXPERIMENT_CONFIG.value
-    else:
-        source_type = EvidenceSourceType.BUSINESS_DATA.value
+    source = evidence_source_for_data_quality_result(tool_name, result.table)
+    if source is None:
+        raise ValueError(
+            f"data-quality evidence uses an unknown source asset: {result.table!r}"
+        )
+    source_type = source.value
     observation = {
         "check_name": result.check_name,
         "status": result.status,

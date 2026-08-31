@@ -15,6 +15,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, Final, TypeAlias, cast
 
+import sqlglot
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -23,10 +24,16 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from sqlglot import exp
+from sqlglot.errors import SqlglotError
 
 from config.faults import (
     DEFAULT_FAULT_CATALOG_PATH,
+    EvidenceSourceType,
     FaultDefinition,
+    evidence_assets_by_source,
+    evidence_source_for_asset,
+    evidence_source_for_data_quality_result,
     load_fault_catalog,
 )
 from config.metrics import DEFAULT_METRICS_PATH, load_metrics_config
@@ -483,6 +490,7 @@ def validate_plan_semantics(
     validate_root_cause_types(plan)
     validate_plan_tools(plan, tool_registry)
     validate_plan_diagnostic_tool_bindings(plan)
+    validate_plan_evidence_source_coverage(plan, tool_registry)
 
 
 def validate_root_cause_types(plan: InvestigationPlan) -> None:
@@ -522,6 +530,104 @@ def validate_plan_diagnostic_tool_bindings(plan: InvestigationPlan) -> None:
                 f"tool {step.tool!r} is not mapped to root_cause_type "
                 f"{hypothesis.root_cause_type!r}; allowed tool(s): {allowed_text}"
             )
+
+
+def infer_step_evidence_source(
+    step: InvestigationStep,
+    tool_registry: ToolRegistry,
+) -> EvidenceSourceType | None:
+    """Infer one planned evidence source without case data or Ground Truth."""
+
+    if not tool_registry.contains(step.tool):
+        return None
+    if step.tool == "sql_query":
+        sql = step.arguments.get("sql")
+        if not isinstance(sql, str):
+            return None
+        return _infer_sql_evidence_source(sql)
+
+    table = step.arguments.get("table")
+    if not isinstance(table, str):
+        return None
+    return evidence_source_for_data_quality_result(step.tool, table)
+
+
+def validate_plan_evidence_source_coverage(
+    plan: InvestigationPlan,
+    tool_registry: ToolRegistry,
+) -> None:
+    """Require actionable steps and catalog-declared source coverage."""
+
+    faults_by_root_cause = {
+        fault.root_cause_type: fault for fault in load_fault_catalog().faults
+    }
+    steps_by_hypothesis: dict[str, list[InvestigationStep]] = {
+        hypothesis.hypothesis_id: [] for hypothesis in plan.hypotheses
+    }
+    for step in plan.steps:
+        steps_by_hypothesis[step.hypothesis_id].append(step)
+
+    for hypothesis in plan.hypotheses:
+        steps = steps_by_hypothesis[hypothesis.hypothesis_id]
+        if not steps:
+            raise PlannerValidationError(
+                f"hypothesis {hypothesis.hypothesis_id} "
+                f"({hypothesis.root_cause_type}) has no investigation step"
+            )
+
+        fault = faults_by_root_cause[hypothesis.root_cause_type]
+        required = set(fault.evidence_source_types)
+        if len(required) < 2:
+            continue
+        planned = {
+            source
+            for step in steps
+            if (source := infer_step_evidence_source(step, tool_registry)) is not None
+        }
+        missing = sorted(required.difference(planned), key=lambda item: item.value)
+        if missing:
+            missing_text = ", ".join(source.value for source in missing)
+            required_text = ", ".join(
+                source.value for source in sorted(required, key=lambda item: item.value)
+            )
+            raise PlannerValidationError(
+                f"hypothesis {hypothesis.hypothesis_id} "
+                f"({hypothesis.root_cause_type}) is missing planned evidence source: "
+                f"{missing_text}; required sources: {required_text}"
+            )
+
+
+def _infer_sql_evidence_source(sql: str) -> EvidenceSourceType | None:
+    """Classify physical SQL tables; mixed and unknown sources fail closed."""
+
+    try:
+        expressions = [item for item in sqlglot.parse(sql, read="duckdb") if item]
+    except (SqlglotError, TypeError, ValueError):
+        return None
+
+    assets: list[str] = []
+    for expression in expressions:
+        cte_names = {
+            cte.alias_or_name.lower()
+            for cte in expression.find_all(exp.CTE)
+            if cte.alias_or_name
+        }
+        for table in expression.find_all(exp.Table):
+            name = table.name.lower()
+            if name and name not in cte_names and name not in assets:
+                assets.append(name)
+    if not assets:
+        return None
+
+    sources: set[EvidenceSourceType] = set()
+    for asset in assets:
+        source = evidence_source_for_asset(asset)
+        if source is None:
+            return None
+        sources.add(source)
+    if len(sources) != 1:
+        return None
+    return next(iter(sources))
 
 
 def _sanitize_planner_validation_error(error: PlannerValidationError) -> str:
@@ -605,6 +711,9 @@ def _build_planner_user_prompt(
 
     applicable_faults = _fault_context(request.metric_context.metric_id)
     fault_text = json.dumps(applicable_faults, ensure_ascii=False, indent=2)
+    source_asset_text = json.dumps(
+        evidence_assets_by_source(), ensure_ascii=False, indent=2
+    )
     canonical_root_causes = json.dumps(
         _canonical_root_cause_types(), ensure_ascii=False
     )
@@ -633,17 +742,31 @@ def _build_planner_user_prompt(
             "Canonical diagnostic capability map (generic tool policy for candidate "
             "hypotheses; does not identify the true root cause):\n"
             f"{json.dumps(_diagnostic_capability_context(), ensure_ascii=False, indent=2)}\n\n"
+            "Canonical evidence source-to-asset map (generic provenance policy):\n"
+            f"{source_asset_text}\n\n"
         ),
         _available_tools_text(tool_registry),
         (
             "\nRules:\n"
             "- Only use tools listed above.\n"
             "- Every investigation step must reference one available tool.\n"
+            "- Every proposed hypothesis must have at least one investigation step.\n"
             f"- Every investigation step must include {step_arguments}.\n"
             f"{argument_rules}"
             "- Each candidate fault entry includes diagnostic_tools. For every step, "
             "use only a tool listed for that hypothesis root_cause_type in the "
             "canonical diagnostic capability map.\n"
+            "- When a candidate fault declares multiple evidence_source_types, "
+            "include distinct investigation steps covering every declared source type.\n"
+            "- Multiple queries over the same source type are not independent evidence.\n"
+            "- Do not combine two source classes into one SQL merely to satisfy the "
+            "independence requirement.\n"
+            "- Plan observations that can causally test the candidate, not merely show "
+            "hypothetical impact.\n"
+            "- These evidence objectives describe what would test each candidate. "
+            "They do not mean the candidate is true. Use verification_fields and "
+            "expected_evidence only as candidate diagnostic objectives; never treat "
+            "them as observed facts.\n"
             "- Every SQL query must be read-only and will be checked by SQL Runner.\n"
             "- For root_cause_type, use only a canonical value from the supplied "
             "fault vocabulary; do not invent new values.\n"
@@ -1146,10 +1269,16 @@ def build_fallback_plan(
         for index, fault in enumerate(faults, start=1)
     ]
 
-    steps = [
-        _step_for_fault(request, hypothesis, fault, index)
-        for index, (hypothesis, fault) in enumerate(zip(hypotheses, faults), start=1)
-    ]
+    steps: list[InvestigationStep] = []
+    for hypothesis, fault in zip(hypotheses, faults, strict=True):
+        steps.extend(
+            _steps_for_fault(
+                request,
+                hypothesis,
+                fault,
+                start_index=len(steps) + 1,
+            )
+        )
     plan = InvestigationPlan(
         incident_id=request.alert.incident_id,
         hypotheses=hypotheses,
@@ -1196,6 +1325,11 @@ def _fault_context(metric_id: str) -> list[JsonObject]:
             "root_cause_type": fault.root_cause_type,
             "affected_assets": fault.affected_assets,
             "diagnostic_tools": fault.diagnostic_tools,
+            "evidence_source_types": [
+                source.value for source in fault.evidence_source_types
+            ],
+            "verification_fields": fault.verification_fields,
+            "expected_evidence": fault.expected_evidence,
         }
         for fault in catalog.faults
         if metric_id in fault.affected_metrics
@@ -1300,29 +1434,174 @@ def _select_fallback_faults(request: PlannerInput) -> list[FaultDefinition]:
     return selected[:MAX_HYPOTHESES]
 
 
-def _step_for_fault(
+def _steps_for_fault(
     request: PlannerInput,
     hypothesis: Hypothesis,
     fault: FaultDefinition,
-    index: int,
-) -> InvestigationStep:
-    sql = _sql_for_root_cause(
+    *,
+    start_index: int,
+) -> list[InvestigationStep]:
+    primary_sql = _sql_for_root_cause(
         fault.root_cause_type,
         metric=request.metric_context.metric_id,
         entity_column=request.metric_context.entity_column,
         observed_at=request.alert.observed_at,
     )
-    return InvestigationStep(
-        step_id=f"S{index:02d}",
-        purpose=f"为 {hypothesis.hypothesis_id} 检查 {fault.root_cause_type} 的可观察信号。",
-        hypothesis_id=hypothesis.hypothesis_id,
-        tool="sql_query",
-        arguments={"sql": sql},
-        expected_evidence=list(fault.expected_evidence),
-        stop_condition=(
-            f"若 {fault.root_cause_type} 的关键证据未出现，则降低 {hypothesis.hypothesis_id} "
-            "的优先级并继续下一条假设；若出现，保留证据并进入独立交叉验证。"
-        ),
+    required_sources = list(fault.evidence_source_types)
+    if len(required_sources) < 2:
+        required_sources = []
+
+    planned_sql: list[tuple[EvidenceSourceType | None, str]]
+    if not required_sources:
+        planned_sql = [(_infer_sql_evidence_source(primary_sql), primary_sql)]
+    else:
+        primary_source = _infer_sql_evidence_source(primary_sql)
+        planned_sql = [
+            (
+                source,
+                primary_sql
+                if source is primary_source
+                else _supplemental_sql_for_source(request, fault, source),
+            )
+            for source in required_sources
+        ]
+
+    return [
+        InvestigationStep(
+            step_id=f"S{start_index + offset:02d}",
+            purpose=(
+                f"为 {hypothesis.hypothesis_id} 检查 {fault.root_cause_type} 的"
+                f"{source.value if source is not None else '可观察'}证据路径。"
+            ),
+            hypothesis_id=hypothesis.hypothesis_id,
+            tool="sql_query",
+            arguments={"sql": sql},
+            expected_evidence=list(fault.expected_evidence),
+            stop_condition=(
+                f"若 {fault.root_cause_type} 的关键证据未出现，则降低 "
+                f"{hypothesis.hypothesis_id} 的优先级并继续下一条假设；若出现，"
+                "保留证据并进入独立交叉验证。"
+            ),
+        )
+        for offset, (source, sql) in enumerate(planned_sql)
+    ]
+
+
+def _supplemental_sql_for_source(
+    request: PlannerInput,
+    fault: FaultDefinition,
+    source: EvidenceSourceType,
+) -> str:
+    """Build one deterministic corroborating path for a declared source."""
+
+    observed_date = _date_expression(request.alert.observed_at)
+    observed_literal = _sql_literal(_date_text(request.alert.observed_at))
+    metric_literal = _sql_literal(request.metric_context.metric_id)
+    affected_assets = set(fault.affected_assets)
+
+    if source is EvidenceSourceType.BUSINESS_DATA:
+        if {"events", "daily_metrics"}.issubset(affected_assets):
+            return (
+                "SELECT COUNT(*) AS raw_event_count, "
+                "COUNT(DISTINCT user_id) AS raw_user_count, "
+                "(SELECT daily_active_users FROM daily_metrics "
+                f"WHERE metric_date = {observed_date}) AS daily_active_users "
+                "FROM events "
+                f"WHERE CAST(event_time AS DATE) = {observed_date}"
+            )
+        if "events" in affected_assets:
+            if fault.root_cause_type == "missing_partition":
+                return (
+                    "SELECT device_type, COUNT(*) AS event_count, "
+                    "COUNT(DISTINCT user_id) AS user_count FROM events "
+                    f"WHERE CAST(event_time AS DATE) = {observed_date} "
+                    "GROUP BY device_type ORDER BY device_type"
+                )
+            if fault.root_cause_type == "data_delay":
+                return (
+                    "SELECT CAST(event_time AS DATE) AS metric_date, device_type, "
+                    "COUNT(*) AS event_count FROM events "
+                    f"WHERE CAST(event_time AS DATE) BETWEEN {observed_date} "
+                    f"AND {observed_date} + INTERVAL 1 DAY "
+                    "GROUP BY metric_date, device_type "
+                    "ORDER BY metric_date, device_type"
+                )
+            if fault.root_cause_type == "schema_change":
+                return (
+                    "SELECT COUNT(*) AS event_count, "
+                    "SUM(CASE WHEN app_build_number IS NULL THEN 1 ELSE 0 END) "
+                    "AS null_build_count, "
+                    "SUM(CASE WHEN TRY_CAST(app_build_number AS BIGINT) IS NULL "
+                    "AND app_build_number IS NOT NULL THEN 1 ELSE 0 END) "
+                    "AS non_numeric_build_count FROM events "
+                    f"WHERE CAST(event_time AS DATE) = {observed_date}"
+                )
+            return (
+                "SELECT CAST(event_time AS DATE) AS metric_date, "
+                "COUNT(*) AS event_count, COUNT(DISTINCT user_id) AS user_count "
+                "FROM events "
+                f"WHERE CAST(event_time AS DATE) = {observed_date} "
+                "GROUP BY metric_date"
+            )
+        if "experiment_assignments" in affected_assets:
+            return (
+                "SELECT variant, COUNT(*) AS assignment_count "
+                "FROM experiment_assignments GROUP BY variant ORDER BY variant"
+            )
+        if "subscriptions" in affected_assets:
+            return "SELECT COUNT(*) AS subscription_count FROM subscriptions"
+        if "daily_metrics" in affected_assets:
+            return f"SELECT * FROM daily_metrics WHERE metric_date = {observed_date}"
+
+    if source is EvidenceSourceType.OPERATIONAL_METADATA:
+        if "partition_metadata" in affected_assets:
+            return (
+                "SELECT table_name, partition_value, row_count, updated_at, status, "
+                "source_job_id FROM partition_metadata "
+                "WHERE table_name = 'events' "
+                f"AND partition_value LIKE {observed_literal} || '/%' "
+                "ORDER BY partition_value, updated_at DESC"
+            )
+        if "pipeline_runs" in affected_assets:
+            return (
+                "SELECT target_table, target_partition, status, started_at, finished_at, "
+                "error_type, error_message FROM pipeline_runs "
+                "WHERE target_table = 'events' "
+                f"AND target_partition = {observed_literal} ORDER BY started_at DESC"
+            )
+
+    if (
+        source is EvidenceSourceType.SCHEMA_METADATA
+        and "schema_snapshots" in affected_assets
+    ):
+        return (
+            "SELECT table_name, version, schema_json, effective_at "
+            "FROM schema_snapshots WHERE table_name = 'events' "
+            "ORDER BY effective_at DESC, version DESC"
+        )
+
+    if (
+        source is EvidenceSourceType.METRIC_VERSION
+        and "metric_versions" in affected_assets
+    ):
+        return (
+            "SELECT metric_id, version, definition_hash, query, effective_at, timezone, "
+            "date_grain FROM metric_versions "
+            f"WHERE metric_id = {metric_literal} ORDER BY effective_at, version"
+        )
+
+    if (
+        source is EvidenceSourceType.EXPERIMENT_CONFIG
+        and "experiment_configs" in affected_assets
+    ):
+        return (
+            "SELECT experiment_id, version, control_ratio, treatment_ratio, hash_key, "
+            "effective_at, status FROM experiment_configs "
+            "ORDER BY experiment_id, effective_at, version"
+        )
+
+    raise RuntimeError(
+        f"fault {fault.id} declares {source.value} without a canonical affected asset"
     )
 
 
@@ -1469,8 +1748,10 @@ __all__ = [
     "PlannerValidationError",
     "build_fallback_plan",
     "build_planner_prompt",
+    "infer_step_evidence_source",
     "load_metric_context",
     "parse_investigation_plan",
+    "validate_plan_evidence_source_coverage",
     "validate_plan_semantics",
     "validate_plan_tools",
     "validate_root_cause_types",

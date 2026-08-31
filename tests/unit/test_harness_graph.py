@@ -111,10 +111,48 @@ def _real_plan_payload() -> dict[str, object]:
                 "purpose": "Inspect the bounded event result.",
                 "hypothesis_id": "H01",
                 "tool": "sql_query",
-                "arguments": {"sql": "SELECT 1"},
+                "arguments": {"sql": "SELECT COUNT(*) FROM events"},
                 "expected_evidence": ["event result"],
                 "stop_condition": "stop after the bounded query",
-            }
+            },
+            {
+                "step_id": "S02",
+                "purpose": "Inspect partition metadata.",
+                "hypothesis_id": "H01",
+                "tool": "sql_query",
+                "arguments": {"sql": "SELECT * FROM partition_metadata"},
+                "expected_evidence": ["partition result"],
+                "stop_condition": "stop after the bounded query",
+            },
+            {
+                "step_id": "S03",
+                "purpose": "Inspect events for the delay candidate.",
+                "hypothesis_id": "H02",
+                "tool": "sql_query",
+                "arguments": {"sql": "SELECT COUNT(*) FROM events"},
+                "expected_evidence": ["event result"],
+                "stop_condition": "stop after the bounded query",
+            },
+            {
+                "step_id": "S04",
+                "purpose": "Inspect pipeline metadata for the delay candidate.",
+                "hypothesis_id": "H02",
+                "tool": "sql_query",
+                "arguments": {"sql": "SELECT * FROM pipeline_runs"},
+                "expected_evidence": ["pipeline result"],
+                "stop_condition": "stop after the bounded query",
+            },
+            {
+                "step_id": "S05",
+                "purpose": "Inspect events for the null candidate.",
+                "hypothesis_id": "H03",
+                "tool": "sql_query",
+                "arguments": {
+                    "sql": "SELECT COUNT(*) FROM events WHERE user_id IS NULL"
+                },
+                "expected_evidence": ["null result"],
+                "stop_condition": "stop after the bounded query",
+            },
         ],
     }
 

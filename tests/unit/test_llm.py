@@ -105,7 +105,10 @@ def test_mock_model_client_and_planner_use_structured_result_without_network() -
 
     assert result.incident_id == alert.incident_id
     assert len(result.hypotheses) == 5
-    assert len(result.steps) == 5
+    assert 5 <= len(result.steps) <= 10
+    assert {step.hypothesis_id for step in result.steps} == {
+        hypothesis.hypothesis_id for hypothesis in result.hypotheses
+    }
     assert len(model_client.calls) == 1
     assert model_client.calls[0]["system_prompt"]
     assert model_client.calls[0]["user_prompt"]

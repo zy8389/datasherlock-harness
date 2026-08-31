@@ -18,13 +18,18 @@ from agents.planner import (
     _sql_for_root_cause,
     build_fallback_plan,
     build_planner_prompt,
+    infer_step_evidence_source,
     load_metric_context,
     structured_plan_to_investigation_plan,
     validate_plan_diagnostic_tool_bindings,
     validate_plan_semantics,
     validate_plan_tools,
 )
-from config.faults import load_fault_catalog
+from config.faults import (
+    EvidenceSourceType,
+    evidence_assets_by_source,
+    load_fault_catalog,
+)
 from config.metrics import load_metrics_config
 from llm.mock_client import MockModelClient
 from tools.registry import build_default_tool_registry
@@ -69,7 +74,7 @@ def _structured_plan(
     step["tool"] = tool
     step.pop("arguments")
     step["arguments_json"] = arguments_json
-    payload["steps"] = [step]
+    payload["steps"] = [step, *payload["steps"][1:]]
     return StructuredInvestigationPlan.model_validate(payload)
 
 
@@ -119,6 +124,66 @@ def _binding_plan(root_cause_type: str, tool: str, metric_id: str) -> Investigat
             )
         ],
     )
+
+
+def _coverage_step(
+    step_id: str,
+    hypothesis_id: str,
+    *,
+    sql: str | None = None,
+    tool: str = "sql_query",
+    arguments: dict[str, object] | None = None,
+) -> InvestigationStep:
+    return InvestigationStep(
+        step_id=step_id,
+        purpose="collect one bounded source observation",
+        hypothesis_id=hypothesis_id,
+        tool=tool,
+        arguments=arguments or {"sql": sql or "SELECT COUNT(*) FROM events"},
+        expected_evidence=["one structured observation"],
+        stop_condition="continue only if the observation supports the candidate",
+    )
+
+
+def _coverage_plan(
+    root_cause_type: str,
+    metric_id: str,
+    target_steps: list[InvestigationStep],
+) -> tuple[InvestigationPlan, PlannerInput]:
+    alert = Alert.model_validate(_alert_payload_for_metric(metric_id))
+    plan = InvestigationPlan(
+        incident_id=alert.incident_id,
+        hypotheses=[
+            Hypothesis(
+                hypothesis_id="H01",
+                root_cause_type=root_cause_type,
+                description="target candidate",
+                initial_confidence=0.45,
+            ),
+            Hypothesis(
+                hypothesis_id="H02",
+                root_cause_type="duplicate_batch",
+                description="first decoy",
+                initial_confidence=0.2,
+            ),
+            Hypothesis(
+                hypothesis_id="H03",
+                root_cause_type="null_value_anomaly",
+                description="second decoy",
+                initial_confidence=0.1,
+            ),
+        ],
+        steps=[
+            *target_steps,
+            _coverage_step("S09", "H02"),
+            _coverage_step("S10", "H03"),
+        ],
+    )
+    request = PlannerInput(
+        alert=alert,
+        metric_context=load_metric_context(metric_id),
+    )
+    return plan, request
 
 
 def test_structured_planner_schema_is_strict_and_uses_string_arguments() -> None:
@@ -225,7 +290,13 @@ def test_structured_plan_accepts_canonical_arguments_only_at_local_boundary() ->
 
 def test_malformed_arguments_json_enters_planner_repair_and_succeeds() -> None:
     alert, metric_context = _request_for(dict(PLANNER_ALERT_EXAMPLES[0]))
-    valid = _structured_plan('{"sql":"SELECT 1"}')
+    fallback = build_fallback_plan(
+        PlannerInput(alert=alert, metric_context=metric_context)
+    )
+    valid_arguments = fallback.steps[0].arguments
+    valid = _structured_plan(
+        json.dumps(valid_arguments, sort_keys=True, separators=(",", ":"))
+    )
     invalid = _structured_plan("{not-json")
     calls = 0
 
@@ -240,7 +311,7 @@ def test_malformed_arguments_json_enters_planner_repair_and_succeeds() -> None:
 
     assert result.fallback_used is False
     assert result.planner_repair_count == 1
-    assert result.plan.steps[0].arguments == {"sql": "SELECT 1"}
+    assert result.plan.steps[0].arguments == valid_arguments
     assert result.model_result is not None
     assert isinstance(result.model_result.parsed, InvestigationPlan)
 
@@ -407,10 +478,7 @@ def test_metric_diagnostics_stay_out_of_metric_context_but_capabilities_are_prom
     assert "expected_column_types" not in prompt
     assert "numeric_ranges" not in prompt
     assert "max_result_rows" not in prompt
-    for diagnostic in (
-        *metric.common_anomalies,
-        *metric.verification_fields,
-    ):
+    for diagnostic in metric.common_anomalies:
         assert diagnostic not in prompt
     assert "diagnostic_tools" in prompt
     assert "Tool: sql_query" in prompt
@@ -446,12 +514,12 @@ def test_prompt_exposes_capabilities_for_every_canonical_hypothesis(
         load_metric_context(metric_id),
     )
     catalog = load_fault_catalog()
-    capability_section = prompt.split(
-        "Canonical diagnostic capability map", 1
-    )[1].split("Available tools:", 1)[0]
-    relevant_section = prompt.split(
-        "Relevant canonical fault vocabulary", 1
-    )[1].split("Canonical root_cause_type vocabulary", 1)[0]
+    capability_section = prompt.split("Canonical diagnostic capability map", 1)[
+        1
+    ].split("Canonical evidence source-to-asset map", 1)[0]
+    relevant_section = prompt.split("Relevant canonical fault vocabulary", 1)[1].split(
+        "Canonical root_cause_type vocabulary", 1
+    )[0]
 
     capability_start = capability_section.index("[")
     capability_end = capability_section.rindex("]") + 1
@@ -463,15 +531,20 @@ def test_prompt_exposes_capabilities_for_every_canonical_hypothesis(
         fault.id for fault in catalog.faults if metric_id in fault.affected_metrics
     }
     assert len(applicable_ids) == 1
-    for fault in catalog.faults:
-        token = f'"fault_id": "{fault.id}"'
-        assert (token in relevant_section) is (fault.id in applicable_ids)
-        for evidence in fault.expected_evidence:
-            assert evidence not in prompt
+    relevant_start = relevant_section.index("[")
+    relevant_end = relevant_section.rindex("]") + 1
+    relevant_payload = json.loads(relevant_section[relevant_start:relevant_end])
+    assert {entry["fault_id"] for entry in relevant_payload} == applicable_ids
+    for entry in relevant_payload:
+        fault = catalog.by_id(entry["fault_id"])
+        assert entry["verification_fields"] == fault.verification_fields
+        assert entry["expected_evidence"] == fault.expected_evidence
+        assert entry["evidence_source_types"] == [
+            source.value for source in fault.evidence_source_types
+        ]
 
     for forbidden in (
         "evidence_paths",
-        "evidence_source_types",
         "injection_strategy",
         "expected_direction",
         "effect_size_type",
@@ -507,10 +580,46 @@ def test_single_fault_metric_accepts_catalog_consistent_filler_hypotheses() -> N
                     "purpose": "inspect candidate",
                     "hypothesis_id": "H01",
                     "tool": "sql_query",
-                    "arguments_json": '{"sql":"SELECT 1"}',
+                    "arguments_json": '{"sql":"SELECT COUNT(*) FROM events"}',
                     "expected_evidence": ["structured evidence"],
                     "stop_condition": "continue if not supported",
-                }
+                },
+                {
+                    "step_id": "S02",
+                    "purpose": "inspect business data",
+                    "hypothesis_id": "H02",
+                    "tool": "sql_query",
+                    "arguments_json": '{"sql":"SELECT COUNT(*) FROM events"}',
+                    "expected_evidence": ["structured evidence"],
+                    "stop_condition": "continue if not supported",
+                },
+                {
+                    "step_id": "S03",
+                    "purpose": "inspect partition metadata",
+                    "hypothesis_id": "H02",
+                    "tool": "sql_query",
+                    "arguments_json": '{"sql":"SELECT * FROM partition_metadata"}',
+                    "expected_evidence": ["structured evidence"],
+                    "stop_condition": "continue if not supported",
+                },
+                {
+                    "step_id": "S04",
+                    "purpose": "inspect business data",
+                    "hypothesis_id": "H03",
+                    "tool": "sql_query",
+                    "arguments_json": '{"sql":"SELECT COUNT(*) FROM events"}',
+                    "expected_evidence": ["structured evidence"],
+                    "stop_condition": "continue if not supported",
+                },
+                {
+                    "step_id": "S05",
+                    "purpose": "inspect pipeline metadata",
+                    "hypothesis_id": "H03",
+                    "tool": "sql_query",
+                    "arguments_json": '{"sql":"SELECT * FROM pipeline_runs"}',
+                    "expected_evidence": ["structured evidence"],
+                    "stop_condition": "continue if not supported",
+                },
             ],
         }
     )
@@ -541,10 +650,15 @@ def test_prompt_shows_all_applicable_fault_capabilities_without_ground_truth() -
             assert f'"root_cause_type": "{fault.root_cause_type}"' in prompt
             assert '"affected_assets"' in prompt
             assert '"diagnostic_tools"' in prompt
+            assert '"evidence_source_types"' in prompt
+            assert '"verification_fields"' in prompt
+            assert '"expected_evidence"' in prompt
             for tool in fault.diagnostic_tools:
                 assert f'"{tool}"' in prompt
+            for field in fault.verification_fields:
+                assert field in prompt
             for evidence in fault.expected_evidence:
-                assert evidence not in prompt
+                assert evidence in prompt
 
         for forbidden in (
             "expected_root_cause",
@@ -615,7 +729,7 @@ def test_planner_prompt_advertises_registry_tools_and_omits_formal_schema() -> N
     assert "Available tools:" in prompt
     assert "Tool: sql_query" in prompt
     assert "Legacy JSON Schema" not in prompt
-    assert "target Android partition row_count is zero" not in prompt
+    assert "target Android partition row_count is zero" in prompt
     assert "closed-set candidate labels" in prompt
     for available in (
         "check_freshness",
@@ -629,8 +743,8 @@ def test_planner_prompt_advertises_registry_tools_and_omits_formal_schema() -> N
 
 def test_fallback_plan_uses_registered_readonly_sql_tool_only() -> None:
     registry = build_default_tool_registry()
-    for alert_payload in PLANNER_ALERT_EXAMPLES:
-        alert, metric_context = _request_for(dict(alert_payload))
+    for metric in load_metrics_config().metrics:
+        alert, metric_context = _request_for(_alert_payload_for_metric(metric.id))
         plan = build_fallback_plan(
             PlannerInput(alert=alert, metric_context=metric_context),
             tool_registry=registry,
@@ -638,6 +752,8 @@ def test_fallback_plan_uses_registered_readonly_sql_tool_only() -> None:
 
         assert all(registry.contains(step.tool) for step in plan.steps)
         assert all(step.tool == "sql_query" for step in plan.steps)
+        sql_statements = [str(step.arguments["sql"]) for step in plan.steps]
+        assert len(sql_statements) == len(set(sql_statements))
         for step in plan.steps:
             assert validate_readonly_sql(step.arguments["sql"]) in {
                 "SELECT",
@@ -649,12 +765,177 @@ def test_fallback_plan_uses_registered_readonly_sql_tool_only() -> None:
 def test_fallback_plans_pass_full_planner_semantics() -> None:
     registry = build_default_tool_registry()
 
-    for alert_payload in PLANNER_ALERT_EXAMPLES:
-        alert, metric_context = _request_for(dict(alert_payload))
+    for metric in load_metrics_config().metrics:
+        alert, metric_context = _request_for(_alert_payload_for_metric(metric.id))
         request = PlannerInput(alert=alert, metric_context=metric_context)
         plan = build_fallback_plan(request, tool_registry=registry)
 
         validate_plan_semantics(plan, request, registry)
+
+
+def test_every_hypothesis_requires_an_investigation_step() -> None:
+    plan, request = _coverage_plan(
+        "schema_change",
+        "daily_active_users",
+        [],
+    )
+
+    with pytest.raises(PlannerValidationError, match="H01.*has no investigation step"):
+        validate_plan_semantics(plan, request, build_default_tool_registry())
+
+
+@pytest.mark.parametrize(
+    ("root_cause_type", "metric_id", "incomplete_steps", "complete_steps", "missing"),
+    [
+        (
+            "schema_change",
+            "daily_active_users",
+            [
+                _coverage_step(
+                    "S01",
+                    "H01",
+                    tool="detect_schema_drift",
+                    arguments={"table": "events"},
+                )
+            ],
+            [
+                _coverage_step("S01", "H01", sql="SELECT COUNT(*) FROM events"),
+                _coverage_step(
+                    "S02",
+                    "H01",
+                    tool="detect_schema_drift",
+                    arguments={"table": "events"},
+                ),
+            ],
+            "business_data",
+        ),
+        (
+            "timezone_error",
+            "daily_active_users",
+            [_coverage_step("S01", "H01", sql="SELECT COUNT(*) FROM events")],
+            [
+                _coverage_step("S01", "H01", sql="SELECT COUNT(*) FROM events"),
+                _coverage_step("S02", "H01", sql="SELECT * FROM metric_versions"),
+            ],
+            "metric_version",
+        ),
+        (
+            "ab_split_anomaly",
+            "conversion_rate",
+            [
+                _coverage_step(
+                    "S01", "H01", sql="SELECT COUNT(*) FROM experiment_assignments"
+                )
+            ],
+            [
+                _coverage_step(
+                    "S01", "H01", sql="SELECT COUNT(*) FROM experiment_assignments"
+                ),
+                _coverage_step("S02", "H01", sql="SELECT * FROM experiment_configs"),
+            ],
+            "experiment_config",
+        ),
+    ],
+)
+def test_catalog_declared_multisource_coverage_is_enforced(
+    root_cause_type: str,
+    metric_id: str,
+    incomplete_steps: list[InvestigationStep],
+    complete_steps: list[InvestigationStep],
+    missing: str,
+) -> None:
+    registry = build_default_tool_registry()
+    incomplete, request = _coverage_plan(
+        root_cause_type,
+        metric_id,
+        incomplete_steps,
+    )
+    with pytest.raises(PlannerValidationError, match=missing):
+        validate_plan_semantics(incomplete, request, registry)
+
+    complete, request = _coverage_plan(
+        root_cause_type,
+        metric_id,
+        complete_steps,
+    )
+    validate_plan_semantics(complete, request, registry)
+
+
+def test_duplicate_business_steps_do_not_satisfy_independent_coverage() -> None:
+    plan, request = _coverage_plan(
+        "schema_change",
+        "daily_active_users",
+        [
+            _coverage_step("S01", "H01", sql="SELECT COUNT(*) FROM events"),
+            _coverage_step("S02", "H01", sql="SELECT COUNT(*) FROM users"),
+        ],
+    )
+
+    with pytest.raises(PlannerValidationError, match="schema_metadata"):
+        validate_plan_semantics(plan, request, build_default_tool_registry())
+
+
+def test_mixed_source_sql_cannot_count_as_two_independent_paths() -> None:
+    plan, request = _coverage_plan(
+        "schema_change",
+        "daily_active_users",
+        [
+            _coverage_step(
+                "S01",
+                "H01",
+                sql=(
+                    "SELECT COUNT(*) FROM events AS e CROSS JOIN schema_snapshots AS s"
+                ),
+            )
+        ],
+    )
+
+    with pytest.raises(PlannerValidationError, match="business_data, schema_metadata"):
+        validate_plan_semantics(plan, request, build_default_tool_registry())
+
+
+def test_unknown_asset_fails_closed_for_source_coverage() -> None:
+    plan, request = _coverage_plan(
+        "schema_change",
+        "daily_active_users",
+        [
+            _coverage_step("S01", "H01", sql="SELECT COUNT(*) FROM mystery_events"),
+            _coverage_step("S02", "H01", sql="SELECT * FROM schema_snapshots"),
+        ],
+    )
+
+    with pytest.raises(PlannerValidationError, match="business_data"):
+        validate_plan_semantics(plan, request, build_default_tool_registry())
+
+
+def test_cte_names_are_not_treated_as_physical_assets() -> None:
+    step = _coverage_step(
+        "S01",
+        "H01",
+        sql=(
+            "WITH recent_events AS (SELECT * FROM events) "
+            "SELECT COUNT(*) FROM recent_events"
+        ),
+    )
+
+    assert (
+        infer_step_evidence_source(step, build_default_tool_registry())
+        is EvidenceSourceType.BUSINESS_DATA
+    )
+
+
+def test_prompt_exposes_canonical_source_asset_map() -> None:
+    prompt = build_planner_prompt(
+        PLANNER_ALERT_EXAMPLES[0],
+        load_metric_context("daily_active_users"),
+    )
+
+    for source, assets in evidence_assets_by_source().items():
+        assert f'"{source}"' in prompt
+        for asset in assets:
+            assert f'"{asset}"' in prompt
+    assert "These evidence objectives describe what would test each candidate" in prompt
+    assert "They do not mean the candidate is true" in prompt
 
 
 @pytest.mark.parametrize(
@@ -777,7 +1058,7 @@ def test_planner_semantics_accepts_tool_mapped_to_fault_root_cause() -> None:
     )
 
     validate_plan_semantics(
-        fallback.model_copy(update={"steps": [step]}),
+        fallback.model_copy(update={"steps": [step, *fallback.steps[1:]]}),
         request,
         build_default_tool_registry(),
     )
