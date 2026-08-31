@@ -19,7 +19,7 @@ Truth were not modified.
 | Raw records | 60 |
 | Cases replayed | 15 |
 | Golden decisions replayed | 20 |
-| Production rules added | `f02_duplicate_identity_counts`, `f07_join_filter_survivor_counts` |
+| Production rule added | `f02_duplicate_identity_counts` |
 
 Ground Truth is used offline only to identify each golden runtime hypothesis.
 It is not passed to `RuntimeEvidenceInterpreter` or any runtime component.
@@ -41,16 +41,19 @@ The set contains 19 originally neutral SQL decisions and one existing
 
 | Golden decision | Before | After | Change |
 | --- | ---: | ---: | ---: |
-| `NEUTRAL` | 19 | 13 | -6 |
-| `SUPPORTS` | 1 | 7 | +6 |
+| `NEUTRAL` | 19 | 14 | -5 |
+| `SUPPORTS` | 1 | 6 | +5 |
 | `CONTRADICTS` | 0 | 0 | 0 |
 
-- Cases gaining at least one support: **4 / 15**.
-- Newly admitted golden SQL observations: **6**.
-- Cases still fully neutral: **10 / 15**.
+- Cases gaining at least one support: **3 / 15**.
+- Newly admitted golden SQL observations: **5**.
+- Cases still fully neutral: **11 / 15**.
 - Case with a pre-existing support but no new support: **1 / 15**
   (`F09-003`).
-- Implemented neutralized families: **2 / 7** (`F02`, `F07`).
+- Implemented neutralized families: **1 / 7** (`F02`).
+
+The five admitted steps are `F02-001/S1`, `F02-001/S5`, `F02-002/S1`,
+`F02-004/S1`, and `F02-004/S2`.
 
 ## Per-case replay
 
@@ -64,7 +67,7 @@ The set contains 19 originally neutral SQL decisions and one existing
 | `F06-003` | F06 | 1 -> 1 | 0 -> 0 | None | `EVIDENCE_NEUTRALIZED` |
 | `F06-004` | F06 | 1 -> 1 | 0 -> 0 | None | `EVIDENCE_NEUTRALIZED` |
 | `F06-005` | F06 | 1 -> 1 | 0 -> 0 | None | `EVIDENCE_NEUTRALIZED` |
-| `F07-001` | F07 | 1 -> 0 | 0 -> 1 | `S04` | `EVIDENCE_MISSING` |
+| `F07-001` | F07 | 1 -> 1 | 0 -> 0 | None | `EVIDENCE_NEUTRALIZED` |
 | `F08-003` | F08 | 1 -> 1 | 0 -> 0 | None | `EVIDENCE_NEUTRALIZED` |
 | `F08-005` | F08 | 1 -> 1 | 0 -> 0 | None | `EVIDENCE_NEUTRALIZED` |
 | `F09-003` | F09 | 1 -> 1 | 1 -> 1 | None | `EVIDENCE_NEUTRALIZED` |
@@ -76,17 +79,18 @@ The counterfactual earliest cause applies the unchanged HypothesisManager
 support count, `+0.15` support delta, and `0.75` confidence threshold to the
 replayed decisions. It is a bottleneck projection, not a claim that a root
 cause would be validated. `F02-001` and `F02-004` each reach two supports but
-only `0.60` confidence. `F02-002` and `F07-001` gain one support and still lack
-a second evidence path. All newly admitted observations have the single real
-source type `business_data`; none creates Validator independence.
+only `0.60` confidence. `F02-002` gains one support and still lacks a second
+evidence path. All newly admitted observations have the single real source
+type `business_data`; none creates Validator independence.
 
 Primary `EVIDENCE_NEUTRALIZED` cases whose projected earliest category changes:
-**4** (`F02-001`, `F02-002`, `F02-004`, `F07-001`).
+**3** (`F02-001`, `F02-002`, `F02-004`).
 
 ## Remaining neutral cases
 
-The 10 fully neutral cases are `F05-002`, `F06-002`, `F06-003`, `F06-004`,
-`F06-005`, `F08-003`, `F08-005`, `F12-002`, `F12-004`, and `F12-005`.
+The 11 fully neutral cases are `F05-002`, `F06-002`, `F06-003`, `F06-004`,
+`F06-005`, `F07-001`, `F08-003`, `F08-005`, `F12-002`, `F12-004`, and
+`F12-005`.
 `F09-003` is not fully neutral because its distribution-drift tool already
 provided one support, but its mixed-date SQL observation remains neutral.
 
@@ -96,13 +100,14 @@ The blocked families stay neutral for specific precision reasons:
 | --- | --- |
 | F05 | Timestamp extrema and daily counts do not prove a fixed offset or a timezone configuration mismatch. |
 | F06 | One-day extrema and averages lack a trusted baseline or robust within-result scale comparator. |
+| F07 | Survivor loss proves potential impact, not that the active metric definition applies the erroneous join. |
 | F08 | The usable target row shows no duplication; another candidate result failed SQL validation. |
 | F09 | The event-name count combines target and adjacent dates, so the new name is not target-scoped. |
 | F12 | Catalog/schema presence contains no assignment ratio or versioned configuration value. |
 
 ## Safety conclusion
 
-The replay records material but bounded improvement: six structured SQL
+The replay records material but bounded improvement: five structured SQL
 observations become support without admitting any normal, wrong-date,
 wrong-metric, wrong-segment, spoofed-projection, or unsafe-join counterexample.
 The remaining observations stay neutral instead of relying on guessed

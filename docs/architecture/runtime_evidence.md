@@ -39,13 +39,14 @@ they never establish polarity.
 | `f01_android_event_count` | `missing_partition` | An Android event-count column | `events`; `daily_active_users`; target date; Android segment | `0` supports; a positive count contradicts | Non-numeric value or wrong date/segment/metric | `business_data` |
 | `f01_partition_state` | `missing_partition` | `partition_value`, `row_count`, `status` | `partition_metadata`; `daily_active_users`; target-date Android partition | `row_count=0` and `status=missing` supports; positive ready/success partition contradicts | Missing target partition, unusable values, or any mixed state | `operational_metadata` |
 | `f02_duplicate_identity_counts` | `duplicate_batch` | A projected event total and distinct event-ID count; optional projected duplicate excess | One unjoined `events` source; `ai_task_count`; `event_name='run_ai_task'`; target date or a target-dated row; matching incident dimensions | `total > distinct`; if present, duplicate excess must equal `total - distinct` and be positive | Equal counts, invalid/inconsistent values, alias literals, joins, wrong population/date/metric/dimension, or non-count projections | `business_data` |
-| `f07_join_filter_survivor_counts` | `join_filter` | `event_users`, `subscribed_users`, each projected as a distinct count of its source user ID | A single `events LEFT JOIN subscriptions` on `user_id`; `daily_active_users`; target event date; matching dimensions; no right-table `WHERE` filter | `subscribed_users < event_users` supports | Equal counts, invalid ordering, inner/cross/multiple joins, unsafe join condition, right-side filtering, or wrong date/metric/dimension | `business_data` |
 | `f11_metric_divergence` | `metric_definition_change` | `raw_event_count`, `raw_user_count`, `daily_active_users` | `daily_active_users`; target-date business query/result | Positive raw activity with `daily_active_users < raw_user_count` supports | Non-numeric values, no raw activity, no divergence, or wrong metric/date | `business_data` |
 | `f11_metric_version_change` | `metric_definition_change` | `metric_id` plus at least one of `version`, `definition_hash`, or `query`; at least two rows | `metric_versions`; exact incident metric; change date near/covers target when a time column exists | A returned version/hash/query change supports | Wrong metric, no comparable rows, no change, unusable/out-of-window dates, or incompatible hypothesis | `metric_version` |
 
-The F02 and F07 rules parse the SQL with `sqlglot` and validate the projection
-expressions and join structure. Returned aliases cannot spoof an accepted
-query shape.
+The F02 rule parses the SQL with `sqlglot` and validates the source,
+projections, and filter structure. Returned aliases cannot spoof an accepted
+query shape. F07 subscription-survivor probes remain neutral because potential
+population loss does not prove that the active metric definition contains an
+erroneous join.
 
 ## Evidence identity and provenance
 
@@ -66,5 +67,5 @@ Only `SUPPORTS` and `CONTRADICTS` decisions are registered and attached by the
 runtime runner. `NEUTRAL` decisions do not alter hypothesis confidence.
 `HypothesisManager` retains its existing count and confidence thresholds, and
 `RootCauseValidator` still requires at least two supports from at least two
-independent source types. A single F02 or F07 business observation therefore
-improves evidence coverage but cannot authorize a root cause on its own.
+independent source types. A single F02 business observation therefore improves
+evidence coverage but cannot authorize a root cause on its own.

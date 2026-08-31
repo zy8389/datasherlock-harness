@@ -25,10 +25,10 @@ problem, not a SQL-recognition problem.
 
 | Fault | Root cause | Decision | Candidate rule | Reason |
 | --- | --- | --- | --- | --- |
-| F02 | `duplicate_batch` | ADMIT | `duplicate_identity_counts` | The returned total, distinct identity count, and duplicate excess prove the abnormality in the scoped AI-task population. |
+| F02 | `duplicate_batch` | ADMIT | `f02_duplicate_identity_counts` | The returned total, distinct identity count, and duplicate excess prove the abnormality in the scoped AI-task population. |
 | F05 | `timezone_error` | BLOCK | `BLOCKED_RULE_NO_TRUSTED_BASELINE` | Daily counts and timestamp extrema do not prove a fixed timezone offset or a configuration mismatch. |
 | F06 | `unit_error` | BLOCK | `BLOCKED_RULE_NO_TRUSTED_BASELINE` | One-day average/minimum/maximum values have no baseline or robust within-result scale comparator such as max/median. |
-| F07 | `join_filter` | ADMIT | `join_filter_survivor_counts` | A single target-day LEFT JOIN result contains the full event-user population and the subscription-matched survivor population; the latter is lower. |
+| F07 | `join_filter` | BLOCK | `BLOCKED_RULE_NO_CAUSAL_BINDING` | Survivor loss proves potential impact from subscription matching, not that the active metric definition contains the erroneous join. |
 | F08 | `join_explosion` | BLOCK | no rule | The usable result shows no event duplication; the other candidate result failed SQL validation. |
 | F09 | `field_drift` | BLOCK | no rule | Event-name counts aggregate the target date together with an adjacent date, so `execute_ai_task` cannot be bound to the incident date. |
 | F12 | `ab_split_anomaly` | BLOCK | `BLOCKED_RULE_NO_TRUSTED_BASELINE` | The results expose schema/catalog presence, not assignment ratios or versioned experiment configuration values. |
@@ -48,11 +48,11 @@ also be positive and consistent with that relation.
 
 | Case / step | Target and query scope | Returned shape and sanitized values | Current reason | Candidate source / rule | Safe |
 | --- | --- | --- | --- | --- | --- |
-| F02-001 / S1 | `ai_task_count`; 2026-01-30; `events`; exact date; AI-task filter | `rows_on_date, distinct_event_ids, duplicate_event_id_rows`; `[126, 90, 36]`; 1 row | matched no rule | `business_data` / `duplicate_identity_counts` | YES: 126 > 90 and excess is 36. |
-| F02-001 / S5 | `ai_task_count`; range 2026-01-23..30; `events`; AI-task filter; target row present | `metric_date, ai_task_count, distinct_ai_task_count`; target `[2026-01-30, 126, 90]`; 8 rows | matched no rule | `business_data` / `duplicate_identity_counts` | YES: only the target-dated row is evaluated and 126 > 90. |
-| F02-002 / S1 | `ai_task_count`; range 2026-01-22..30; `events`; AI-task filter; target 2026-01-29 row present | `metric_date, row_count, nonnull_event_id_count, distinct_event_id_count, repeated_event_id_rows`; target `[2026-01-29, 118, 118, 84, 34]`; 9 rows | matched no rule | `business_data` / `duplicate_identity_counts` | YES: target total 118 > distinct 84 and excess is 34. |
-| F02-004 / S1 | `ai_task_count`; half-open 2026-01-27..28; `events`; AI-task filter | `row_count, nonnull_event_id_count, distinct_event_id_count, repeated_row_excess`; `[112, 112, 86, 26]`; 1 row | matched no rule | `business_data` / `duplicate_identity_counts` | YES: exact target window and 112 > 86 with excess 26. |
-| F02-004 / S2 | `ai_task_count`; range 2026-01-24..30; `events`; AI-task filter; target 2026-01-27 row present | `event_date, row_count, distinct_event_id_count, repeated_row_excess`; target `[2026-01-27, 112, 86, 26]`; 6 rows | matched no rule | `business_data` / `duplicate_identity_counts` | YES: only the target row is evaluated and its relation is self-proving. |
+| F02-001 / S1 | `ai_task_count`; 2026-01-30; `events`; exact date; AI-task filter | `rows_on_date, distinct_event_ids, duplicate_event_id_rows`; `[126, 90, 36]`; 1 row | matched no rule | `business_data` / `f02_duplicate_identity_counts` | YES: 126 > 90 and excess is 36. |
+| F02-001 / S5 | `ai_task_count`; range 2026-01-23..30; `events`; AI-task filter; target row present | `metric_date, ai_task_count, distinct_ai_task_count`; target `[2026-01-30, 126, 90]`; 8 rows | matched no rule | `business_data` / `f02_duplicate_identity_counts` | YES: only the target-dated row is evaluated and 126 > 90. |
+| F02-002 / S1 | `ai_task_count`; range 2026-01-22..30; `events`; AI-task filter; target 2026-01-29 row present | `metric_date, row_count, nonnull_event_id_count, distinct_event_id_count, repeated_event_id_rows`; target `[2026-01-29, 118, 118, 84, 34]`; 9 rows | matched no rule | `business_data` / `f02_duplicate_identity_counts` | YES: target total 118 > distinct 84 and excess is 34. |
+| F02-004 / S1 | `ai_task_count`; half-open 2026-01-27..28; `events`; AI-task filter | `row_count, nonnull_event_id_count, distinct_event_id_count, repeated_row_excess`; `[112, 112, 86, 26]`; 1 row | matched no rule | `business_data` / `f02_duplicate_identity_counts` | YES: exact target window and 112 > 86 with excess 26. |
+| F02-004 / S2 | `ai_task_count`; range 2026-01-24..30; `events`; AI-task filter; target 2026-01-27 row present | `event_date, row_count, distinct_event_id_count, repeated_row_excess`; target `[2026-01-27, 112, 86, 26]`; 6 rows | matched no rule | `business_data` / `f02_duplicate_identity_counts` | YES: only the target row is evaluated and its relation is self-proving. |
 
 ### F05 timezone_error
 
@@ -71,15 +71,20 @@ also be positive and consistent with that relation.
 
 ### F07 join_filter
 
-The admitted rule is intentionally limited to the exact self-contained LEFT
-JOIN shape: `event_users` is the pre-filter event population and
-`subscribed_users` is the population that would survive the subscription
-join. It requires the target date, `events`, `subscriptions`, and the LEFT JOIN
-in the SQL. Equal counts remain neutral.
+The survivor-count diagnostic proves potential impact from subscription
+matching but does not establish that the active `daily_active_users`
+definition actually uses the erroneous `INNER JOIN`. It is therefore blocked
+as `BLOCKED_RULE_NO_CAUSAL_BINDING` even when the probe is target-scoped and
+the subscription-matched population is smaller.
+
+Future sufficient evidence requires `metric_versions` or another authoritative
+metric-definition source showing that the active/new `daily_active_users` SQL
+contains an unexpected `INNER JOIN subscriptions`, preferably relative to the
+prior or canonical definition.
 
 | Case / step | Target and query scope | Returned shape and sanitized values | Current reason | Candidate source / rule | Safe |
 | --- | --- | --- | --- | --- | --- |
-| F07-001 / S04 | `daily_active_users`; 2026-01-30; `events LEFT JOIN subscriptions`; exact event date | `event_users, subscribed_users`; `[111, 26]`; 1 row | matched no rule | `business_data` / `join_filter_survivor_counts` | YES: the same scoped query proves that only 26 of 111 event users survive subscription matching. |
+| F07-001 / S04 | `daily_active_users`; 2026-01-30; `events LEFT JOIN subscriptions`; exact event date | `event_users, subscribed_users`; `[111, 26]`; 1 row | matched no rule | `business_data` / `BLOCKED_RULE_NO_CAUSAL_BINDING` | NO: 26 of 111 users surviving subscription matching does not prove the active metric SQL applies that join. |
 
 ### F08 join_explosion
 
@@ -106,10 +111,10 @@ in the SQL. Equal counts remain neutral.
 
 ## Counterexample requirements for admitted rules
 
-Both admitted rules must remain neutral for the wrong hypothesis, metric,
+The admitted F02 rule must remain neutral for the wrong hypothesis, metric,
 target date, table, event-name population, result columns, and non-numeric
-values. F02 must also remain neutral when total equals distinct or duplicate
-excess is zero/inconsistent. F07 must remain neutral when matched users equal
-event users, when the join is not a LEFT JOIN to `subscriptions`, or when the
-target date is not proven. Invalid, empty, truncated, or unusable results stay
-neutral through the existing SQL envelope gate.
+values. It must also remain neutral when total equals distinct or duplicate
+excess is zero/inconsistent. F07 survivor-count probes remain neutral for every
+value and scope because they lack causal binding to the active metric
+definition. Invalid, empty, truncated, or unusable results stay neutral through
+the existing SQL envelope gate.

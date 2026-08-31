@@ -133,7 +133,6 @@ _SUCCESS_STATUS = "success"
 _MISSING_PARTITION = "missing_partition"
 _METRIC_DEFINITION_CHANGE = "metric_definition_change"
 _DUPLICATE_BATCH = "duplicate_batch"
-_JOIN_FILTER = "join_filter"
 _DQ_HYPOTHESIS_COMPATIBILITY = {
     "check_null_rate": frozenset({"null_value_anomaly"}),
     "check_duplicate_rate": frozenset({"duplicate_batch", "join_explosion"}),
@@ -525,7 +524,7 @@ class RuntimeEvidenceInterpreter:
         tool_result: ToolExecutionResult,
         rows: list[dict[str, Any]],
     ) -> EvidenceInterpretation | None:
-        if hypothesis.root_cause_type not in {_DUPLICATE_BATCH, _JOIN_FILTER}:
+        if hypothesis.root_cause_type != _DUPLICATE_BATCH:
             return None
         if self.context is None:
             return self._neutral("incident scope was not provided")
@@ -542,14 +541,7 @@ class RuntimeEvidenceInterpreter:
         if row is None:
             return self._neutral("SQL result did not prove the incident target date")
 
-        if hypothesis.root_cause_type == _DUPLICATE_BATCH:
-            return self._interpret_duplicate_identity_counts(
-                step=step,
-                tool_result=tool_result,
-                query=query,
-                row=row,
-            )
-        return self._interpret_join_filter_survivor_counts(
+        return self._interpret_duplicate_identity_counts(
             step=step,
             tool_result=tool_result,
             query=query,
@@ -613,52 +605,6 @@ class RuntimeEvidenceInterpreter:
             scope_check=(
                 "ai_task_count, target date, events table, run_ai_task filter, "
                 "and identity-count relation matched"
-            ),
-        )
-
-    def _interpret_join_filter_survivor_counts(
-        self,
-        *,
-        step: InvestigationStep,
-        tool_result: ToolExecutionResult,
-        query: exp.Select,
-        row: Mapping[str, Any],
-    ) -> EvidenceInterpretation | None:
-        if self.context is None or self.context.metric_id != "daily_active_users":
-            return self._neutral("F07 SQL observation is outside the metric scope")
-        if not {"event_users", "subscribed_users"}.issubset(row):
-            return None
-        if not _f07_query_scope_matches(query):
-            return self._neutral(
-                "F07 SQL did not prove the events-to-subscriptions survivor relation"
-            )
-
-        event_users = _count(row["event_users"])
-        subscribed_users = _count(row["subscribed_users"])
-        if (
-            event_users is None
-            or subscribed_users is None
-            or subscribed_users > event_users
-        ):
-            return self._neutral("F07 survivor values were not valid user counts")
-        if subscribed_users == event_users:
-            return self._neutral("F07 join relation removed no event users")
-
-        description = (
-            "Target-date subscription matching reduces the event-user population: "
-            f"event_users={event_users}, subscribed_users={subscribed_users}."
-        )
-        return self._make_interpretation(
-            step_id=step.step_id,
-            tool_result=tool_result,
-            source_type=EvidenceSourceType.BUSINESS_DATA.value,
-            rule="f07_join_filter_survivor_counts",
-            polarity=EvidencePolarity.SUPPORTS,
-            description=description,
-            row=row,
-            scope_check=(
-                "daily_active_users, target date, events population, and "
-                "LEFT JOIN subscription survivors matched"
             ),
         )
 
@@ -1333,60 +1279,6 @@ def _f02_query_scope_matches(
     )
 
 
-def _f07_query_scope_matches(query: exp.Select) -> bool:
-    tables = list(query.find_all(exp.Table))
-    joins = list(query.find_all(exp.Join))
-    from_clause = query.args.get("from_")
-    source = from_clause.this if isinstance(from_clause, exp.From) else None
-    if (
-        len(tables) != 2
-        or {table.name.lower() for table in tables} != {"events", "subscriptions"}
-        or not isinstance(source, exp.Table)
-        or source.name.lower() != "events"
-        or len(joins) != 1
-    ):
-        return False
-    join = joins[0]
-    joined_table = join.this
-    if (
-        not isinstance(joined_table, exp.Table)
-        or joined_table.name.lower() != "subscriptions"
-        or str(join.args.get("side", "")).upper() != "LEFT"
-    ):
-        return False
-
-    event_alias = source.alias_or_name.lower()
-    subscription_alias = joined_table.alias_or_name.lower()
-    join_condition_matches = _equality_matches_columns(
-        join.args.get("on"),
-        left_table=event_alias,
-        left_column="user_id",
-        right_table=subscription_alias,
-        right_column="user_id",
-    )
-    event_count = _is_distinct_column_count(
-        _projection_expression(query, "event_users"),
-        table=event_alias,
-        column="user_id",
-    )
-    subscription_count = _is_distinct_column_count(
-        _projection_expression(query, "subscribed_users"),
-        table=subscription_alias,
-        column="user_id",
-    )
-    where = query.args.get("where")
-    right_table_filtered = isinstance(where, exp.Where) and any(
-        column.table.lower() == subscription_alias
-        for column in where.find_all(exp.Column)
-    )
-    return (
-        join_condition_matches
-        and event_count
-        and subscription_count
-        and not right_table_filtered
-    )
-
-
 def _projection_expression(query: exp.Select, alias: str) -> exp.Expression | None:
     for projection in query.expressions:
         if isinstance(projection, exp.Alias) and projection.alias.lower() == alias.lower():
@@ -1407,7 +1299,6 @@ def _is_distinct_column_count(
     expression: exp.Expression | None,
     *,
     column: str,
-    table: str | None = None,
 ) -> bool:
     if not isinstance(expression, exp.Count) or not isinstance(
         expression.this, exp.Distinct
@@ -1417,9 +1308,7 @@ def _is_distinct_column_count(
     if len(values) != 1 or not isinstance(values[0], exp.Column):
         return False
     observed = values[0]
-    return observed.name.lower() == column.lower() and (
-        table is None or observed.table.lower() == table.lower()
-    )
+    return observed.name.lower() == column.lower()
 
 
 def _has_string_equality(query: exp.Select, *, column: str, value: str) -> bool:
@@ -1437,28 +1326,6 @@ def _has_string_equality(query: exp.Select, *, column: str, value: str) -> bool:
             ):
                 return True
     return False
-
-
-def _equality_matches_columns(
-    expression: exp.Expression | None,
-    *,
-    left_table: str,
-    left_column: str,
-    right_table: str,
-    right_column: str,
-) -> bool:
-    if not isinstance(expression, exp.EQ):
-        return False
-    expected = {
-        (left_table.lower(), left_column.lower()),
-        (right_table.lower(), right_column.lower()),
-    }
-    observed = {
-        (item.table.lower(), item.name.lower())
-        for item in (expression.this, expression.expression)
-        if isinstance(item, exp.Column)
-    }
-    return observed == expected
 
 
 def _project_row(

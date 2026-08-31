@@ -360,7 +360,7 @@ def test_f02_alias_spoof_or_joined_counts_are_neutral(sql: str) -> None:
     assert interpretation.evidence is None
 
 
-def test_f07_scoped_join_survivor_counts_support() -> None:
+def test_f07_survivor_counts_without_metric_definition_proof_are_neutral() -> None:
     sql = (
         "SELECT COUNT(DISTINCT e.user_id) AS event_users, "
         "COUNT(DISTINCT s.user_id) AS subscribed_users "
@@ -373,10 +373,29 @@ def test_f07_scoped_join_survivor_counts_support() -> None:
         _sql_result(["event_users", "subscribed_users"], [[111, 26]], sql=sql),
     )
 
-    decision = _decision(interpretation)
-    assert decision.polarity is EvidencePolarity.SUPPORTS
-    assert decision.evidence.source_type == "business_data"
-    assert decision.evidence.observation["rule"] == "f07_join_filter_survivor_counts"
+    assert interpretation.polarity is EvidencePolarity.NEUTRAL
+    assert interpretation.evidence is None
+    assert interpretation.neutral_reason == (
+        "the returned SQL values matched no evidence rule"
+    )
+
+
+def test_f07_normal_events_only_dau_is_not_impugned_by_survivor_probe() -> None:
+    # The active DAU definition is events-only; this query measures potential impact.
+    sql = (
+        "SELECT COUNT(DISTINCT e.user_id) AS event_users, "
+        "COUNT(DISTINCT s.user_id) AS subscribed_users "
+        "FROM events AS e LEFT JOIN subscriptions AS s ON e.user_id = s.user_id "
+        "WHERE CAST(e.event_time AS DATE) = DATE '2026-01-30'"
+    )
+    interpretation = _interpret(
+        "join_filter",
+        _step(sql),
+        _sql_result(["event_users", "subscribed_users"], [[111, 26]], sql=sql),
+    )
+
+    assert interpretation.polarity is EvidencePolarity.NEUTRAL
+    assert interpretation.evidence is None
 
 
 @pytest.mark.parametrize(
@@ -450,7 +469,7 @@ def test_f07_scoped_join_survivor_counts_support() -> None:
         ),
     ],
 )
-def test_f07_normal_or_wrong_scope_results_are_neutral(
+def test_f07_survivor_count_shapes_remain_neutral_without_definition_proof(
     sql: str, rows: list[list[Any]], context: IncidentEvidenceContext
 ) -> None:
     interpretation = _interpret(

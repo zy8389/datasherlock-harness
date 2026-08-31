@@ -211,44 +211,41 @@ def _f07_observation() -> tuple[InvestigationStep, ToolExecutionResult]:
     )
 
 
-@pytest.mark.parametrize(
-    ("root_cause_type", "metric_id", "observation", "expected_rule"),
-    [
-        (
-            "duplicate_batch",
-            "ai_task_count",
-            _f02_observation(),
-            "f02_duplicate_identity_counts",
-        ),
-        (
-            "join_filter",
-            "daily_active_users",
-            _f07_observation(),
-            "f07_join_filter_survivor_counts",
-        ),
-    ],
-)
-def test_scoped_sql_support_flows_into_hypothesis_manager_without_a_model(
-    root_cause_type: str,
-    metric_id: str,
-    observation: tuple[InvestigationStep, ToolExecutionResult],
-    expected_rule: str,
+def test_f02_scoped_sql_support_flows_into_hypothesis_manager_without_a_model(
 ) -> None:
-    step, result = observation
+    step, result = _f02_observation()
     replay = _run_fixed_plan(
-        _plan(root_cause_type, [step]),
+        _plan("duplicate_batch", [step]),
         [result],
-        metric_id=metric_id,
+        metric_id="ai_task_count",
     )
 
     decision = replay.interpretations[0].decisions[0]
     assert decision.polarity is EvidencePolarity.SUPPORTS
-    assert decision.evidence.observation["rule"] == expected_rule
+    assert decision.evidence.observation["rule"] == "f02_duplicate_identity_counts"
     assert decision.evidence.source_type == "business_data"
     assert replay.manager.evidence() == (decision.evidence,)
     assert replay.hypothesis.supporting_evidence_ids == [decision.evidence.evidence_id]
     assert replay.hypothesis.confidence == pytest.approx(0.65)
     assert replay.hypothesis.status is HypothesisStatus.TESTING
+
+
+def test_f07_survivor_probe_registers_no_runtime_evidence() -> None:
+    step, result = _f07_observation()
+    replay = _run_fixed_plan(
+        _plan("join_filter", [step]),
+        [result],
+        metric_id="daily_active_users",
+    )
+
+    interpretation = replay.interpretations[0]
+    assert interpretation.polarity is EvidencePolarity.NEUTRAL
+    assert interpretation.evidence is None
+    assert replay.manager.evidence() == ()
+    assert replay.hypothesis.evidence_ids == []
+    assert replay.hypothesis.supporting_evidence_ids == []
+    assert replay.hypothesis.confidence == pytest.approx(0.5)
+    assert replay.hypothesis.status is HypothesisStatus.PROPOSED
 
 
 def test_production_interpreter_api_and_context_remain_ground_truth_free() -> None:
