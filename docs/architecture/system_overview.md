@@ -437,7 +437,7 @@ shows planning and evidence admission bottlenecks before validator eligibility;
 | Limitations | README and section 16 |
 | Mermaid architecture | Sections 2 and 3 |
 | State machine | Section 5 |
-| Demo screenshots | Pending: `SCREENSHOT_BLOCKED` because the delivery environment could not start Docker Desktop |
+| Demo screenshots | PASS: genuine CI runtime captures at `docs/assets/streamlit-health.png` and `docs/assets/api-health.png` |
 | One-command startup | `docker compose up --build` |
 | Data generation | README Data Model |
 | Single canonical case | README F01 end-to-end command |

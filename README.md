@@ -435,11 +435,19 @@ specialist documents for Planner, evidence, and Data Quality contracts.
 
 ## Demo Screenshots
 
-`SCREENSHOT_BLOCKED`: Docker Desktop did not expose the Docker API in the
-delivery environment, so the Compose stack could not be started for a genuine
-runtime capture. No mock or generated image is substituted. The requested
-Streamlit and API screenshots remain acceptance work; the Streamlit surface to
-capture is the current health shell, not the remaining P1 diagnosis UI.
+### Current Streamlit Health Shell
+
+![Current Streamlit health shell](docs/assets/streamlit-health.png)
+
+Current Streamlit health shell. Full diagnosis UI remains P1. This screenshot
+was captured from the real Docker Compose runtime in GitHub Actions.
+
+### API Health
+
+![API health](docs/assets/api-health.png)
+
+The current public API exposes `GET /health`, which verifies both DuckDB and
+Postgres dependencies. This screenshot was captured from the same real runtime.
 
 ## Known Limitations
 
