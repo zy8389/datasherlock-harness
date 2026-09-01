@@ -81,7 +81,8 @@ health shell, not the final diagnostic interface.
 flowchart LR
     A[Metric Alert] --> P[Planner]
     P --> IP[Investigation Plan]
-    IP --> G[Guardrail Runtime]
+    IP --> HG[HarnessGraph]
+    HG --> G[Guardrail Runtime]
     G --> TE[Tool Executor]
     TE --> SQL[Read-only SQL]
     TE --> DQ[Data Quality Tools]
@@ -89,7 +90,7 @@ flowchart LR
     DQ --> EV
     EV --> HM[Hypothesis Manager]
     HM --> RV[RootCauseValidator]
-    RV -->|Insufficient evidence| P
+    RV -->|Not authorized; continue existing plan| HG
     RV -->|Authorized| RC[Root Cause Found]
     RC --> FP[Typed Fix Proposal]
     FP --> AP[Explicit Approval]
