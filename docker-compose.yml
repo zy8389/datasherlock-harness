@@ -15,6 +15,7 @@ services:
     command: uvicorn api.main:app --host 0.0.0.0 --port 8000
     environment:
       DUCKDB_PATH: ${DUCKDB_PATH:-/workspace/data/processed/datasherlock.duckdb}
+      DEMO_WORKDIR: /workspace/data/demo
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB:-datasherlock}

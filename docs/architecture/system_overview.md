@@ -7,9 +7,11 @@ metrics against a deterministic local data environment. Current `main` owns the
 diagnostic runtime, evidence lifecycle, checkpoint recovery, benchmark system,
 and one approval-gated F01 sandbox repair path.
 
-The current product boundary excludes a full diagnosis UI, a production
-warehouse connector, direct production writes, and the legacy incident API and
-Postgres checkpoint repository that remain only on `chore/project-structure`.
+The current product boundary includes a deterministic canonical Streamlit demo
+over typed FastAPI demo endpoints. It excludes a production multi-user incident
+console, a production warehouse connector, direct production writes, and the
+legacy incident API and Postgres checkpoint repository that remain only on
+`chore/project-structure`.
 
 ## 2. System Context
 
@@ -24,9 +26,14 @@ flowchart TB
     H --> O[Structured Diagnosis and Repair Artifacts]
     GT[(Benchmark Ground Truth)] --> B[Offline Scoring and Audits]
     H --> B
-    API[FastAPI GET /health] --> D
+    API[FastAPI health + demo API] --> D
     API --> PG[(Postgres Health Dependency)]
-    UI[Streamlit Health Shell] --> API
+    UI[Streamlit Demo UI] -->|HTTP JSON| API
+    API --> DS[DemoService]
+    DS --> H
+    DS --> FX[(Canonical Demo Fixtures)]
+    DS --> FS[(File-backed Demo Sessions)]
+    DS --> FB[(Frozen Benchmark Report)]
 ```
 
 Ground Truth is available to offline generation, scoring, and forensic audits.
@@ -372,8 +379,11 @@ the legacy Postgres incident repository.
 | `src/validators/root_cause_validator.py` | Final root-cause authorization |
 | `src/benchmark/runner.py` | Current Harness execution and case artifacts |
 | `src/benchmark/ablation.py` | Four-architecture orchestration and scoring |
-| `src/api/main.py` | DuckDB/Postgres health endpoint only |
-| `app/streamlit_app.py` | API health display only |
+| `src/demo/` | Canonical materialization, current-Harness orchestration, atomic sessions, safe views |
+| `src/api/demo.py` | Typed canonical `/demo/*` endpoints |
+| `src/api/main.py` | DuckDB/Postgres health endpoint and demo router |
+| `app/api_client.py` | Streamlit HTTP JSON boundary |
+| `app/streamlit_app.py` | Incident workflow and frozen benchmark presentation |
 
 ## 15. Safety Invariants
 
@@ -396,7 +406,8 @@ the legacy Postgres incident repository.
 - F02/F03/F06/F07/F08/F09 lack a complete declared source contract.
 - F05/F06/F07/F08/F09/F12 need stronger causal observations.
 - Token and currency cost remain unknown when provider accounting is incomplete.
-- Streamlit is a health shell and FastAPI exposes only `GET /health`.
+- Streamlit is a deterministic canonical demo, not a production multi-user
+  incident management console; interactive repair is limited to validated F01 cases.
 - Production warehouse connectivity is outside current scope.
 - The legacy branch contains unported API/auth/Postgres/audit capabilities and
   must not be interpreted as current runtime.
