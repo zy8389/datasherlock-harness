@@ -10,6 +10,9 @@ COPY pyproject.toml README.md ./
 COPY config ./config
 COPY src ./src
 COPY app ./app
+COPY benchmark ./benchmark
+COPY experiments/ablation/reports/full-60-4arch-post-pr14-20260831 \
+    ./experiments/ablation/reports/full-60-4arch-post-pr14-20260831
 
 RUN pip install . \
     && mkdir -p /workspace/data/processed \

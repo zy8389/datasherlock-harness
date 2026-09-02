@@ -60,6 +60,48 @@ jobs:
           docker compose logs --no-color api postgres frontend
           exit 1
 
+      - name: Run F01 demo API E2E
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsS http://127.0.0.1:8000/demo/cases > /tmp/demo-cases.json
+          python3 - <<'PY'
+          import json
+          with open("/tmp/demo-cases.json", encoding="utf-8") as handle:
+              payload = json.load(handle)
+          assert len(payload["cases"]) == 60
+          assert next(item for item in payload["cases"] if item["case_id"] == "F01-001")["interactive_supported"]
+          PY
+          curl -fsS -X POST http://127.0.0.1:8000/demo/incidents \
+            -H 'Content-Type: application/json' \
+            -d '{"case_id":"F01-001"}' > /tmp/demo-start.json
+          incident_id="$(python3 -c 'import json; print(json.load(open("/tmp/demo-start.json"))["incident_id"])')"
+          python3 - <<'PY'
+          import json
+          with open("/tmp/demo-start.json", encoding="utf-8") as handle:
+              payload = json.load(handle)
+          assert payload["status"] == "AWAITING_APPROVAL"
+          assert payload["root_cause"]["root_cause_type"] == "missing_partition"
+          assert payload["approval"] is None
+          assert payload["repair"] is None
+          assert payload["post_validation"] is None
+          assert payload["model_calls"] == 0
+          PY
+          curl -fsS "http://127.0.0.1:8000/demo/incidents/${incident_id}" > /tmp/demo-get.json
+          curl -fsS -X POST "http://127.0.0.1:8000/demo/incidents/${incident_id}/approval" \
+            -H 'Content-Type: application/json' \
+            -d '{"reviewer":"ci-reviewer","outcome":"approved","comment":"CI sandbox approval."}' \
+            > /tmp/demo-resolved.json
+          python3 - <<'PY'
+          import json
+          with open("/tmp/demo-resolved.json", encoding="utf-8") as handle:
+              payload = json.load(handle)
+          assert payload["status"] == "RESOLVED"
+          assert payload["repair"]["handler_invocation_count"] == 1
+          assert payload["post_validation"]["status"] == "passed"
+          assert payload["final_report"]["final_status"] == "RESOLVED"
+          PY
+
       - name: Tear down services
         if: always()
         run: docker compose down -v

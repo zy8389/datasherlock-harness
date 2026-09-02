@@ -7,9 +7,11 @@ import psycopg
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
+from api.demo import router as demo_router
 from api.health import _check_duckdb
 
 app = FastAPI(title="DataSherlock Harness API", version="0.1.0")
+app.include_router(demo_router)
 
 
 def _check_postgres() -> str:
