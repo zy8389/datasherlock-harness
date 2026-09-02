@@ -80,19 +80,46 @@ Planner 通过依赖注入获得 `ToolRegistry`。Registry 只描述当前真实
 from tools.registry import ToolRegistry, build_default_tool_registry
 
 registry = build_default_tool_registry()
-assert registry.names() == ("sql_query",)
+assert registry.names() == (
+    "sql_query",
+    "check_null_rate",
+    "check_duplicate_rate",
+    "check_freshness",
+    "detect_schema_drift",
+    "detect_distribution_drift",
+)
 planner = Planner(create_model_client(), tool_registry=registry)
 ```
 
-当前唯一注册项是：
+当前默认 Registry 注册六个只读工具：
 
 ```text
-sql_query(sql: string)
+sql_query
+check_null_rate
+check_duplicate_rate
+check_freshness
+detect_schema_drift
+detect_distribution_drift
 ```
 
-其中 `sql` 必须是单条只读 SQL。数据质量工具、管道辅助工具、Tool Executor 和修复工具尚未实现，因此不会出现在正式 Prompt 的 `Available tools` 中。模型输出经过 Pydantic Schema 后，还会由 Planner 校验 canonical `root_cause_type`、工具是否存在、参数是否符合 Registry JSON Schema、工具是否只读，以及 `sql_query` 是否通过现有 SQL Runner 的 AST/native parser 校验。
+`sql_query` 的 `sql` 必须是单条只读 SQL。五个 Data Quality 工具也通过
+`ToolExecutor` 和同一个只读 SQL Runner 执行。管道写工具和修复工具不会出现在调查
+Prompt 的 `Available tools` 中。模型输出经过 Pydantic Schema 后，还会由 Planner 校验
+canonical `root_cause_type`、工具是否存在、参数是否符合 Registry JSON Schema、工具是否
+只读、工具是否属于该 fault family，以及 `sql_query` 是否通过 SQL Runner 的 AST/native
+parser 校验。
 
-`root_cause_type` 采用 closed-set 约束，但允许 F01-F12 中任意 canonical fault type；允许集合每次从 `config/fault_catalog.yaml` 读取，不在 Planner 中维护第二份 Literal 列表，也不会根据当前 metric 进一步缩小集合。正式 Prompt 只提供 fault vocabulary 的标签和 affected assets，不提供 `expected_evidence` 等 ground-truth 级提示。
+`root_cause_type` 采用 closed-set 约束，但允许 F01-F12 中任意 canonical fault type；允许集合
+每次从 `config/fault_catalog.yaml` 读取，不在 Planner 中维护第二份 Literal 列表，也不会
+根据当前 metric 进一步缩小集合。PR #20 后，正式 Prompt 会提供 applicable fault family 的
+`evidence_source_types`、`verification_fields` 和 `expected_evidence`，但明确将它们定义为
+candidate diagnostic objectives，而不是观测事实或 Ground Truth 答案。Case ID、expected
+root cause、injection 参数、source seed ID 和 Ground Truth 对象仍不会进入 Planner 输入。
+
+每个 proposed hypothesis 必须至少有一个调查 step。对于 catalog 声明了两个或更多
+`evidence_source_types` 的候选，Planner 必须用 distinct steps 覆盖所有声明来源。一个混合
+多个来源的 SQL、未知 asset 或多个同类型来源都不能伪装成独立证据覆盖。详细规则见
+[Planner Evidence-Source Coverage](planner_evidence_coverage.md)。
 
 ## 调用方式
 
