@@ -23,9 +23,14 @@ def test_docker_image_includes_canonical_config() -> None:
     dockerignore = (project_root / ".dockerignore").read_text(encoding="utf-8")
 
     assert "COPY config ./config" in dockerfile
-    assert "COPY benchmark ./benchmark" in dockerfile
+    assert "COPY benchmark/cases ./benchmark/cases" in dockerfile
+    assert "COPY benchmark/ground_truth ./benchmark/ground_truth" in dockerfile
     assert "full-60-4arch-post-pr14-20260831" in dockerfile
     assert not any(line.strip() == "config" for line in dockerignore.splitlines())
+    assert "!benchmark/cases/*.yaml" in dockerignore
+    assert "!benchmark/ground_truth/*.yaml" in dockerignore
+    assert "!experiments/ablation/reports/full-60-4arch-post-pr14-20260831/comparison.csv" in dockerignore
+    assert "PYTHONPATH=/workspace:/workspace/src" in dockerfile
 
 
 def test_api_uses_persisted_demo_workspace() -> None:

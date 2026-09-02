@@ -59,7 +59,18 @@ from harness.repair_proposal import RepairProposalBuilder
 from harness.sandbox_repair import SandboxRepairExecutor
 from harness.state import IncidentState, IncidentStatus
 
-ROOT: Final[Path] = Path(__file__).parents[2]
+
+def _asset_root() -> Path:
+    candidates = (Path.cwd().resolve(), Path(__file__).parents[2].resolve())
+    for candidate in candidates:
+        if (candidate / "benchmark" / "cases").is_dir() and (
+            candidate / "experiments" / "ablation" / "reports"
+        ).is_dir():
+            return candidate
+    return candidates[0]
+
+
+ROOT: Final[Path] = _asset_root()
 DEFAULT_CASES_DIRECTORY: Final[Path] = ROOT / "benchmark" / "cases"
 DEFAULT_REPORT_DIRECTORY: Final[Path] = (
     ROOT
