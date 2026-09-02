@@ -89,13 +89,13 @@ class DemoApiClient:
             detail = _error_detail(exc.read())
             raise DemoApiError(detail, status_code=exc.code) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise DemoApiError(f"API request failed: {exc}") from exc
+            raise DemoApiError(f"API 请求失败：{exc}") from exc
         try:
             decoded = json.loads(body)
         except json.JSONDecodeError as exc:
-            raise DemoApiError("API returned invalid JSON") from exc
+            raise DemoApiError("API 返回了无效的 JSON") from exc
         if not isinstance(decoded, dict):
-            raise DemoApiError("API returned a non-object JSON response")
+            raise DemoApiError("API 返回的 JSON 不是对象")
         return decoded
 
 
@@ -103,10 +103,10 @@ def _error_detail(body: bytes) -> str:
     try:
         payload = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return "API request was rejected"
+        return "API 请求被拒绝"
     if isinstance(payload, dict) and isinstance(payload.get("detail"), str):
         return payload["detail"]
-    return "API request was rejected"
+    return "API 请求被拒绝"
 
 
 __all__ = ["DemoApiClient", "DemoApiError"]
