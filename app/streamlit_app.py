@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 
 import streamlit as st
@@ -18,14 +19,15 @@ st.markdown(
     """
     <style>
       .block-container {max-width: 1480px; padding-top: 1.4rem; padding-bottom: 4rem;}
-      [data-testid="stSidebar"] {background: #f5f7f6; border-right: 1px solid #d9dfdc;}
-      h1, h2, h3 {letter-spacing: 0 !important; color: #17211d;}
+      [data-testid="stSidebar"] {background: var(--secondary-background-color); border-right: 1px solid rgba(128, 128, 128, .25);}
+      [data-testid="stToolbar"], [data-testid="stDecoration"] {display: none;}
+      h1, h2, h3 {letter-spacing: 0 !important; color: var(--text-color);}
       h1 {font-size: 2rem !important;}
       h2 {font-size: 1.35rem !important; margin-top: 1.4rem !important;}
       h3 {font-size: 1.05rem !important;}
-      .ds-kicker {color: #407567; font-size: .76rem; font-weight: 700; text-transform: uppercase;}
-      .ds-title {font-size: 2rem; line-height: 1.2; font-weight: 720; color: #17211d; margin: .2rem 0;}
-      .ds-subtitle {color: #59655f; margin-bottom: 1rem;}
+      .ds-kicker {color: var(--primary-color); font-size: .76rem; font-weight: 700;}
+      .ds-title {font-size: 2rem; line-height: 1.2; font-weight: 720; color: var(--text-color); margin: .2rem 0;}
+      .ds-subtitle {color: var(--text-color); opacity: .72; margin-bottom: 1rem;}
       .ds-status {display: inline-flex; align-items: center; min-height: 2.2rem; padding: .35rem .7rem;
         border: 1px solid #cbd5d0; border-radius: 6px; font-weight: 700; background: #fff; color: #25332c;}
       .ds-status.active {background: #e8f5ef; border-color: #5f9b84; color: #155e45;}
@@ -72,6 +74,151 @@ TERMINAL_ERRORS = {
     "REJECTED",
 }
 
+STATUS_LABELS = {
+    "RECEIVED": "已接收",
+    "TRIAGE": "分诊中",
+    "PLANNING": "规划中",
+    "EXECUTING": "执行中",
+    "VALIDATING": "验证中",
+    "HYPOTHESIS_TESTING": "假设检验中",
+    "ROOT_CAUSE_FOUND": "已找到根因",
+    "FIX_PROPOSED": "已提出修复方案",
+    "AWAITING_APPROVAL": "等待审批",
+    "SANDBOX_REPAIR": "沙箱修复中",
+    "POST_VALIDATION": "修复后验证中",
+    "RESOLVED": "已解决",
+    "UNRESOLVED": "未解决",
+    "BUDGET_EXCEEDED": "超出预算",
+    "TOOL_FAILED": "工具执行失败",
+    "VALIDATION_FAILED": "验证失败",
+    "REJECTED": "已拒绝",
+    "completed": "已完成",
+    "pending": "待执行",
+    "passed": "通过",
+    "failed": "失败",
+    "success": "成功",
+    "succeeded": "成功",
+    "running": "运行中",
+    "approved": "已批准",
+    "rejected": "已拒绝",
+    "ok": "正常",
+    "degraded": "服务降级",
+    "unknown": "未知",
+}
+
+METRIC_LABELS = {
+    "daily_active_users": "日活跃用户数",
+    "new_users": "新增用户数",
+    "paid_users": "付费用户数",
+    "ai_task_count": "AI 任务数",
+    "average_session_duration": "平均会话时长",
+    "conversion_rate": "付费用户转化率",
+}
+
+ROOT_CAUSE_LABELS = {
+    "missing_partition": "分区缺失",
+    "duplicate_batch": "批次重复",
+    "null_value_anomaly": "空值异常",
+    "data_delay": "数据延迟",
+    "timezone_error": "时区错误",
+    "unit_error": "单位错误",
+    "join_filter": "关联过滤错误",
+    "join_explosion": "关联膨胀",
+    "field_drift": "字段漂移",
+    "schema_change": "模式变更",
+    "metric_definition_change": "指标定义变更",
+    "ab_split_anomaly": "A/B 分流异常",
+}
+
+SOURCE_LABELS = {
+    "business_data": "业务数据",
+    "operational_metadata": "运维元数据",
+    "schema_metadata": "模式元数据",
+    "metric_version": "指标版本",
+    "experiment_config": "实验配置",
+}
+
+VALUE_LABELS = {
+    **STATUS_LABELS,
+    **METRIC_LABELS,
+    **ROOT_CAUSE_LABELS,
+    **SOURCE_LABELS,
+    "rerun_partition": "重新运行分区",
+    "low": "低",
+    "medium": "中",
+    "high": "高",
+    "Single Prompt": "单提示词",
+    "State Graph No Validator": "无验证器状态图",
+    "Full Harness": "完整 Harness",
+    "ready": "就绪",
+    "missing": "缺失",
+}
+
+TEXT_LABELS = {
+    "A target partition may be missing.": "目标分区可能缺失。",
+    "The target data may have arrived late.": "目标数据可能延迟到达。",
+    "Null values may distort the metric.": "空值可能导致指标失真。",
+    "Inspect target-day business activity.": "检查目标日期的业务活动。",
+    "Inspect operational partition metadata.": "检查运维分区元数据。",
+    "Inspect business activity for the alert date.": "检查告警日期的业务活动。",
+    "Inspect an independent operational or metadata signal.": (
+        "检查一个独立的运维或元数据信号。"
+    ),
+    "target-day activity observation": "目标日期业务活动观测",
+    "partition metadata observation": "分区元数据观测",
+    "business activity observation": "业务活动观测",
+    "independent metadata observation": "独立元数据观测",
+    "one bounded candidate observation": "一项范围受限的候选观测",
+    "Restore the confirmed missing events partition from the configured trusted repair source in an isolated sandbox.": (
+        "在隔离沙箱中，从已配置的可信修复源恢复已确认缺失的 events 分区。"
+    ),
+    "Tool call succeeded.": "工具调用成功。",
+    "Tool call failed.": "工具调用失败。",
+}
+
+
+def _display_value(value: Any) -> str:
+    text = str(value)
+    return VALUE_LABELS.get(text, text)
+
+
+def _display_text(value: Any) -> str:
+    text = str(value)
+    if text in TEXT_LABELS:
+        return TEXT_LABELS[text]
+    match = re.fullmatch(r"Read-only query returned (\d+) row\(s\)\.", text)
+    if match:
+        return f"只读查询返回 {match.group(1)} 行。"
+    match = re.fullmatch(r"Inspect one bounded path for (.+)\.", text)
+    if match:
+        return f"检查{_display_value(match.group(1))}的一条范围受限路径。"
+    match = re.fullmatch(r"Business activity query returned (.+)\.", text)
+    if match:
+        return f"业务活动查询返回 {match.group(1)}。"
+    match = re.fullmatch(r"partition_metadata reports (.+)\.", text)
+    if match:
+        return f"partition_metadata 报告：{match.group(1)}。"
+    match = re.fullmatch(
+        r"(.+) changed from (.+) to (.+); expected (.+) within (.+)\. "
+        r"Target partition and configured checks are healthy\.",
+        text,
+    )
+    if match:
+        return (
+            f"{_display_value(match.group(1))} 从 {match.group(2)} 变为 "
+            f"{match.group(3)}；预期值为 {match.group(4)}，允许误差 "
+            f"{match.group(5)}。目标分区及配置的检查项均正常。"
+        )
+    return text
+
+
+def _display_error(error: Any) -> str:
+    text = str(error)
+    prefix = "interactive diagnosis is not enabled for "
+    if text.startswith(prefix):
+        return f"案例 {text.removeprefix(prefix)} 尚未启用交互式诊断。"
+    return _display_text(text)
+
 
 def _query_incident_id() -> str | None:
     value = st.query_params.get("incident_id")
@@ -89,9 +236,9 @@ def _rerun() -> None:
 
 
 def _api_failure(error: DemoApiError) -> None:
-    st.error(f"API unavailable: {error}")
+    st.error(f"API 不可用：{_display_error(error)}")
     st.caption(f"API_BASE_URL: {API_BASE_URL}")
-    if st.button("Retry API", type="primary"):
+    if st.button("重试 API", type="primary"):
         _rerun()
     st.code("docker compose up --build", language="bash")
 
@@ -103,7 +250,9 @@ def _status_flow(status: str) -> None:
         css_class = (
             "current" if name == status else ("done" if index < current_index else "")
         )
-        nodes.append(f'<span class="ds-node {css_class}">{name}</span>')
+        nodes.append(
+            f'<span class="ds-node {css_class}">{_display_value(name)}</span>'
+        )
         if index < len(PRIMARY_FLOW) - 1:
             nodes.append('<span class="ds-arrow">›</span>')
     st.markdown(
@@ -111,45 +260,47 @@ def _status_flow(status: str) -> None:
         unsafe_allow_html=True,
     )
     if status in TERMINAL_ERRORS:
-        st.error(f"Terminal state: {status}")
+        st.error(f"终止状态：{_display_value(status)}")
 
 
 def _render_plan(incident: dict[str, Any]) -> None:
-    st.subheader("Investigation Plan")
+    st.subheader("调查计划")
     plan_rows = [
         {
-            "Step": item["step_id"],
-            "Hypothesis": item["hypothesis_id"],
-            "Purpose": item["purpose"],
-            "Tool": item["tool"],
-            "Expected evidence": "; ".join(item["expected_evidence"]),
-            "Execution": item["execution_status"],
+            "步骤": item["step_id"],
+            "假设": item["hypothesis_id"],
+            "目的": _display_text(item["purpose"]),
+            "工具": item["tool"],
+            "预期证据": "；".join(
+                _display_text(value) for value in item["expected_evidence"]
+            ),
+            "执行状态": _display_value(item["execution_status"]),
         }
         for item in incident["plan"]
     ]
     st.dataframe(plan_rows, use_container_width=True, hide_index=True)
-    with st.expander("Read-only SQL investigation", expanded=False):
+    with st.expander("只读 SQL 调查", expanded=False):
         for item in incident["plan"]:
             if item.get("sql"):
-                st.caption(f'{item["step_id"]} · {item["purpose"]}')
+                st.caption(f'{item["step_id"]} · {_display_text(item["purpose"])}')
                 st.code(item["sql"], language="sql")
 
 
 def _render_tool_trace(incident: dict[str, Any]) -> None:
-    st.subheader("Tool Trace")
+    st.subheader("工具调用轨迹")
     trace_rows = [
         {
             "#": item["position"],
-            "Tool": item["tool"],
-            "Result": "SUCCESS" if item["success"] else "FAILURE",
-            "Query ID": item.get("query_id") or "-",
-            "Rows": item.get("row_count"),
-            "Validation": (
-                "passed"
+            "工具": item["tool"],
+            "结果": "成功" if item["success"] else "失败",
+            "查询 ID": item.get("query_id") or "-",
+            "行数": item.get("row_count"),
+            "验证": (
+                "通过"
                 if item.get("validation", {}).get("passed")
-                else ("failed" if item.get("validation") else "n/a")
+                else ("失败" if item.get("validation") else "不适用")
             ),
-            "Summary": item["result_summary"],
+            "摘要": _display_text(item["result_summary"]),
         }
         for item in incident["tool_trace"]
     ]
@@ -157,11 +308,11 @@ def _render_tool_trace(incident: dict[str, Any]) -> None:
     for item in incident["tool_trace"]:
         label = (
             f'#{item["position"]} {item["tool"]} · '
-            f'{"success" if item["success"] else "failure"}'
+            f'{"成功" if item["success"] else "失败"}'
         )
         with st.expander(label, expanded=False):
             if item.get("error"):
-                st.error(item["error"])
+                st.error(_display_error(item["error"]))
             st.json(
                 {
                     "query_id": item.get("query_id"),
@@ -172,37 +323,37 @@ def _render_tool_trace(incident: dict[str, Any]) -> None:
 
 
 def _render_root_cause(incident: dict[str, Any]) -> None:
-    st.subheader("Root Cause & Evidence")
+    st.subheader("根因与证据")
     root_cause = incident.get("root_cause")
     if not root_cause:
-        st.info("No root cause has been authorized.")
+        st.info("尚未授权任何根因结论。")
         return
     left, right = st.columns([1, 2])
     with left:
-        st.metric("Root cause", root_cause["root_cause_type"])
-        st.metric("Confidence", f'{root_cause["confidence"]:.0%}')
-        st.caption("Affected assets")
+        st.metric("根因", _display_value(root_cause["root_cause_type"]))
+        st.metric("置信度", f'{root_cause["confidence"]:.0%}')
+        st.caption("受影响资产")
         st.write(", ".join(root_cause["affected_assets"]) or "-")
-        st.caption("Independent evidence sources")
+        st.caption("独立证据来源")
         badges = "".join(
-            f'<span class="ds-source">{source}</span>'
+            f'<span class="ds-source">{_display_value(source)}</span>'
             for source in root_cause["independent_source_types"]
         )
         st.markdown(badges, unsafe_allow_html=True)
     with right:
         evidence_rows = [
             {
-                "Evidence ID": item["evidence_id"],
-                "Source type": item["source_type"],
-                "Finding": item["finding"],
-                "Query ID": item.get("query_id") or "-",
+                "证据 ID": item["evidence_id"],
+                "来源类型": _display_value(item["source_type"]),
+                "发现": _display_text(item["finding"]),
+                "查询 ID": item.get("query_id") or "-",
             }
             for item in incident["evidence"]
         ]
         st.dataframe(evidence_rows, use_container_width=True, hide_index=True)
         for item in incident["evidence"]:
             with st.expander(
-                f'{item["source_type"]} observation',
+                f'{_display_value(item["source_type"])}观测详情',
                 expanded=False,
             ):
                 st.json(item["observation"])
@@ -212,40 +363,40 @@ def _render_approval(incident: dict[str, Any]) -> None:
     proposal = incident.get("repair_proposal")
     if not proposal:
         return
-    st.subheader("Human Approval")
+    st.subheader("人工审批")
     cols = st.columns(4)
-    cols[0].metric("Action", proposal["action"])
-    cols[1].metric("Risk", proposal["risk"].upper())
-    cols[2].metric("Assets", len(proposal["affected_assets"]))
-    cols[3].metric("Evidence bindings", len(proposal["evidence_bindings"]))
-    st.write(proposal["rationale"])
-    with st.expander("Proposal scope", expanded=False):
+    cols[0].metric("动作", _display_value(proposal["action"]))
+    cols[1].metric("风险", _display_value(proposal["risk"]))
+    cols[2].metric("资产数", len(proposal["affected_assets"]))
+    cols[3].metric("证据绑定数", len(proposal["evidence_bindings"]))
+    st.write(_display_text(proposal["rationale"]))
+    with st.expander("方案范围", expanded=False):
         st.json(proposal)
     st.markdown(
-        '<div class="ds-callout">Repair runs in an isolated sandbox only. '
-        "No production database is modified.</div>",
+        '<div class="ds-callout">修复只在隔离沙箱中运行，'
+        "不会修改生产数据库。</div>",
         unsafe_allow_html=True,
     )
     if not incident["can_approve"]:
         approval = incident.get("approval")
         if approval:
             st.success(
-                f'{approval["outcome"].upper()} by {approval["reviewer"]} · '
-                f'{approval.get("comment") or "No comment"}'
+                f'{_display_value(approval["outcome"])} · 审批人：'
+                f'{approval["reviewer"]} · {approval.get("comment") or "无备注"}'
             )
         return
     with st.form("approval-form"):
-        reviewer = st.text_input("Reviewer", value="demo-reviewer")
-        comment = st.text_area("Optional comment", height=80)
+        reviewer = st.text_input("审批人", value="演示审批人")
+        comment = st.text_area("备注（可选；拒绝时必填）", height=80)
         approve_col, reject_col, _ = st.columns([1, 1, 4])
-        approve = approve_col.form_submit_button("Approve", type="primary")
-        reject = reject_col.form_submit_button("Reject")
+        approve = approve_col.form_submit_button("批准", type="primary")
+        reject = reject_col.form_submit_button("拒绝")
     if approve or reject:
         if reject and not comment.strip():
-            st.error("A rejection comment is required.")
+            st.error("拒绝时必须填写备注。")
             return
         try:
-            with st.spinner("Applying the approval decision..."):
+            with st.spinner("正在提交审批决定..."):
                 client.submit_approval(
                     incident["incident_id"],
                     reviewer=reviewer,
@@ -253,7 +404,7 @@ def _render_approval(incident: dict[str, Any]) -> None:
                     comment=comment,
                 )
         except DemoApiError as error:
-            st.error(str(error))
+            st.error(_display_error(error))
             return
         _rerun()
 
@@ -261,12 +412,12 @@ def _render_approval(incident: dict[str, Any]) -> None:
 def _render_repair_and_report(incident: dict[str, Any]) -> None:
     repair = incident.get("repair")
     if repair:
-        st.subheader("Sandbox Repair")
+        st.subheader("沙箱修复")
         cols = st.columns(4)
-        cols[0].metric("Run ID", repair["run_id"][:18] + "…")
-        cols[1].metric("Action", repair["action"])
-        cols[2].metric("Status", repair["status"].upper())
-        cols[3].metric("Handler invocations", repair["handler_invocation_count"])
+        cols[0].metric("运行 ID", repair["run_id"][:18] + "…")
+        cols[1].metric("动作", _display_value(repair["action"]))
+        cols[2].metric("状态", _display_value(repair["status"]))
+        cols[3].metric("处理器调用次数", repair["handler_invocation_count"])
         if repair.get("changed_row_counts"):
             st.dataframe(
                 [repair["changed_row_counts"]],
@@ -275,30 +426,30 @@ def _render_repair_and_report(incident: dict[str, Any]) -> None:
             )
     validation = incident.get("post_validation")
     if validation:
-        st.subheader("Post Validation")
+        st.subheader("修复后验证")
         cols = st.columns(4)
-        cols[0].metric("Status", validation["status"].upper())
-        cols[1].metric("Before", f'{validation["observed_before"]:g}')
-        cols[2].metric("After", f'{validation["observed_after"]:g}')
-        cols[3].metric("Target met", "YES" if validation["target_met"] else "NO")
-        st.write(validation["summary"])
+        cols[0].metric("状态", _display_value(validation["status"]))
+        cols[1].metric("修复前", f'{validation["observed_before"]:g}')
+        cols[2].metric("修复后", f'{validation["observed_after"]:g}')
+        cols[3].metric("达到目标", "是" if validation["target_met"] else "否")
+        st.write(_display_text(validation["summary"]))
     if incident["terminal"]:
         final_status = incident.get("final_status") or incident["status"]
         st.markdown(
-            f'<div class="ds-terminal">Final status · {final_status}</div>',
+            f'<div class="ds-terminal">最终状态 · {_display_value(final_status)}</div>',
             unsafe_allow_html=True,
         )
-        st.subheader("Final Incident Report")
+        st.subheader("最终事件报告")
         report = incident.get("final_report")
         if report:
             report_json = json.dumps(report, indent=2, sort_keys=True)
             st.download_button(
-                "Download final report JSON",
+                "下载最终报告 JSON",
                 data=report_json,
                 file_name=f'datasherlock-{incident["incident_id"]}.json',
                 mime="application/json",
             )
-            with st.expander("Final report preview", expanded=False):
+            with st.expander("最终报告预览", expanded=False):
                 st.json(report)
 
 
@@ -307,28 +458,30 @@ def _render_incident(incident: dict[str, Any]) -> None:
     top_left, top_right = st.columns([3, 1])
     with top_left:
         st.markdown(
-            '<div class="ds-kicker">Canonical Incident</div>',
+            '<div class="ds-kicker">标准事件</div>',
             unsafe_allow_html=True,
         )
         st.markdown(
-            f'<div class="ds-title">{case["case_id"]} · {case["metric"]}</div>',
+            f'<div class="ds-title">{case["case_id"]} · '
+            f'{_display_value(case["metric"])}</div>',
             unsafe_allow_html=True,
         )
         st.caption(
-            f'Incident {incident["incident_id"]} · deterministic smoke · 0 model calls'
+            f'事件 {incident["incident_id"]} · 确定性冒烟测试 · 0 次模型调用'
         )
     with top_right:
         css = "terminal" if incident["terminal"] else "active"
         st.markdown(
-            f'<div class="ds-status {css}">{incident["status"]}</div>',
+            f'<div class="ds-status {css}">'
+            f'{_display_value(incident["status"])}</div>',
             unsafe_allow_html=True,
         )
     alert_cols = st.columns(4)
-    alert_cols[0].metric("Observed", f'{incident["alert"]["observed_value"]:g}')
-    alert_cols[1].metric("Expected", f'{incident["alert"]["expected_value"]:g}')
-    alert_cols[2].metric("Change", f'{incident["alert"]["change_rate"]:.1%}')
-    alert_cols[3].metric("Severity", incident["alert"]["severity"].upper())
-    st.subheader("Harness Status")
+    alert_cols[0].metric("观测值", f'{incident["alert"]["observed_value"]:g}')
+    alert_cols[1].metric("预期值", f'{incident["alert"]["expected_value"]:g}')
+    alert_cols[2].metric("变化率", f'{incident["alert"]["change_rate"]:.1%}')
+    alert_cols[3].metric("严重级别", _display_value(incident["alert"]["severity"]))
+    st.subheader("Harness 状态")
     _status_flow(incident["status"])
     _render_plan(incident)
     _render_tool_trace(incident)
@@ -344,38 +497,38 @@ def _render_benchmark() -> None:
         _api_failure(error)
         return
     st.markdown(
-        '<div class="ds-kicker">Read-only Evaluation Artifact</div>',
+        '<div class="ds-kicker">只读评估产物</div>',
         unsafe_allow_html=True,
     )
-    st.header("Frozen Benchmark Snapshot")
-    st.caption(f'{snapshot["run_id"]} · source commit {snapshot["source_commit"]}')
+    st.header("冻结的基准快照")
+    st.caption(f'{snapshot["run_id"]} · 来源提交 {snapshot["source_commit"]}')
     st.warning(
-        "Frozen historical benchmark. Not current-main accuracy. "
-        "No post-PR20 real-model rerun has been performed."
+        "这是冻结的历史基准结果，并非当前 main 分支的准确率。"
+        "PR #20 之后尚未重新运行真实模型。"
     )
     rows = snapshot["rows"]
     table_rows = [
         {
-            "Variant": row["display_name"],
+            "变体": _display_value(row["display_name"]),
             "Top-1": row["top_1"],
             "Top-3": row["top_3"],
-            "Invalid SQL": row["invalid_sql_rate"],
-            "Unsafe": row["unsafe_rate"],
-            "Duplicate": row["duplicate_rate"],
-            "Avg tools": row["avg_tool_calls"],
-            "Avg SQL": row["avg_sql_calls"],
-            "Mean latency ms": row["mean_latency_ms"],
-            "Errors": row["errors"],
-            "Timeouts": row["timeouts"],
-            "Abstentions": row["abstentions"],
+            "无效 SQL 率": row["invalid_sql_rate"],
+            "不安全操作率": row["unsafe_rate"],
+            "重复操作率": row["duplicate_rate"],
+            "平均工具调用数": row["avg_tool_calls"],
+            "平均 SQL 调用数": row["avg_sql_calls"],
+            "平均延迟（毫秒）": row["mean_latency_ms"],
+            "错误数": row["errors"],
+            "超时数": row["timeouts"],
+            "弃答数": row["abstentions"],
         }
         for row in rows
     ]
     st.dataframe(table_rows, use_container_width=True, hide_index=True)
-    st.subheader("Top-k Accuracy")
+    st.subheader("Top-k 准确率")
     st.bar_chart(
         {
-            row["display_name"]: {
+            _display_value(row["display_name"]): {
                 "Top-1": row["top_1"],
                 "Top-3": row["top_3"],
             }
@@ -385,12 +538,12 @@ def _render_benchmark() -> None:
 
 
 st.markdown(
-    '<div class="ds-kicker">Incident Diagnosis Runtime</div>',
+    '<div class="ds-kicker">事件诊断运行台</div>',
     unsafe_allow_html=True,
 )
 st.title("DataSherlock Harness")
 st.markdown(
-    '<div class="ds-subtitle">Canonical deterministic incident demonstration</div>',
+    '<div class="ds-subtitle">标准确定性事件诊断演示</div>',
     unsafe_allow_html=True,
 )
 
@@ -403,40 +556,40 @@ except DemoApiError as api_error:
     st.stop()
 
 with st.sidebar:
-    st.subheader("Runtime")
+    st.subheader("运行状态")
     if health.get("status") == "ok":
-        st.success("API healthy")
+        st.success("API 运行正常")
     else:
-        st.warning(f'API {health.get("status", "unknown")}')
-    st.caption("Deterministic smoke · 0 model calls")
+        st.warning(f'API：{_display_value(health.get("status", "unknown"))}')
+    st.caption("确定性冒烟测试 · 0 次模型调用")
     st.divider()
-    st.subheader("Anomaly / Case Selection")
+    st.subheader("异常案例选择")
     case_ids = [item["case_id"] for item in cases]
-    selected_case_id = st.selectbox("Canonical case", case_ids, index=0)
+    selected_case_id = st.selectbox("标准案例", case_ids, index=0)
     selected_case = next(item for item in cases if item["case_id"] == selected_case_id)
-    st.metric("Metric", selected_case["metric"])
+    st.metric("指标", _display_value(selected_case["metric"]))
     case_cols = st.columns(2)
-    case_cols[0].metric("Observed", f'{selected_case["observed_value"]:g}')
-    case_cols[1].metric("Expected", f'{selected_case["expected_value"]:g}')
-    st.metric("Change", f'{selected_case["change_rate"]:.1%}')
+    case_cols[0].metric("观测值", f'{selected_case["observed_value"]:g}')
+    case_cols[1].metric("预期值", f'{selected_case["expected_value"]:g}')
+    st.metric("变化率", f'{selected_case["change_rate"]:.1%}')
     if not selected_case["interactive_supported"]:
-        st.caption("Diagnosis demo not enabled for this case.")
+        st.caption("此案例尚未启用交互式诊断演示。")
     if st.button(
-        "Start Diagnosis",
+        "开始诊断",
         type="primary",
         use_container_width=True,
         disabled=not selected_case["interactive_supported"],
     ):
         try:
-            with st.spinner("Running the current Harness..."):
+            with st.spinner("正在运行当前 Harness..."):
                 started = client.start_incident(selected_case_id)
         except DemoApiError as error:
-            st.error(str(error))
+            st.error(_display_error(error))
         else:
             _set_incident_id(started["incident_id"])
             _rerun()
     st.divider()
-    st.subheader("Recent Incidents")
+    st.subheader("最近事件")
     incident_options = [""] + [item["incident_id"] for item in incidents]
     current_query_id = _query_incident_id()
     selected_index = (
@@ -445,15 +598,16 @@ with st.sidebar:
         else 0
     )
     selected_incident_id = st.selectbox(
-        "Persisted sessions",
+        "已保存会话",
         incident_options,
         index=selected_index,
         format_func=lambda value: (
-            "Select an incident"
+            "选择一个事件"
             if not value
             else next(
                 (
-                    f'{item["case_id"]} · {item["status"]} · {value[:8]}'
+                    f'{item["case_id"]} · {_display_value(item["status"])} · '
+                    f'{value[:8]}'
                     for item in incidents
                     if item["incident_id"] == value
                 ),
@@ -465,27 +619,27 @@ with st.sidebar:
         _set_incident_id(selected_incident_id)
         _rerun()
 
-incident_tab, benchmark_tab = st.tabs(["Incident Demo", "Benchmark Snapshot"])
+incident_tab, benchmark_tab = st.tabs(["事件演示", "基准快照"])
 with incident_tab:
     incident_id = _query_incident_id()
     if incident_id:
         try:
             current_incident = client.get_incident(incident_id)
         except DemoApiError as error:
-            st.error(str(error))
+            st.error(_display_error(error))
         else:
             _render_incident(current_incident)
     else:
-        st.info("Select an interactive canonical case and start diagnosis.")
+        st.info("请选择支持交互的标准案例并开始诊断。")
         supported = [item for item in cases if item["interactive_supported"]]
         st.dataframe(
             [
                 {
-                    "Case": item["case_id"],
-                    "Metric": item["metric"],
-                    "Observed": item["observed_value"],
-                    "Expected": item["expected_value"],
-                    "Change": item["change_rate"],
+                    "案例": item["case_id"],
+                    "指标": _display_value(item["metric"]),
+                    "观测值": item["observed_value"],
+                    "预期值": item["expected_value"],
+                    "变化率": item["change_rate"],
                 }
                 for item in supported
             ],
