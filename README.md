@@ -69,16 +69,21 @@ the execution properties needed for a reproducible incident workflow:
 | Four-architecture ablation | Implemented |
 | Logical fixture fingerprint | Implemented |
 | Failure and abstention audits | Implemented |
-| Full diagnosis Streamlit UI | Pending / P1 |
+| Streamlit canonical incident demo | Implemented |
+| Production multi-user incident console | Out of current scope |
 | Production warehouse connector | Out of current scope |
 
-The current public API is `GET /health`. The current Streamlit application is a
-health shell, not the final diagnostic interface.
+The public API keeps `GET /health` and adds `/demo/*` canonical demonstration
+endpoints. These are demo APIs, not the legacy production incident API from
+`chore/project-structure`.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
+    UI[Streamlit Demo UI] -->|HTTP JSON only| API[FastAPI health + demo API]
+    API --> DS[DemoService]
+    DS --> A
     A[Metric Alert] --> P[Planner]
     P --> IP[Investigation Plan]
     IP --> HG[HarnessGraph]
@@ -125,8 +130,8 @@ Compose starts four services:
 | --- | --- |
 | `data-init` | Generates Parquet artifacts and the DuckDB database, then exits |
 | `postgres` | Current infrastructure dependency and health target |
-| `api` | FastAPI service exposing `GET /health` |
-| `frontend` | Streamlit health shell |
+| `api` | FastAPI health and canonical `/demo/*` endpoints |
+| `frontend` | Streamlit canonical incident demo over HTTP JSON |
 
 Open:
 
@@ -161,6 +166,7 @@ Copy `.env.example` to `.env`. Do not commit credentials.
 | `POSTGRES_USER` | Postgres user |
 | `POSTGRES_PASSWORD` | Local Postgres password |
 | `DUCKDB_PATH` | DuckDB path used by the API health probe |
+| `DEMO_WORKDIR` | File-backed demo workspace, default `data/demo` |
 | `MODEL_PROVIDER` | Model provider selected by the model factory |
 | `OPENAI_API_KEY` | OpenAI credential; empty by default |
 | `OPENAI_MODEL` | Model name for real-provider execution |
@@ -413,7 +419,7 @@ production mutation.
 ## Project Structure
 
 ```text
-app/                    Streamlit health shell
+app/                    HTTP-only Streamlit incident demo
 benchmark/              canonical cases, Ground Truth, and variant inputs
 config/                 metric semantics and fault contracts
 docs/                   architecture and frozen evaluation reports
@@ -435,19 +441,20 @@ specialist documents for Planner, evidence, and Data Quality contracts.
 
 ## Demo Screenshots
 
-### Current Streamlit Health Shell
+### F01 Awaiting Human Approval
 
-![Current Streamlit health shell](docs/assets/streamlit-health.png)
+![F01 incident awaiting approval](docs/assets/streamlit-f01-awaiting-approval.png)
 
-Current Streamlit health shell. Full diagnosis UI remains P1. This screenshot
-was captured from the real Docker Compose runtime in GitHub Actions.
+The current Harness has authorized `missing_partition`, bound two independent
+evidence sources, and stopped at `AWAITING_APPROVAL`. Captured from the real
+Docker Compose runtime.
 
-### API Health
+### F01 Resolved In Sandbox
 
-![API health](docs/assets/api-health.png)
+![F01 incident resolved after sandbox repair](docs/assets/streamlit-f01-resolved.png)
 
-The current public API exposes `GET /health`, which verifies both DuckDB and
-Postgres dependencies. This screenshot was captured from the same real runtime.
+The approved repair ran exactly once in an isolated sandbox, passed current
+post-validation, and reached `RESOLVED`. Captured from the same real runtime.
 
 ## Known Limitations
 
@@ -457,9 +464,11 @@ Postgres dependencies. This screenshot was captured from the same real runtime.
 4. F02/F03/F06/F07/F08/F09 have no complete catalog-declared independent source contract.
 5. F05/F06/F07/F08/F09/F12 still need stronger causal runtime observations.
 6. Provider token/currency accounting can be incomplete, so cost can be unknown.
-7. Streamlit is a health shell, not the final diagnosis UI.
-8. Production warehouse connectivity and production writes are out of scope.
-9. `chore/project-structure` contains unported incident API, approval-authentication,
+7. Streamlit implements a deterministic canonical incident demonstration, not
+   a production multi-user incident management console.
+8. Interactive repair is currently limited to the five validated F01 demo cases.
+9. Production warehouse connectivity and production writes are out of scope.
+10. `chore/project-structure` contains unported incident API, approval-authentication,
    Postgres checkpoint, optimistic-revision, and audit-stream concepts. They are
    legacy branch capabilities, not current-main runtime behavior.
 
